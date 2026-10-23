@@ -107,9 +107,10 @@ async function candidatePort(signal: AbortSignal): Promise<number> {
  * the private control socket's acknowledged forward, never an arbitrary TCP
  * listener at the candidate port. The remote Harness process is not managed.
  */
-export async function connectTunnel(input: { target: string; remotePort: number; signal?: AbortSignal }, options: SshTunnelOptions = {}): Promise<Tunnel> {
+export async function connectTunnel(input: { target: string; remotePort: number; preferredLocalPort?: number; signal?: AbortSignal }, options: SshTunnelOptions = {}): Promise<Tunnel> {
   const target = parseTarget(input.target)
   if (!Number.isInteger(input.remotePort) || input.remotePort < 1 || input.remotePort > 65535) throw new TypeError('Invalid remote port.')
+  if (input.preferredLocalPort !== undefined && (!Number.isInteger(input.preferredLocalPort) || input.preferredLocalPort < 1 || input.preferredLocalPort > 65535)) throw new TypeError('Invalid preferred local port.')
   if (input.signal?.aborted) throw cancelled()
   const startupTimeoutMs = options.startupTimeoutMs ?? 20_000
   const controlTimeoutMs = options.controlTimeoutMs ?? 3_000
@@ -243,7 +244,7 @@ export async function connectTunnel(input: { target: string; remotePort: number;
     }
 
     for (let attempt = 0; attempt < 4; attempt++) {
-      const candidate = await candidatePort(controller.signal)
+      const candidate = attempt === 0 && input.preferredLocalPort !== undefined ? input.preferredLocalPort : await candidatePort(controller.signal)
       const forward = await runControl([
         '-F', 'none', '-S', controlPath, '-o', 'ExitOnForwardFailure=yes', '-O', 'forward',
         '-L', `127.0.0.1:${candidate}:127.0.0.1:${input.remotePort}`, '--', target,

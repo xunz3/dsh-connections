@@ -1,67 +1,77 @@
-# Connections: scope and implementation plan
+# Connections design
 
-Research baseline: 2026-10-23. Harness `0.2.1-rc.2` is the current npm `latest`; `next` is `0.2.1-rc.3`. The first release targets `0.2.1-rc.2`.
+Source review: 2026-10-24. Target Harness API baseline: `0.2.1-rc.2`. The remote installer pins this version; updates require an explicit exact `0.2.x` version.
 
 ## Dependency decision
 
-| Dependency | Purpose |
+| Dependency | Responsibility |
 | --- | --- |
-| System OpenSSH | SSH configuration, agent authentication, known_hosts, jump hosts, encrypted forwarding |
-| Node >=22.12 | Child processes, loopback sockets, HTTP readiness checks, UUIDs |
-| `@deepseek-ai/cordis` 4.0.5 | Harness plugin lifecycle |
-| Harness credentials, Typert protocol/registry 0.2.1-rc.2 | Existing private credential storage and authenticated owner RPC |
-| Harness api-remotes, ui-settings, ui-slots, ui-renderer, locale | Native settings entry and browser plugin integration; build-time dependencies |
-| React 18, TypeScript 5.9, esbuild, tsx, Playwright | Client compilation and meaningful transport/UI verification |
+| System OpenSSH | SSH config, key/agent authentication, host trust, jump hosts and encrypted forwarding |
+| Node >=22.12 locally | Child processes, sockets, native HTTP checks and validation |
+| Remote Linux, Node 22.19+ or >=24, npm, systemd, flock, tar | Native Harness installation, persistent user service, maintenance locking and rollback snapshot |
+| Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.2 | Plugin lifecycle, existing private records and authenticated owner RPC |
+| Harness api-remotes, settings, slots, renderer, locale, workspace, layout | Existing client services and extension points; build-time dependencies |
+| Harness sidebar-browser bridge types | Desktop guest lease and isolation; no Electron runtime dependency |
+| React 18, TypeScript 5.9, esbuild, tsx, Playwright | Compilation and transport, lifecycle and UI verification |
 
-No SSH protocol library, SFTP, HTTP proxy, database, job system, remote tool suite, or daemon is needed. Harness supplies peer dependencies at runtime. React and client services use its ModuleLoader.
+There are no added production dependency packages. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, process supervisor, automation engine or cloud relay is introduced.
 
-## What is being built
+## Why not just enable official SSH plugins?
 
-One entity: a saved SSH connection. Its private authorization record holds the SSH target and remote Harness launch credential. Reuse Harness credentials to persist it; do not create a second settings/credential database. Public list/status responses project only non-secret fields.
+The official [SSH subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/ssh.md) already provides `@deepseek-ai/dsh-ssh`, `fs-ssh`, `process-ssh`, `env-ssh` and remote-agent support. Use these when a local Harness session should execute tools against a remote machine. Their SSH helper is scoped to the transport/lease lifetime; it is not a persistent full remote Harness Host.
 
-The settings page saves a name, SSH target, and the launch URL printed by a running remote `dsh web`. Connect establishes a loopback-only tunnel. Open launches the remote native Harness UI in a separate browser tab. Disconnect closes only the owned SSH connection. Reconnect attaches to the same remote server; it never replays prompts or starts another Harness.
+This plugin serves a different requirement: the complete Harness, with sessions, approvals, providers, plugins and files, lives on the remote computer and remains available after the controller exits. Its interface is the native remote Harness interface. The official [fs-ssh provider](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/ssh/fs-ssh/README.md) alone does not make the current native workspace picker remote: that flow also uses Host-local filesystem operations, and the provider does not implement filesystem watching. Adding it here would duplicate the full remote Host's filesystem access without solving Host lifetime.
 
-The agent runtime, sessions, history, approvals, files, terminal, providers, plugins, and model credentials remain on the remote Harness. There is no local mirror and no replacement session UI.
+Reuse the official providers if a future feature needs local sessions with remote execution. Do not make them a dependency simply because both products use SSH. Reassess this design if Harness introduces a public persistent Host/service or live client Host-switch API.
+
+## One entity: the connection
+
+A saved connection contains a name, SSH target, mode, auto-connect preference and the last successfully bound local port. It uses the existing Harness credentials provider, not another database. An existing-service connection also holds its launch credential. A managed connection retrieves a fresh credential from its private remote service log on each connection and never persists that token locally.
+
+Public views expose status, address and runtime version, never launch credentials. The owner-only Open operation returns the authenticated local URL. The UI remembers only the selected connection ID. Projects and session identities remain native Harness data.
 
 ```text
-Local Harness settings → owner-only Connections RPC → system OpenSSH
-Local browser          → 127.0.0.1 tunnel             → remote 127.0.0.1 dsh web
+Local native project picker → Connections host chooser
+  ├─ This computer → original native directory flow
+  └─ Remote host   → native remote Harness interface
+
+Local owner RPC → system SSH → systemd user service → native dsh web
+Local UI        → owned loopback SSH tunnel        → remote loopback Web Host
 ```
 
-The plugin runs on the local Harness Host. The browser opening the tunnel must be on that same computer. A loopback-looking URL alone cannot prove this (the local Harness may itself be reached through a tunnel).
+## Persistent remote lifecycle
 
-## Why attach an existing Host first
+The first managed connection installs a pinned native Harness in `~/.local/share/dsh-connections`, with a dedicated `DSH_HOME` and `DSH_AGENTS_HOME`. It never adopts or modifies the user's default `.dsh` installation. A marked `dsh-connections.service` user unit is enabled with restart-on-failure. Persistent availability requires `loginctl enable-linger`; the plugin checks it and reports the prerequisite instead of changing host login policy.
 
-Harness has no public live switchHost client API and no reusable daemon supervisor in this baseline. Starting extra Hosts under one home can encounter existing session writer leases; a configured persistent FTS index also has single-process ownership. The first version therefore attaches to a running native Web Host. Users manage its lifetime with their normal terminal or OS service manager.
+Systemd owns the process. Disconnect, removal and local plugin unload close local tunnels only. Reconnecting starts an inactive owned service or reuses the running one, retrieves its current credential, then opens SSH forwarding. It does not implicitly update, replay a prompt or create a second Host. Multiple controllers serialize remote maintenance with `flock`.
 
-This is a complete SSH connection path, not automatic remote installation or bootstrap. Disconnect leaves the existing remote Host running. Task survival still depends on that Host, its policies, and its operating system; the plugin does not promise reboot or crash recovery.
+Updates are explicit exact-version operations. Install and validate the requested release while the old Host is running, then stop its sole writer, snapshot managed state, atomically select the new release and verify native readiness. Failed startup restores the previous release and state. A private transaction journal supports recovery after interrupted maintenance. A transient systemd unit owns maintenance so closing the controller does not kill an in-progress update. Project directories outside the managed state are not rolled back.
 
-## Transport and authentication
+Only the remote SSH user's proxy, CA and npm network configuration is passed through a private environment file. Local environment values and model credentials are not copied. Installation logs, launch logs, state and maintenance results stay private to the remote user.
 
-- Delegate aliases, Include, Match, ProxyJump, ProxyCommand, agent and key handling to OpenSSH. Accept a target, never a command or arbitrary SSH flags.
-- Require pre-established host trust with `StrictHostKeyChecking=yes` and noninteractive `BatchMode=yes`. Do not import private keys, store passwords, or enable agent forwarding.
-- Own a private SSH control master so config forwards can be cleared before adding exactly one loopback forward. Never reuse or terminate a user's unrelated master.
-- Bound startup and health checks; cancel pending connection attempts on disconnect/unload. A dropped connection becomes disconnected/error, not a failed remote task. Reconnect is explicit.
-- Only accept `http://127.0.0.1:PORT/?token=...` (or localhost) as the remote launch URL. The destination of the SSH forward is always remote `127.0.0.1`.
-- Preserve HTTP Host and Origin through raw TCP. Harness keeps application authentication inside SSH; do not disable it or rewrite authority.
-- Current Harness launch tokens are reusable for that process, not one-time credentials. Its signed browser cookies are authority-specific, including port, so multiple local forwards can coexist. A restarted Host needs a fresh launch URL.
-- Do not include tokens in status, logs, errors, config, or SSH argv. Return an authenticated local URL only from the explicit owner-only Open operation. Open with no opener/referrer.
-- Owner authentication protects all management RPCs, including reads. Remote plugin code stays in the separate remote origin and has no bridge into local plugin services.
+## Native project and file UI
 
-## Delivery sequence
+Harness has no public live `switchHost` client contract in this baseline. The plugin adds a host chooser at the native `directoryFlow` slots, delegates local selection to the original slot and uses the shell overlay slot for a full remote native interface. A remote path never reaches the local `onPicked` callback. The remote Host supplies its original directory picker, sidebar file tree, preview, terminal, sessions and approvals.
 
-1. Record dependency and architecture decisions before implementation.
-2. Implement shared validation/RPC contract, owned OpenSSH transport, credential-backed connection manager, native settings UI.
-3. Verify host-key failure, forwarding failure, cancellation, races, disconnect/reconnect, credential isolation, actual loopback SSH and browser behavior.
-4. Validate the package and make a local initial Git commit. No publication or remote push is implied.
+Web uses a same-site loopback iframe to preserve native Strict authentication cookies. Desktop uses the existing sidebar-browser lease bridge and its isolated guest. The remote interface has no bridge into local plugin services. Returning local closes only the view.
 
-## Reference findings
+The last tunnel port is a preference, not a reservation: OpenSSH must successfully acknowledge ownership before any authentication request. An occupied port falls back to a fresh port. Stable browser origin normally preserves native selected project and sidebar state across local Host restart. The native desktop bridge currently uses nonpersistent guest partitions, so a full desktop app exit restores the remote connection but may require selecting the project again. Do not bypass that bridge to persist cookies.
 
-- [Harness source, 687f282e](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317): `packages/client/connection` provides browser auth and transport; `packages/ssh/ssh` is a non-reconnecting remote execution helper, not a persistent remote Host. `packages/session/session-persistence-jsonl` owns session writer leases.
-- [flymysql/dsh-remote, 03ba582d](https://github.com/flymysql/dsh-remote/blob/03ba582d0001c9eecdc6114d119fbbc4027c7b64/lib/web-attach.js): verifies the architectural usefulness of native Web attach. Its broader file tools/mirroring/deployment are outside this plugin's scope. The source comment calling launch tokens one-time does not match current Harness.
-- [UynajGI/dsh-ssh, 5b7b4514](https://github.com/UynajGI/dsh-ssh/tree/5b7b451477f61d9b5444d3a02b8773abaeb56ba9): execution-backend integration; its relaxed host-key verification and plaintext credential persistence are not adopted.
-- [dsh-ssh/dsh-ssh, 17764146](https://github.com/dsh-ssh/dsh-ssh/tree/17764146e474b44222d12a95c585b5de782f9daa): remote tool replacements, which this project avoids by opening the complete remote Host.
-- [Blank-not-black/dsh-Remote, 813db951](https://github.com/Blank-not-black/dsh-Remote/tree/813db9518ae250a38a0c7262c4ec330cc8d67c63): gateway/device UI reference for later research; not a dependency.
-- [Codex remote connections](https://learn.chatgpt.com/docs/remote-connections) and [public daemon source, 2839ed76](https://github.com/openai/codex/blob/2839ed763bd3f404398e1f0c95bf4e2d172213c0/codex-rs/app-server-daemon/README.md): separate transport, session, and process lifetimes. Codex now publishes daemon and remote-control host code, but its ChatGPT relay authentication is not reusable for Harness.
+## Transport boundaries
 
-No source from these projects is vendored into this plugin.
+- Delegate aliases, Include, Match, ProxyJump and authentication to OpenSSH; accept a target, never arbitrary SSH flags or a shell command.
+- Use `BatchMode=yes`, `StrictHostKeyChecking=yes`, no agent forwarding, and private owned control masters. Never terminate unrelated SSH masters.
+- Bind forwarding to local `127.0.0.1`, targeting remote `127.0.0.1`. Preserve HTTP Host/Origin and native application authentication.
+- Bound startup, authentication and shutdown; cancel stale attempts and reject late Open results after destination changes or disconnection.
+- Accept only validated native loopback launch URLs. Keep credentials out of SSH argv, public status, errors and diagnostics.
+- Run management scripts through fixed SSH commands with configuration on stdin. Reject conflicting remote directories, unit files, loaded commands or unit drop-ins rather than taking ownership.
+- The browser must run on the local Harness computer. A loopback-looking URL cannot prove this if the user forwarded the local Harness from a different computer.
+
+## References
+
+- [Harness source, 687f282e](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317): public client slots, credentials, native workspace/files and SSH providers.
+- [flymysql/dsh-remote, 03ba582d](https://github.com/flymysql/dsh-remote/blob/03ba582d0001c9eecdc6114d119fbbc4027c7b64/lib/web-attach.js): native Web attach reference; its broader file tools/mirroring are outside this scope. Current native launch tokens are process-lifetime credentials, not one-time tokens.
+- [UynajGI/dsh-ssh](https://github.com/UynajGI/dsh-ssh/tree/5b7b451477f61d9b5444d3a02b8773abaeb56ba9), [dsh-ssh/dsh-ssh](https://github.com/dsh-ssh/dsh-ssh/tree/17764146e474b44222d12a95c585b5de782f9daa): remote execution/tool alternatives; no replacement tools are needed here.
+- [Codex Connections](https://learn.chatgpt.com/docs/remote-connections) and [public daemon source](https://github.com/openai/codex/blob/2839ed763bd3f404398e1f0c95bf4e2d172213c0/codex-rs/app-server-daemon/README.md): separate transport, session and process lifetimes. ChatGPT relay authorization is not reusable for Harness.
+
+No reference-project source is vendored into this plugin.

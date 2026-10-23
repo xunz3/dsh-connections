@@ -47,6 +47,61 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+test('managed hosts retrieve fresh credentials, restore access after unload, and update only explicitly', async () => {
+  const provider = credentials()
+  const store = createStore(provider)
+  let prepares = 0
+  const updates: string[] = []
+  let version = '0.2.1-rc.2'
+  const host = () => ({ remotePort: 3080, token: TOKEN, version, pid: 512, service: 'systemd' as const })
+  const options = {
+    prepareHost: async () => { ++prepares; return host() },
+    updateHost: async (input: { version: string }) => { updates.push(input.version); version = input.version; return host() },
+    connectTunnel: async (input: { preferredLocalPort?: number }) => { if (prepares >= 2) assert.equal(input.preferredLocalPort, 41380); return fakeTunnel() }, probe: async () => {},
+  }
+  const manager = new ConnectionsManager(store, options)
+  const saved = await manager.save({ name: 'Managed', target: 'dev', mode: 'managed' })
+  assert.equal(saved.autoConnect, true)
+  assert.equal(saved.remotePort, undefined)
+  const connected = await manager.connect(saved.id)
+  assert.equal(connected.runtime?.pid, 512)
+  assert.equal(connected.runtime?.version, version)
+  assert.ok((await manager.open(saved.id)).url.includes(TOKEN))
+  assert.equal(JSON.stringify([...provider.records.values()]).includes(TOKEN), false)
+  await manager.dispose()
+  const reopened = new ConnectionsManager(createStore(provider), options)
+  await reopened.restore()
+  assert.equal(prepares, 2)
+  assert.equal((await reopened.list())[0]?.phase, 'connected')
+  assert.deepEqual(updates, [])
+  const updated = await reopened.update({ id: saved.id, version: '0.2.1-rc.3' })
+  assert.equal(updated.runtime?.version, '0.2.1-rc.3')
+  assert.deepEqual(updates, ['0.2.1-rc.3'])
+  await assert.rejects(reopened.update({ id: saved.id, version: 'latest' }), /exact compatible/)
+  await reopened.dispose()
+})
+
+test('cancelling local preparation never revives its tunnel after remote maintenance finishes', async () => {
+  const prepared = deferred<{ remotePort: number; token: string; version: string; service: 'systemd'; pid: number }>()
+  const entered = deferred<void>()
+  let tunnels = 0
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    prepareHost: async () => { entered.resolve(); return prepared.promise },
+    connectTunnel: async () => { ++tunnels; return fakeTunnel() }, probe: async () => {},
+  })
+  const saved = await manager.save({ name: 'Managed', target: 'dev', mode: 'managed' })
+  const connecting = manager.connect(saved.id)
+  const rejected = assert.rejects(connecting, /cancelled/)
+  await entered.promise
+  const disconnecting = manager.disconnect(saved.id)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  prepared.resolve({ remotePort: 3080, token: TOKEN, version: '0.2.1-rc.2', service: 'systemd', pid: 513 })
+  await rejected
+  assert.equal((await disconnecting).phase, 'disconnected')
+  assert.equal(tunnels, 0)
+  await manager.dispose()
+})
+
 test('native credentials store persists one complete connection and preserves an omitted token', async () => {
   const provider = credentials()
   const store = createStore(provider)
@@ -275,4 +330,55 @@ test('probe cancels a stalled HTTP response without exposing the credential', as
     controller.abort()
     await failed
   } finally { await close(server) }
+})
+
+test('later restore batches preserve explicit disconnects and current auto-connect settings', async () => {
+  for (const action of ['disconnect', 'disable', 'external-disable', 'manual-connect'] as const) {
+    const store = createStore(credentials())
+    const saved = []
+    for (let index = 1; index <= 5; index++) {
+      saved.push(await store.save({ name: `Host ${index}`, target: `dev${index}`, mode: 'managed', autoConnect: true }))
+    }
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const prepared: string[] = []
+    const manager = new ConnectionsManager(store, {
+      prepareHost: async ({ target }) => {
+        prepared.push(target)
+        if (target !== 'dev5') {
+          if (prepared.filter(target => target !== 'dev5').length === 4) entered.resolve()
+          await release.promise
+        }
+        return { remotePort: 3080, token: TOKEN, version: '0.2.1-rc.2', service: 'systemd', pid: 513 }
+      },
+      connectTunnel: async () => fakeTunnel(), probe: async () => {},
+    })
+    const restoring = manager.restore()
+    try {
+      await entered.promise
+      assert.deepEqual(prepared, ['dev1', 'dev2', 'dev3', 'dev4'])
+      const joined = manager.connect(saved[0]!.id)
+      const fifth = saved[4]!
+      if (action === 'disconnect') await manager.disconnect(fifth.id)
+      else if (action === 'manual-connect') await manager.connect(fifth.id)
+      else {
+        const save = action === 'external-disable' ? store.save.bind(store) : manager.save.bind(manager)
+        await save({ id: fifth.id, name: fifth.name, target: fifth.target, mode: 'managed', autoConnect: false })
+      }
+      // The startup snapshot must not grow to include a newly added connection.
+      await manager.save({ name: 'Host 6', target: 'dev6', mode: 'managed', autoConnect: true })
+      release.resolve()
+      await restoring
+      assert.equal((await joined).phase, 'connected')
+      assert.equal(prepared.filter(target => target === 'dev1').length, 1, 'manual connect joins an automatic attempt')
+      assert.equal(prepared.filter(target => target === 'dev5').length, action === 'manual-connect' ? 1 : 0, action)
+      assert.equal(prepared.includes('dev6'), false)
+      const fifthView = (await manager.list()).find(row => row.id === fifth.id)!
+      assert.equal(fifthView.phase, action === 'manual-connect' ? 'connected' : 'disconnected', action)
+    } finally {
+      release.resolve()
+      await restoring
+      await manager.dispose()
+    }
+  }
 })

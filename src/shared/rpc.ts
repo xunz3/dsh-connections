@@ -1,5 +1,5 @@
 import type { InvocationDescriptor, TypertCodec, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { parseId, parseOpenResult, parseSave, parseView, parseViews } from './validation.js'
+import { parseId, parseOpenResult, parseSave, parseUpdate, parseView, parseViews } from './validation.js'
 
 export const RPC_NAMESPACE = 'connections'
 export const RPC_PACKAGE = '@xunz/dsh-connections'
@@ -16,13 +16,13 @@ const nothing = codec('Void', value => {
 export const rpcContribution: TypertRemoteContribution = {
   package: RPC_PACKAGE,
   // `remove` is reserved by Harness's client namespace service.
-  descriptors: (['list', 'save', 'forget', 'connect', 'disconnect', 'open'] as const).map((method): InvocationDescriptor => ({
+  descriptors: (['list', 'save', 'forget', 'connect', 'disconnect', 'open', 'update'] as const).map((method): InvocationDescriptor => ({
     id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/${method}`,
     service: RPC_NAMESPACE,
     namespace: RPC_NAMESPACE,
     method,
     invocation: { kind: 'direct' },
-    parameters: method === 'list' ? [] : [{ name: method === 'save' ? 'input' : 'id', wire: method === 'save' ? 'input' : 'id', source: 'json', codec: method === 'save' ? codec('SaveConnection', parseSave) : id }],
+    parameters: method === 'list' ? [] : [{ name: method === 'save' || method === 'update' ? 'input' : 'id', wire: method === 'save' || method === 'update' ? 'input' : 'id', source: 'json', codec: method === 'save' ? codec('SaveConnection', parseSave) : method === 'update' ? codec('UpdateConnection', parseUpdate) : id }],
     result: method === 'list' ? codec('ConnectionViews', parseViews) : method === 'open' ? codec('OpenConnection', parseOpenResult) : method === 'forget' ? nothing : view,
   })),
 }

@@ -1,4 +1,4 @@
-import type { ConnectionRecord, ConnectionView, SaveConnection } from './types.js'
+import type { ConnectionMode, ConnectionRecord, ConnectionView, SaveConnection, UpdateConnection } from './types.js'
 
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Expected an object.')
@@ -34,6 +34,27 @@ function token(value: unknown): string {
   return result
 }
 
+function mode(value: unknown): ConnectionMode {
+  if (value !== 'managed' && value !== 'existing') throw new TypeError('Invalid connection mode.')
+  return value
+}
+
+function boolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') throw new TypeError('Expected a boolean.')
+  return value
+}
+
+export function parseVersion(value: unknown): string {
+  const version = text(value, 64)
+  if (!/^0\.2\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/.test(version)) throw new TypeError('Use an exact compatible Harness 0.2 version, such as 0.2.1-rc.3.')
+  return version
+}
+
+export function parseUpdate(value: unknown): UpdateConnection {
+  const input = object(value)
+  return { id: parseId(input.id), version: parseVersion(input.version) }
+}
+
 export function parseLaunchUrl(value: unknown): { remotePort: number; token: string } {
   try {
     const raw = text(value, 1024).trim()
@@ -51,6 +72,8 @@ export function parseSave(value: unknown): SaveConnection {
   const name = text(input.name, 80).trim()
   if (!name) throw new TypeError('Enter a connection name.')
   const result: SaveConnection = { name, target: parseTarget(input.target) }
+  if (input.mode !== undefined) result.mode = mode(input.mode)
+  if (input.autoConnect !== undefined) result.autoConnect = boolean(input.autoConnect)
   if (input.id !== undefined) result.id = parseId(input.id)
   if (input.launchUrl !== undefined) {
     parseLaunchUrl(input.launchUrl)
@@ -61,15 +84,27 @@ export function parseSave(value: unknown): SaveConnection {
 
 export function parseRecord(value: unknown): ConnectionRecord {
   const input = object(value)
-  return { id: parseId(input.id), name: text(input.name, 80), target: parseTarget(input.target), remotePort: port(input.remotePort), token: token(input.token) }
+  const result: ConnectionRecord = { id: parseId(input.id), name: text(input.name, 80), target: parseTarget(input.target) }
+  if (input.mode !== undefined) result.mode = mode(input.mode)
+  if (input.autoConnect !== undefined) result.autoConnect = boolean(input.autoConnect)
+  // Managed launch credentials are retrieved afresh over SSH, never persisted locally.
+  if (result.mode !== 'managed') { result.remotePort = port(input.remotePort); result.token = token(input.token) }
+  if (input.lastLocalPort !== undefined) result.lastLocalPort = port(input.lastLocalPort)
+  return result
 }
 
 export function parseView(value: unknown): ConnectionView {
   const input = object(value)
   const phase = input.phase
-  if (phase !== 'disconnected' && phase !== 'connecting' && phase !== 'connected' && phase !== 'error') throw new TypeError('Invalid connection state.')
+  if (phase !== 'disconnected' && phase !== 'connecting' && phase !== 'updating' && phase !== 'connected' && phase !== 'error') throw new TypeError('Invalid connection state.')
+  const runtime = input.runtime === undefined ? undefined : object(input.runtime)
+  if (runtime !== undefined && (runtime.service !== 'systemd' || !Number.isSafeInteger(runtime.pid) || (runtime.pid as number) < 1)) throw new TypeError('Invalid managed Host status.')
   return {
-    id: parseId(input.id), name: text(input.name, 80), target: parseTarget(input.target), remotePort: port(input.remotePort), phase,
+    id: parseId(input.id), name: text(input.name, 80), target: parseTarget(input.target), phase,
+    ...(input.remotePort === undefined ? {} : { remotePort: port(input.remotePort) }),
+    ...(input.mode === undefined ? {} : { mode: mode(input.mode) }),
+    ...(input.autoConnect === undefined ? {} : { autoConnect: boolean(input.autoConnect) }),
+    ...(runtime === undefined ? {} : { runtime: { version: parseVersion(runtime.version), service: 'systemd' as const, pid: runtime.pid as number } }),
     ...(input.localPort === undefined ? {} : { localPort: port(input.localPort) }),
     ...(input.error === undefined ? {} : { error: text(input.error, 1000) }),
   }

@@ -27,6 +27,7 @@ test('installed bundle activates in native Harness and persists a private connec
   await panel.getByRole('button', { name: 'Add connection' }).click()
   await panel.getByLabel('Name', { exact: true }).fill('Native integration test')
   await panel.getByLabel('SSH host', { exact: false }).fill('fixture')
+  await panel.getByRole('combobox', { name: /Remote Harness/ }).selectOption('existing')
   await panel.getByLabel('Remote Harness URL').fill('http://127.0.0.1:3000/?token=isolated-native-test-credential-only')
   await panel.getByRole('button', { name: 'Save connection' }).click()
   await expect(panel.getByText('Native integration test', { exact: true })).toBeVisible()

@@ -14,7 +14,7 @@ const api: ConnectionsApi = {
   async list() { return structuredClone(rows) },
   async save(input) {
     const old = rows.find(row => row.id === input.id)
-    const row: ConnectionView = { id: input.id ?? id, name: input.name, target: input.target, remotePort: input.launchUrl ? parseLaunchUrl(input.launchUrl).remotePort : old!.remotePort, phase: 'disconnected' }
+    const row: ConnectionView = { id: input.id ?? id, name: input.name, target: input.target, mode: input.mode, autoConnect: input.autoConnect, remotePort: input.launchUrl ? parseLaunchUrl(input.launchUrl).remotePort : old?.remotePort, phase: 'disconnected' }
     rows = [...rows.filter(item => item.id !== row.id), row]
     return row
   },
@@ -28,6 +28,14 @@ const api: ConnectionsApi = {
     return { ...row }
   },
   async disconnect(id) { const row = rows.find(row => row.id === id)!; row.phase = 'disconnected'; delete row.localPort; return { ...row } },
+  async update(input) {
+    const row = rows.find(row => row.id === input.id)!
+    row.phase = 'updating'
+    await new Promise(resolve => setTimeout(resolve, 100))
+    row.runtime = { version: input.version, pid: 123, service: 'systemd' }
+    row.phase = 'connected'; row.localPort = 43188
+    return { ...row }
+  },
   async open() {
     if (query.has('slowopen')) await new Promise(resolve => setTimeout(resolve, 700))
     return { url: 'http://127.0.0.1:43188/?token=browser-test-token-not-a-real-credential' }

@@ -8,6 +8,7 @@ export interface ConnectionStore {
   read(id: string): Promise<ConnectionRecord | undefined>
   save(input: SaveConnection): Promise<ConnectionRecord>
   remove(id: string): Promise<void>
+  rememberPort(id: string, target: string, port: number): Promise<void>
 }
 
 type Credentials = Pick<CredentialProvider, 'listRecords' | 'readRecord' | 'modifyRecord' | 'deleteRecord'>
@@ -44,16 +45,31 @@ export function createStore(credentials: Credentials): ConnectionStore {
           if (previous.id !== id) throw new Error('The saved connection identity is invalid.')
         }
         if (input.id !== undefined && previous === undefined) throw new Error('This connection no longer exists.')
-        if (input.launchUrl === undefined && (previous === undefined || previous.target !== input.target)) {
+        const mode = input.mode ?? previous?.mode
+        if (mode !== 'managed' && input.launchUrl === undefined && (previous === undefined || previous.mode === 'managed' || previous.target !== input.target)) {
           throw new Error('Paste a fresh Harness launch URL when adding a connection or changing its SSH target.')
         }
-        const launch = input.launchUrl === undefined ? previous! : parseLaunchUrl(input.launchUrl)
-        const record: ConnectionRecord = { id, name: input.name, target: input.target, remotePort: launch.remotePort, token: launch.token }
+        const launch = mode === 'managed' ? undefined : input.launchUrl === undefined ? previous! : parseLaunchUrl(input.launchUrl)
+        const autoConnect = input.autoConnect ?? previous?.autoConnect ?? (mode === 'managed' ? true : undefined)
+        const record: ConnectionRecord = { id, name: input.name, target: input.target,
+          ...(mode === undefined ? {} : { mode }), ...(autoConnect === undefined ? {} : { autoConnect }),
+          ...(launch === undefined ? {} : { remotePort: launch.remotePort, token: launch.token }),
+          ...(previous?.target === input.target && previous.mode === mode && previous.lastLocalPort !== undefined ? { lastLocalPort: previous.lastLocalPort } : {}),
+        }
         return { kind: 'grant', payload: record }
       })
       if (result?.kind !== 'grant') throw new Error('The connection could not be saved.')
       return parseRecord(result.payload)
     },
     async remove(id) { await credentials.deleteRecord(key(id)) },
+    async rememberPort(id, target, port) {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new TypeError('Invalid port.')
+      await credentials.modifyRecord(key(id), async current => {
+        if (current?.kind !== 'grant') throw new Error('This connection no longer exists.')
+        const previous = parseRecord(current.payload)
+        if (previous.id !== id || previous.target !== target) throw new Error('This connection has changed.')
+        return { kind: 'grant', payload: { ...previous, lastLocalPort: port } }
+      })
+    },
   }
 }

@@ -8,6 +8,9 @@ export const name = 'connections'
 export const inject = ['credentials', 'typert']
 export function apply(ctx: Context): void {
   const manager = new ConnectionsManager(createStore(ctx.credentials))
-  ctx.effect(() => () => manager.dispose())
+  ctx.effect(() => {
+    void manager.restore().catch(() => {})
+    return () => manager.dispose()
+  })
   mountRpc(ctx, manager)
 }

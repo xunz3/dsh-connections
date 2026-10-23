@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { ConnectionsApi, ConnectionView, SaveConnection } from '../shared/types.js'
+import type { ConnectionsApi, ConnectionView, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { rpcContribution } from '../shared/rpc.js'
 import { parseOpenResult, parseView, parseViews } from '../shared/validation.js'
 
@@ -11,6 +11,7 @@ interface RemoteApi {
   forget(id: string): Promise<RemoteResult<void>>
   connect(id: string): Promise<RemoteResult<ConnectionView>>
   disconnect(id: string): Promise<RemoteResult<ConnectionView>>
+  update(input: UpdateConnection): Promise<RemoteResult<ConnectionView>>
   open(id: string): Promise<RemoteResult<{ url: string }>>
 }
 
@@ -33,6 +34,7 @@ export function createApi(ctx: Context): ConnectionsApi {
     remove: id => unwrap(api.forget(id), () => undefined),
     connect: id => unwrap(api.connect(id), parseView),
     disconnect: id => unwrap(api.disconnect(id), parseView),
+    update: input => unwrap(api.update(input), parseView),
     open: id => unwrap(api.open(id), parseOpenResult),
   }
 }

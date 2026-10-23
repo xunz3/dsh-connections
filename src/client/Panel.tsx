@@ -8,13 +8,14 @@ export function isLocalPage(location: Pick<Location, 'protocol' | 'hostname'>): 
   return location.protocol === 'dsh-app:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
 }
 
-export function Panel({ api, t, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; local?: boolean }) {
+export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen?: (id: string) => Promise<void>; local?: boolean }) {
   const [rows, setRows] = useState<ConnectionView[]>()
   const [error, setError] = useState('')
   const [draft, setDraft] = useState<SaveConnection>()
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState<string>()
   const [opening, setOpening] = useState<string>()
+  const [updating, setUpdating] = useState<{ id: string; version: string }>()
   const [links, setLinks] = useState<Record<string, string>>({})
   const alive = useRef(true)
   const generation = useRef(0)
@@ -74,6 +75,7 @@ export function Panel({ api, t, local = isLocalPage(window.location) }: { api: C
     }
     setOpening(row.id); setError('')
     try {
+      if (onOpen) { await onOpen(row.id); return }
       const { url } = parseOpenResult(await api.open(row.id))
       if (current() && Number(new URL(url).port) === row.localPort) {
         setLinks(current => ({ ...current, [row.id]: url }))
@@ -88,34 +90,37 @@ export function Panel({ api, t, local = isLocalPage(window.location) }: { api: C
     <style>{css}</style>
     <header><h2>{t('title')}</h2><p>{t('subtitle')}</p></header>
     {!local && <p className="dc-note" role="status">{t('browserNote')}</p>}
-    <div className="dc-heading"><h3>{t('ssh')}</h3><button disabled={!!draft} onClick={() => { setDraft({ name: '', target: '', launchUrl: '' }); setError('') }}>{t('add')}</button></div>
+    <div className="dc-heading"><h3>{t('ssh')}</h3><button disabled={!!draft} onClick={() => { setDraft({ name: '', target: '', mode: 'managed', autoConnect: true }); setError('') }}>{t('add')}</button></div>
     {draft && <form className="dc-form" aria-label={draft.id ? t('edit') : t('add')} onSubmit={e => { e.preventDefault(); void save() }} onKeyDown={e => { if (e.key === 'Escape' && !saving) { e.stopPropagation(); setDraft(undefined) } }}>
       <label>{t('name')}<input autoFocus required maxLength={80} autoComplete="off" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
       <label>{t('target')}<input required maxLength={253} spellCheck={false} autoCapitalize="none" autoComplete="off" placeholder="devbox" value={draft.target} onChange={e => setDraft({ ...draft, target: e.target.value })} /><small>{t('targetHint')}</small></label>
-      <label>{t('launchUrl')}<input required={!draft.id} type="password" maxLength={1024} spellCheck={false} autoComplete="new-password" placeholder="http://127.0.0.1:…/?token=…" value={draft.launchUrl ?? ''} onChange={e => setDraft({ ...draft, launchUrl: e.target.value })} /><small>{t(draft.id ? 'editHint' : 'launchHint')}</small></label>
+      <label>{t('mode')}<select value={draft.mode ?? 'existing'} onChange={e => setDraft({ ...draft, mode: e.target.value as 'managed' | 'existing', launchUrl: undefined })}><option value="managed">{t('managed')}</option><option value="existing">{t('existing')}</option></select>{draft.mode === 'managed' && <small>{t('managedHint')}</small>}</label>
+      {draft.mode !== 'managed' && <label>{t('launchUrl')}<input required={!draft.id} type="password" maxLength={1024} spellCheck={false} autoComplete="new-password" placeholder="http://127.0.0.1:…/?token=…" value={draft.launchUrl ?? ''} onChange={e => setDraft({ ...draft, launchUrl: e.target.value })} /><small>{t(draft.id ? 'editHint' : 'launchHint')}</small></label>}
+      <label className="dc-checkbox"><input type="checkbox" checked={draft.autoConnect ?? false} onChange={e => setDraft({ ...draft, autoConnect: e.target.checked })} />{t('autoConnect')}</label>
       <div className="dc-actions"><button className="dc-primary" disabled={saving} type="submit">{t('save')}</button><button type="button" disabled={saving} onClick={() => setDraft(undefined)}>{t('cancel')}</button></div>
     </form>}
     {rows === undefined ? <p role="status">{t('loading')}</p> : rows.length === 0 && !draft ? <div className="dc-empty"><strong>{t('empty')}</strong><p>{t('emptyHint')}</p></div> : <ul className="dc-list">
       {rows.map(row => <li className="dc-row" key={row.id}>
-        <div className="dc-row-main"><div className="dc-identity"><strong>{row.name}</strong><div className="dc-meta"><span>{row.target}</span><span className="dc-state" data-phase={row.phase} role="status">{t(row.phase)}</span></div></div>
+        <div className="dc-row-main"><div className="dc-identity"><strong>{row.name}</strong><div className="dc-meta"><span>{row.target}</span><span className="dc-state" data-phase={row.phase} role="status">{t(row.phase)}</span>{row.runtime && <span>Harness {row.runtime.version}</span>}</div></div>
           <div className="dc-actions">
             {row.phase === 'connected' ? <>
               {links[row.id] ? <a className="dc-link dc-primary" href={links[row.id]} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{t('open')} ↗</a> : <button className="dc-primary" disabled={!local || opening === row.id} onClick={() => void prepareOpen(row)}>{t(opening === row.id ? 'preparing' : 'open')}</button>}
               <button className="dc-quiet" onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('disconnect')}</button>
-            </> : row.phase === 'connecting' ? <button onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('cancel')}</button> : <button disabled={!local} onClick={() => { invalidateOpen(row.id); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'connecting', error: undefined } : item)); void run(() => api.connect(row.id)) }}>{t(row.phase === 'error' ? 'reconnect' : 'connect')}</button>}
+            </> : row.phase === 'updating' ? <button disabled>{t('updating')}</button> : row.phase === 'connecting' ? <button onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('cancel')}</button> : <button disabled={!local} onClick={() => { invalidateOpen(row.id); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'connecting', error: undefined } : item)); void run(() => api.connect(row.id)) }}>{t(row.phase === 'error' ? 'reconnect' : 'connect')}</button>}
             <details className="dc-menu" onKeyDown={e => { if (e.key === 'Escape') { e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() } }}>
               <summary aria-label={`${t('actions')}: ${row.name}`}>···</summary>
-              <div className="dc-menu-popover"><button onClick={e => { e.currentTarget.closest('details')!.open = false; setDraft({ id: row.id, name: row.name, target: row.target }); setError('') }}>{t('edit')}</button><button onClick={e => { e.currentTarget.closest('details')!.open = false; setRemoving(row.id) }}>{t('remove')}</button></div>
+              <div className="dc-menu-popover"><button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setDraft({ id: row.id, name: row.name, target: row.target, mode: row.mode, autoConnect: row.autoConnect }); setError('') }}>{t('edit')}</button>{row.mode === 'managed' && <button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setUpdating({ id: row.id, version: '' }); setError('') }}>{t('updateRemote')}</button>}<button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setRemoving(row.id) }}>{t('remove')}</button></div>
             </details>
           </div>
         </div>
         {row.error && <p className="dc-error">{row.error}</p>}
         {links[row.id] && <p className="dc-note">{t('openHint')}</p>}
+        {updating?.id === row.id && <form className="dc-form" onSubmit={e => { e.preventDefault(); const input = updating; invalidateOpen(row.id); setUpdating(undefined); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'updating', error: undefined } : item)); void run(() => api.update(input)) }}><label>{t('updateVersion')}<input required value={updating.version} maxLength={64} placeholder="0.2.1-rc.3" onChange={e => setUpdating({ id: row.id, version: e.target.value })} /></label><p className="dc-note">{t('updateHint')}</p><div className="dc-actions"><button type="submit">{t('updateRemote')}</button><button type="button" onClick={() => setUpdating(undefined)}>{t('cancel')}</button></div></form>}
         {removing === row.id && <div className="dc-confirm"><span>{t('confirmRemove')}</span><small className="dc-note">{t('removeHint')}</small><div className="dc-actions"><button onClick={() => { invalidateOpen(row.id); setRemoving(undefined); void run(() => api.remove(row.id)) }}>{t('remove')}</button><button onClick={() => setRemoving(undefined)}>{t('cancel')}</button></div></div>}
       </li>)}
     </ul>}
     {error && <p className="dc-error" role="alert">{error}</p>}
-    <details className="dc-setup"><summary>{t('setup')}</summary><p>{t('step1')}</p><pre>ssh devbox</pre><p>{t('step2')}</p><pre>dsh web --host 127.0.0.1 --no-open</pre><p className="dc-note">{t('setupNote')}</p></details>
+    <details className="dc-setup"><summary>{t('setup')}</summary><p>{t('step1')}</p><pre>ssh devbox</pre><p>{t('step2')}</p><p className="dc-note">{t('setupNote')}</p></details>
     <footer className="dc-note">{t('localNote')}</footer>
   </section>
 }

@@ -81,6 +81,26 @@ test('a lost port reservation is retried only after SSH rejects its bind', async
   } finally { await f.dispose() }
 })
 
+test('reuses the previous origin only after owning its bind and falls back when occupied', async () => {
+  const f = await fixture()
+  let tunnel = await connectTunnel({ target: 'dev', remotePort: 3080 }, f.options)
+  const previous = tunnel.port
+  await tunnel.close()
+  const occupied = createServer(socket => socket.destroy())
+  try {
+    tunnel = await connectTunnel({ target: 'dev', remotePort: 3080, preferredLocalPort: previous }, f.options)
+    assert.equal(tunnel.port, previous)
+    await tunnel.close()
+    await new Promise<void>(resolve => occupied.listen(previous, '127.0.0.1', resolve))
+    tunnel = await connectTunnel({ target: 'dev', remotePort: 3080, preferredLocalPort: previous }, f.options)
+    assert.notEqual(tunnel.port, previous)
+  } finally {
+    await tunnel.close()
+    if (occupied.listening) await new Promise<void>(resolve => occupied.close(() => resolve()))
+    await f.dispose()
+  }
+})
+
 test('disposal terminates proxy descendants even after the master exits', async () => {
   const f = await fixture({ TEST_SSH_DESCENDANT: '1' })
   try {

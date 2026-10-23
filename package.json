@@ -5,19 +5,39 @@
   "type": "module",
   "license": "MIT",
   "packageManager": "pnpm@11.13.1",
-  "engines": { "node": ">=22.12.0", "dsh": ">=0.2.1-rc.2 <0.3.0" },
+  "engines": {
+    "node": ">=22.12.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
   "exports": {
-    ".": { "types": "./dist/host/index.d.ts", "default": "./dist/host/index.js" },
+    ".": {
+      "types": "./dist/host/index.d.ts",
+      "default": "./dist/host/index.js"
+    },
     "./client": "./dist/client.js",
     "./package.json": "./package.json"
   },
-  "files": ["dist", "docs", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-locale"]
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
     }
   },
   "scripts": {
@@ -39,9 +59,12 @@
     "@deepseek-ai/cordis": "4.0.5",
     "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar-browser": "0.2.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.1-rc.2",
     "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
     "@deepseek-ai/dsh-typert-registry": "0.2.1-rc.2",
@@ -55,5 +78,7 @@
     "tsx": "4.23.15",
     "typescript": "5.9.3"
   },
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  }
 }

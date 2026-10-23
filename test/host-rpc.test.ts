@@ -24,6 +24,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     async remove() { ++calls },
     async connect() { ++calls; return privateView },
     async disconnect() { ++calls; return privateView },
+    async update() { ++calls; return privateView },
     async open() { ++calls; return { url: `http://127.0.0.1:41380/?token=${token}` } },
   }
   const plugin = ctx.plugin({ name: 'connections-rpc-test', inject: ['typert'], apply(child: Context) { mountRpc(child, api) } })
@@ -39,6 +40,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
       const receiver = scoped.get('connections' as never) as unknown as ConnectionsRpc
       await assert.rejects(receiver.list(), /Only the Harness owner/)
       await assert.rejects(receiver.save({ name: 'Work', target: 'dev' }), /Only the Harness owner/)
+      await assert.rejects(receiver.update({ id, version: '0.2.1-rc.3' }), /Only the Harness owner/)
       for (const method of ['forget', 'connect', 'disconnect', 'open'] as const) await assert.rejects(receiver[method](id), /Only the Harness owner/)
     }
     assert.equal(calls, 0)
@@ -48,6 +50,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     assert.deepEqual(await receiver.save({ name: 'Work', target: 'dev' }), view)
     assert.deepEqual(await receiver.connect(id), view)
     assert.deepEqual(await receiver.disconnect(id), view)
+    assert.deepEqual(await receiver.update({ id, version: '0.2.1-rc.3' }), view)
     assert.equal((await receiver.open(id)).url.includes(token), true)
     await receiver.forget(id)
     await assert.rejects(receiver.connect('invalid'), /Invalid connection identifier/)
