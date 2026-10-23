@@ -19,6 +19,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
   let calls = 0
   const privateView = { ...view, token }
   const api: ConnectionsApi = {
+    async sshHosts() { ++calls; return ['dev', 'build'] },
     async list() { ++calls; return [privateView] },
     async save() { ++calls; return privateView },
     async remove() { ++calls },
@@ -39,6 +40,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
       const scoped = principal === undefined ? ctx : ctx.extend({ invocation: { peer: { principal } } })
       const receiver = scoped.get('connections' as never) as unknown as ConnectionsRpc
       await assert.rejects(receiver.list(), /Only the Harness owner/)
+      await assert.rejects(receiver.sshHosts(), /Only the Harness owner/)
       await assert.rejects(receiver.save({ name: 'Work', target: 'dev' }), /Only the Harness owner/)
       await assert.rejects(receiver.update({ id, version: '0.2.1-rc.3' }), /Only the Harness owner/)
       for (const method of ['forget', 'connect', 'disconnect', 'open'] as const) await assert.rejects(receiver[method](id), /Only the Harness owner/)
@@ -47,6 +49,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     const owner = ctx.extend({ invocation: { peer: { principal: { kind: 'owner' } } } })
     const receiver = owner.get('connections' as never) as unknown as ConnectionsRpc
     assert.deepEqual(await receiver.list(), [view])
+    assert.deepEqual(await receiver.sshHosts(), ['dev', 'build'])
     assert.deepEqual(await receiver.save({ name: 'Work', target: 'dev' }), view)
     assert.deepEqual(await receiver.connect(id), view)
     assert.deepEqual(await receiver.disconnect(id), view)

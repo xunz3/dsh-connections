@@ -40,6 +40,9 @@ async function prepareExistingConnection(page: Page, name: string): Promise<void
   await expect(panel.getByText('Loading connections…')).toHaveCount(0)
   if (!await panel.getByText(name, { exact: true }).count()) {
     await panel.getByRole('button', { name: 'Add connection', exact: true }).click()
+    await expect(panel.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeEnabled()
+    const manual = panel.getByRole('button', { name: 'Add manually', exact: true })
+    if (await manual.isVisible()) await manual.click()
     await panel.getByLabel('Name', { exact: true }).fill(name)
     await panel.getByLabel('SSH host', { exact: false }).fill(target)
     await panel.getByRole('combobox', { name: /Remote Harness/ }).selectOption('existing')

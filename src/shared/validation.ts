@@ -23,6 +23,11 @@ export function parseTarget(value: unknown): string {
   return target
 }
 
+export function parseSshHosts(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 1000) throw new TypeError('Invalid SSH hosts list.')
+  return [...new Set(value.map(parseTarget))]
+}
+
 function port(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) throw new TypeError('Invalid port.')
   return value

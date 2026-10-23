@@ -3,9 +3,10 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { ConnectionsApi, ConnectionView, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { rpcContribution } from '../shared/rpc.js'
-import { parseOpenResult, parseView, parseViews } from '../shared/validation.js'
+import { parseOpenResult, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
 
 interface RemoteApi {
+  sshHosts(): Promise<RemoteResult<string[]>>
   list(): Promise<RemoteResult<ConnectionView[]>>
   save(input: SaveConnection): Promise<RemoteResult<ConnectionView>>
   forget(id: string): Promise<RemoteResult<void>>
@@ -29,6 +30,7 @@ export async function mountRpc(ctx: Context): Promise<void> { await ctx.remote.$
 export function createApi(ctx: Context): ConnectionsApi {
   const api = ctx.remote.connections
   return {
+    sshHosts: () => unwrap(api.sshHosts(), parseSshHosts),
     list: () => unwrap(api.list(), parseViews),
     save: input => unwrap(api.save(input), parseView),
     remove: id => unwrap(api.forget(id), () => undefined),

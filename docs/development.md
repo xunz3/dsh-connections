@@ -65,9 +65,15 @@ The isolated sshd forwards to its own machine's loopback, so this example requir
 
 Browser fixtures cover settings, managed-mode creation and explicit update submission, local/remote project choice, iframe isolation, guest lease cleanup and failures, delayed-reply cancellation, OAuth popup delegation and responsive light/dark layout. Native integration additionally verifies the installed ModuleLoader bundle, real credential RPC, real SSH forwarding, native directory selection, file tree/preview and local Host restart.
 
+SSH discovery tests cover Include resolution, literal patterns, permissions, traversal limits and command-free enumeration. Picker fixtures cover selection and naming, manual fallback, refresh failure/recovery, stale replies and targets removed from configuration. Set `DSH_EXPECT_SSH_HOSTS=1` with `DSH_WEB_LOG` for the native settings test to require a nonempty real configuration list; it saves and removes only a marked test entry without connecting.
+
 Actual Electron desktop rendering, macOS, Windows and machine reboot are not covered by these fixtures. Desktop's public bridge contract is tested with a fixture; upstream partitions are transient. No model task, account credential migration or computer-input automation is exercised.
 
 ## Verified on 2026-10-24
+
+SSH picker update: TypeScript and package checks passed, along with 67 Node tests (real local OpenSSH and native systemd checks enabled), 21 browser fixtures and the installed native settings test with real SSH host discovery. Discovery's final permission-error fix was retested on Node 22.12.0 and 26.5.0 (10 cases each). Light/dark, Chinese mobile and actual Harness settings captures were inspected. The tarball contains 21 files. These checks do not add a new remote lifecycle or Electron acceptance claim.
+
+Earlier persistent-workspace acceptance:
 
 - TypeScript, production build and 56 Node tests passed with both real OpenSSH and native systemd syntax checks enabled, with no skips.
 - Fourteen browser fixture cases passed. Light/dark, mobile forms and the host chooser were also inspected as rendered images.

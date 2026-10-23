@@ -25,6 +25,17 @@ test('installed bundle activates in native Harness and persists a private connec
     await expect(panel.getByText('Native integration test', { exact: true })).toHaveCount(0)
   }
   await panel.getByRole('button', { name: 'Add connection' }).click()
+  await expect(panel.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeEnabled()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  await expect(panel.getByText('Unable to read SSH config.', { exact: false })).toHaveCount(0)
+  if (process.env.DSH_EXPECT_SSH_HOSTS === '1') {
+    const hosts = panel.getByRole('combobox', { name: /SSH host/ })
+    await expect(hosts).toBeVisible()
+    expect(await hosts.locator('option[value]:not([value=""])').count()).toBeGreaterThan(0)
+  }
+  await page.screenshot({ path: info.outputPath('native-ssh-picker.png'), fullPage: true })
+  const manual = panel.getByRole('button', { name: 'Add manually', exact: true })
+  if (await manual.isVisible()) await manual.click()
   await panel.getByLabel('Name', { exact: true }).fill('Native integration test')
   await panel.getByLabel('SSH host', { exact: false }).fill('fixture')
   await panel.getByRole('combobox', { name: /Remote Harness/ }).selectOption('existing')

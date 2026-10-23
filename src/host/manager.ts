@@ -5,9 +5,11 @@ import { parseId, parseSave, parseUpdate } from '../shared/validation.js'
 import { connectTunnel, SshTunnelError, type Tunnel } from './ssh.js'
 import type { ConnectionStore } from './store.js'
 import { prepareHost, updateHost, RemoteHostError, type ManagedHost } from './lifecycle.js'
+import { discoverSshHosts } from './ssh-config.js'
 
 export type Probe = (port: number, token: string, signal: AbortSignal) => Promise<void>
 export interface ManagerOptions {
+  sshHosts?: () => Promise<string[]>
   connectTunnel?: typeof connectTunnel
   probe?: Probe
   prepareHost?: typeof prepareHost
@@ -75,6 +77,7 @@ export class ConnectionsManager implements ConnectionsApi {
   private readonly probe: Probe
   private readonly prepare: typeof prepareHost
   private readonly updateRemote: typeof updateHost
+  private readonly discoverHosts: () => Promise<string[]>
   private operations: Promise<unknown> = Promise.resolve()
   private disposed = false
   private disposal?: Promise<void>
@@ -84,6 +87,14 @@ export class ConnectionsManager implements ConnectionsApi {
     this.probe = options.probe ?? probeHarness
     this.prepare = options.prepareHost ?? prepareHost
     this.updateRemote = options.updateHost ?? updateHost
+    this.discoverHosts = options.sshHosts ?? discoverSshHosts
+  }
+
+  async sshHosts(): Promise<string[]> {
+    this.assertActive()
+    const hosts = await this.discoverHosts()
+    this.assertActive()
+    return hosts
   }
 
   /** Restore transport access; the OS-managed remote Host has its own lifetime. */

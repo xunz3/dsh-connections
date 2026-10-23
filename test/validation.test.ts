@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseId, parseLaunchUrl, parseOpenResult, parseSave, parseTarget, parseView } from '../src/shared/validation.js'
+import { parseId, parseLaunchUrl, parseOpenResult, parseSave, parseSshHosts, parseTarget, parseView } from '../src/shared/validation.js'
 
 const id = 'connection-a54d0a10-1234-4567-abcd-123456789012'
 const token = 'a-valid-launch-token-with-enough-entropy'
@@ -15,6 +15,12 @@ test('launch credential admission only accepts the remote Harness loopback root'
   assert.deepEqual(parseLaunchUrl(`http://localhost:3010/?token=${token}`), { remotePort: 3010, token })
   for (const value of [`https://evil.test/?token=${token}`, `http://127.0.0.1.evil.test/?token=${token}`, `http://user@127.0.0.1:3/?token=${token}`, `http://127.0.0.1:3/path?token=${token}`, `http://127.0.0.1:3/?token=${token}&token=another`, `http://127.0.0.1:3/?token=${token}#fragment`, 'http://127.0.0.1:3/?token=short']) {
     assert.throws(() => parseLaunchUrl(value), error => error instanceof Error && !error.message.includes(token))
+  }
+})
+test('SSH discovery admits only bounded literal destinations across the RPC boundary', () => {
+  assert.deepEqual(parseSshHosts(['Dev', 'work', 'Dev']), ['Dev', 'work'])
+  for (const value of [{ hosts: ['dev'] }, ['dev', { target: 'other', key: 'private' }], ['*'], ['!dev'], ['-oProxyCommand=id'], Array(1001).fill('dev')]) {
+    assert.throws(() => parseSshHosts(value), TypeError)
   }
 })
 test('wire projections discard private fields and normalize the only open URL', () => {

@@ -80,5 +80,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "glob": "13.0.6",
+    "ssh-config": "5.3.0"
   }
 }

@@ -16,13 +16,17 @@ If linger is disabled, configure it using your host's normal policy (`loginctl e
 
 ## Add and open
 
-1. In **Settings → Connections**, add a name and SSH host.
+1. In **Settings → Connections → Add connection**, select an SSH host from the dropdown or choose **Add manually** to enter an alias or `user@hostname`. The name is filled from your selection and can be edited.
 2. Keep **Run in the background** selected. No launch URL is needed. **Connect automatically when Harness starts** is enabled by default for new managed connections.
-3. Select **Connect**. The first connection installs pinned Harness `0.2.1-rc.2` and starts its user service. Later connections reuse it.
+3. Save the connection, then select **Connect**. Saving does not initiate SSH. The first connection installs pinned Harness `0.2.1-rc.2` and starts its user service. Later connections reuse it.
 4. Select **Open Harness**, or use the normal **Add workspace / Choose workspace** entry and choose the remote computer.
 5. In the remote native interface, choose a project directory. Use its native sidebar file tree and previews as usual. The top bar identifies the remote connection and provides **Return to this computer**.
 
 Configure models, accounts and plugins in that remote Harness. Local accounts, API keys and plugins are not copied. Opening a remote directory does not create a workspace with that path on the local Host.
+
+The dropdown reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** rereads it without changing the draft. Already saved targets are marked; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
+
+Discovery lists concrete aliases only; wildcard and negated patterns are not choices. Conditional includes contribute candidates without evaluating `Match` or running commands. Host-dependent include paths cannot be discovered statically. Connection settings are resolved by OpenSSH when connecting; discovery does not copy keys, resolve hosts or contact servers.
 
 Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, or use the desktop app. HTTPS and other browser origins are not supported for the embedded remote view. Desktop uses Harness's existing guest bridge; its actual Electron surface has not yet been acceptance-tested.
 

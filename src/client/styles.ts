@@ -31,10 +31,17 @@ export const css = `
 .dc-menu-popover{position:absolute;right:0;top:36px;z-index:2;padding:5px;min-width:120px;border:1px solid var(--dsw-alias-border-l2,#d7d9de);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);box-shadow:0 4px 14px #0000000c}
 .dc-menu-popover button{display:block;width:100%;border:0;text-align:left}
 .dc-form{margin:16px 0 20px;padding:20px 0;border-block:1px solid var(--dsw-alias-border-l1,#e7e8eb);display:grid;gap:16px}
+.dc-form-fields{border:0;padding:0;margin:0;min-width:0;display:grid;gap:16px}
+.dc-host-field{display:grid;gap:6px;min-width:0}
+.dc-host-tools{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.dsh-connections .dc-text-action{background:transparent;border:0;border-radius:3px;min-height:24px;padding:0;font-size:12px;color:var(--dsw-alias-label-secondary,#676b73)}
+.dsh-connections .dc-text-action:hover{color:var(--dsw-alias-label-primary,#24262a);text-decoration:underline;filter:none}
+.dc-connection-options{display:grid;gap:14px;padding-top:4px}
 .dc-form label{display:grid;gap:6px;font-size:13px;font-weight:500}
 .dc-form input,.dc-form select{width:100%;font:inherit;color:inherit;background:var(--dsw-alias-bg-base,#fff);border:1px solid var(--dsw-alias-border-l2,#d7d9de);border-radius:6px;padding:9px 11px;min-width:0}
 .dc-form .dc-checkbox{display:flex;align-items:center;gap:8px;font-weight:400}.dc-checkbox input{width:16px;height:16px;padding:0;accent-color:var(--dsw-alias-label-primary,#24262a)}
 .dc-form small{font-size:12px;font-weight:400;color:var(--dsw-alias-label-secondary,#676b73)}
+.dc-form small.dc-error{color:var(--dsw-alias-state-error-primary,#b42318)}
 .dc-form .dc-actions{justify-content:flex-start}
 .dc-error{font-size:13px;color:var(--dsw-alias-state-error-primary,#b42318);overflow-wrap:anywhere}
 .dc-confirm{margin-top:14px;display:grid;gap:8px}

@@ -3,6 +3,7 @@ import type { ConnectionsApi, ConnectionView, SaveConnection } from '../shared/t
 import { parseOpenResult, parseSave } from '../shared/validation.js'
 import type { Translate } from './messages.js'
 import { css } from './styles.js'
+import { ConnectionForm } from './ConnectionForm.js'
 
 export function isLocalPage(location: Pick<Location, 'protocol' | 'hostname'>): boolean {
   return location.protocol === 'dsh-app:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
@@ -91,14 +92,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     <header><h2>{t('title')}</h2><p>{t('subtitle')}</p></header>
     {!local && <p className="dc-note" role="status">{t('browserNote')}</p>}
     <div className="dc-heading"><h3>{t('ssh')}</h3><button disabled={!!draft} onClick={() => { setDraft({ name: '', target: '', mode: 'managed', autoConnect: true }); setError('') }}>{t('add')}</button></div>
-    {draft && <form className="dc-form" aria-label={draft.id ? t('edit') : t('add')} onSubmit={e => { e.preventDefault(); void save() }} onKeyDown={e => { if (e.key === 'Escape' && !saving) { e.stopPropagation(); setDraft(undefined) } }}>
-      <label>{t('name')}<input autoFocus required maxLength={80} autoComplete="off" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
-      <label>{t('target')}<input required maxLength={253} spellCheck={false} autoCapitalize="none" autoComplete="off" placeholder="devbox" value={draft.target} onChange={e => setDraft({ ...draft, target: e.target.value })} /><small>{t('targetHint')}</small></label>
-      <label>{t('mode')}<select value={draft.mode ?? 'existing'} onChange={e => setDraft({ ...draft, mode: e.target.value as 'managed' | 'existing', launchUrl: undefined })}><option value="managed">{t('managed')}</option><option value="existing">{t('existing')}</option></select>{draft.mode === 'managed' && <small>{t('managedHint')}</small>}</label>
-      {draft.mode !== 'managed' && <label>{t('launchUrl')}<input required={!draft.id} type="password" maxLength={1024} spellCheck={false} autoComplete="new-password" placeholder="http://127.0.0.1:…/?token=…" value={draft.launchUrl ?? ''} onChange={e => setDraft({ ...draft, launchUrl: e.target.value })} /><small>{t(draft.id ? 'editHint' : 'launchHint')}</small></label>}
-      <label className="dc-checkbox"><input type="checkbox" checked={draft.autoConnect ?? false} onChange={e => setDraft({ ...draft, autoConnect: e.target.checked })} />{t('autoConnect')}</label>
-      <div className="dc-actions"><button className="dc-primary" disabled={saving} type="submit">{t('save')}</button><button type="button" disabled={saving} onClick={() => setDraft(undefined)}>{t('cancel')}</button></div>
-    </form>}
+    {draft && <ConnectionForm key={draft.id ?? 'new'} api={api} draft={draft} rows={rows ?? []} saving={saving} t={t} onChange={setDraft} onSave={() => void save()} onCancel={() => setDraft(undefined)} />}
     {rows === undefined ? <p role="status">{t('loading')}</p> : rows.length === 0 && !draft ? <div className="dc-empty"><strong>{t('empty')}</strong><p>{t('emptyHint')}</p></div> : <ul className="dc-list">
       {rows.map(row => <li className="dc-row" key={row.id}>
         <div className="dc-row-main"><div className="dc-identity"><strong>{row.name}</strong><div className="dc-meta"><span>{row.target}</span><span className="dc-state" data-phase={row.phase} role="status">{t(row.phase)}</span>{row.runtime && <span>Harness {row.runtime.version}</span>}</div></div>

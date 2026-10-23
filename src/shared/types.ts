@@ -39,6 +39,8 @@ export interface ConnectionRecord {
 export interface UpdateConnection { id: string; version: string }
 
 export interface ConnectionsApi {
+  /** Literal host aliases from the local Harness computer's SSH configuration. */
+  sshHosts(): Promise<string[]>
   list(): Promise<ConnectionView[]>
   save(input: SaveConnection): Promise<ConnectionView>
   remove(id: string): Promise<void>

@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { RPC_NAMESPACE, RPC_PACKAGE, rpcContribution } from '../shared/rpc.js'
-import { parseId, parseOpenResult, parseSave, parseUpdate, parseView, parseViews } from '../shared/validation.js'
+import { parseId, parseOpenResult, parseSave, parseSshHosts, parseUpdate, parseView, parseViews } from '../shared/validation.js'
 import type { ConnectionsApi, SaveConnection, UpdateConnection } from '../shared/types.js'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -18,6 +18,7 @@ export class ConnectionsRpc extends TypertRemoteService {
     }
   }
   async list() { this.owner(); return parseViews(await this.api.list()) }
+  async sshHosts() { this.owner(); return parseSshHosts(await this.api.sshHosts()) }
   async save(input: SaveConnection) { this.owner(); return parseView(await this.api.save(parseSave(input))) }
   async forget(id: string) { this.owner(); await this.api.remove(parseId(id)) }
   async connect(id: string) { this.owner(); return parseView(await this.api.connect(parseId(id))) }

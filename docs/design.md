@@ -7,6 +7,8 @@ Source review: 2026-10-24. Target Harness API baseline: `0.2.1-rc.2`. The remote
 | Dependency | Responsibility |
 | --- | --- |
 | System OpenSSH | SSH config, key/agent authentication, host trust, jump hosts and encrypted forwarding |
+| ssh-config 5.3.0 | Parse existing SSH config for a read-only list of host aliases; no transitive runtime dependencies |
+| glob 13.0.6 | Expand Include file patterns with brace, extglob and recursive globstar expansion disabled |
 | Node >=22.12 locally | Child processes, sockets, native HTTP checks and validation |
 | Remote Linux, Node 22.19+ or >=24, npm, systemd, flock, tar | Native Harness installation, persistent user service, maintenance locking and rollback snapshot |
 | Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.2 | Plugin lifecycle, existing private records and authenticated owner RPC |
@@ -14,7 +16,7 @@ Source review: 2026-10-24. Target Harness API baseline: `0.2.1-rc.2`. The remote
 | Harness sidebar-browser bridge types | Desktop guest lease and isolation; no Electron runtime dependency |
 | React 18, TypeScript 5.9, esbuild, tsx, Playwright | Compilation and transport, lifecycle and UI verification |
 
-There are no added production dependency packages. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, process supervisor, automation engine or cloud relay is introduced.
+The added production packages handle config parsing and Include file matching. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, process supervisor, automation engine or cloud relay is introduced.
 
 ## Why not just enable official SSH plugins?
 
@@ -29,6 +31,8 @@ Reuse the official providers if a future feature needs local sessions with remot
 A saved connection contains a name, SSH target, mode, auto-connect preference and the last successfully bound local port. It uses the existing Harness credentials provider, not another database. An existing-service connection also holds its launch credential. A managed connection retrieves a fresh credential from its private remote service log on each connection and never persists that token locally.
 
 Public views expose status, address and runtime version, never launch credentials. The owner-only Open operation returns the authenticated local URL. The UI remembers only the selected connection ID. Projects and session identities remain native Harness data.
+
+Adding a connection stays inline in the existing settings section. A native themed select lists config aliases, with refresh and manual entry beside it. The owner-only discovery RPC returns aliases from the Harness Host's configuration, not configuration contents. It bounds file size, Include traversal and result count; it never runs `ssh -G`, `Match exec` or configuration commands. Candidates are not stored or connected until the user acts. The connection stores the chosen alias so OpenSSH remains responsible for effective settings at connection time.
 
 ```text
 Local native project picker → Connections host chooser

@@ -10,7 +10,19 @@ let rows: ConnectionView[] = query.has('populated') ? [
   { id: 'connection-22222222-2222-4222-a222-222222222222', name: 'Research workstation', target: 'ICT_IGL16', remotePort: 3000, phase: 'disconnected' },
 ] : []
 const id = 'connection-33333333-3333-4333-a333-333333333333'
+let sshHostRequests = 0
 const api: ConnectionsApi = {
+  async sshHosts() {
+    const request = ++sshHostRequests
+    const scenario = query.get('sshHosts')
+    if (scenario === 'slow' || (scenario === 'refresherror' && request === 3)) await new Promise(resolve => setTimeout(resolve, 800))
+    document.documentElement.dataset.sshHostsSettled = String(request)
+    if (scenario === 'error' && request === 1) throw new Error('Unable to read SSH configuration.')
+    if (scenario === 'refresherror' && request === 2) throw new Error('Unable to read SSH configuration.')
+    if (scenario === 'empty') return []
+    if (scenario === 'changing' && request > 1) return ['WSL_Ubuntu_R']
+    return ['Dev', 'DH_H800', 'WSL_Ubuntu_R']
+  },
   async list() { return structuredClone(rows) },
   async save(input) {
     const old = rows.find(row => row.id === input.id)
