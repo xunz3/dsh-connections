@@ -1,0 +1,3 @@
+- insert:
+    - id: connections
+      name: '@xunz/dsh-connections'

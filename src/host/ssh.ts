@@ -1,0 +1,275 @@
+import { spawn, type ChildProcess } from 'node:child_process'
+import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { parseTarget } from '../shared/validation.js'
+
+export interface Tunnel {
+  readonly port: number
+  close(): Promise<void>
+  onClose(listener: (error?: Error) => void): () => void
+}
+
+/** Host-side injection points, never accepted from a connection's RPC input. */
+export interface SshTunnelOptions {
+  sshPath?: string
+  configFile?: string
+  env?: NodeJS.ProcessEnv
+  startupTimeoutMs?: number
+  controlTimeoutMs?: number
+  shutdownGraceMs?: number
+}
+
+export class SshTunnelError extends Error {
+  constructor(readonly code: 'SSH_UNAVAILABLE' | 'SSH_HOST_KEY' | 'SSH_AUTH' | 'SSH_TIMEOUT' | 'SSH_FORWARD' | 'SSH_CLOSED' | 'SSH_FAILED', message: string) {
+    super(message)
+    this.name = 'SshTunnelError'
+  }
+}
+
+interface ProcessResult {
+  code: number | null
+  error?: Error
+}
+
+interface OwnedProcess {
+  child: ChildProcess
+  done: Promise<ProcessResult>
+  settled: boolean
+  stderr: string
+}
+
+function cancelled(): Error {
+  return new DOMException('SSH connection cancelled.', 'AbortError')
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : cancelled()
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abortReason(signal)); return }
+    const onAbort = () => { clearTimeout(timer); reject(abortReason(signal!)) }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve() }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function details(stderr: string): string {
+  return stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+    .replace(/([?&]token=)[^&\s]+/gi, '$1[redacted]')
+    .trim().slice(-600)
+}
+
+function processError(process: OwnedProcess, result: ProcessResult, fallback: 'SSH_FORWARD' | 'SSH_CLOSED' | 'SSH_FAILED'): SshTunnelError {
+  const message = details(process.stderr)
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return new SshTunnelError('SSH_UNAVAILABLE', 'OpenSSH is unavailable. Install the system SSH client and ensure ssh is on PATH.')
+  if (/host key verification failed|remote host identification has changed|no .* host key is known|host key .*mismatch/i.test(message)) return new SshTunnelError('SSH_HOST_KEY', 'SSH host identity is not trusted or has changed. Verify the host in your terminal before connecting.')
+  if (/permission denied|authentication failed|no supported authentication/i.test(message)) return new SshTunnelError('SSH_AUTH', 'SSH authentication failed. Check your SSH key or agent in a terminal; Connections uses noninteractive authentication.')
+  const label = fallback === 'SSH_FORWARD' ? 'SSH could not create the local tunnel.' : fallback === 'SSH_CLOSED' ? 'The SSH connection closed.' : 'SSH could not connect.'
+  return new SshTunnelError(fallback, `${label}${message ? ` ${message}` : ''}`)
+}
+
+function signalProcess(process: OwnedProcess, signal: NodeJS.Signals, includeDescendants = false): void {
+  if (!process.child.pid || (process.settled && (!includeDescendants || globalThis.process.platform === 'win32'))) return
+  try {
+    // ProxyJump/ProxyCommand children belong to this private process group too.
+    if (globalThis.process.platform !== 'win32') globalThis.process.kill(-process.child.pid, signal)
+    else process.child.kill(signal)
+  } catch { /* The process can exit between the check and the signal. */ }
+}
+
+/** Reserve an OS-selected loopback port. SSH's subsequent bind is authoritative. */
+async function candidatePort(signal: AbortSignal): Promise<number> {
+  signal.throwIfAborted()
+  const server = createServer()
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        if (!address || typeof address === 'string') reject(new Error('Could not allocate a local port.'))
+        else resolve(address.port)
+      })
+    })
+    signal.throwIfAborted()
+    return port
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
+
+/**
+ * Own exactly one OpenSSH master and one local forward. Readiness comes from
+ * the private control socket's acknowledged forward, never an arbitrary TCP
+ * listener at the candidate port. The remote Harness process is not managed.
+ */
+export async function connectTunnel(input: { target: string; remotePort: number; signal?: AbortSignal }, options: SshTunnelOptions = {}): Promise<Tunnel> {
+  const target = parseTarget(input.target)
+  if (!Number.isInteger(input.remotePort) || input.remotePort < 1 || input.remotePort > 65535) throw new TypeError('Invalid remote port.')
+  if (input.signal?.aborted) throw cancelled()
+  const startupTimeoutMs = options.startupTimeoutMs ?? 20_000
+  const controlTimeoutMs = options.controlTimeoutMs ?? 3_000
+  const shutdownGraceMs = options.shutdownGraceMs ?? 500
+  for (const value of [startupTimeoutMs, controlTimeoutMs, shutdownGraceMs]) {
+    if (!Number.isFinite(value) || value < 1) throw new TypeError('Invalid SSH timeout.')
+  }
+
+  const controller = new AbortController()
+  const children = new Set<OwnedProcess>()
+  let master: OwnedProcess | undefined
+  const listeners = new Set<(error?: Error) => void>()
+  let directory: string | undefined
+  let port = 0
+  let closed = false
+  let closeError: Error | undefined
+  let cleanup: Promise<void> | undefined
+  let notified = false
+  let startupTimer: ReturnType<typeof setTimeout> | undefined
+
+  const notify = () => {
+    if (notified) return
+    notified = true
+    for (const listener of [...listeners]) {
+      try { listener(closeError) } catch { /* A subscriber must not break disposal. */ }
+    }
+    listeners.clear()
+  }
+
+  const stop = (error?: Error): Promise<void> => {
+    if (cleanup) return cleanup
+    closed = true
+    closeError = error
+    clearTimeout(startupTimer)
+    input.signal?.removeEventListener('abort', onAbort)
+    controller.abort(error ?? cancelled())
+    cleanup = (async () => {
+      // A ProxyCommand descendant can outlive its master and close its stdio.
+      // Keep that owned process group addressable after the leader has exited.
+      const processes = [...new Set([...children, ...(master ? [master] : [])])]
+      for (const child of processes) signalProcess(child, 'SIGTERM', child === master)
+      const done = Promise.all(processes.map((child) => child.done))
+      await Promise.race([done, delay(shutdownGraceMs)])
+      for (const child of processes) signalProcess(child, 'SIGKILL', child === master)
+      await Promise.race([done, delay(shutdownGraceMs)])
+      if (directory) await rm(directory, { recursive: true, force: true })
+    })().finally(notify)
+    return cleanup
+  }
+  const onAbort = () => { void stop(cancelled()).catch(() => {}) }
+  input.signal?.addEventListener('abort', onAbort, { once: true })
+  if (input.signal?.aborted) onAbort()
+  if (!closed) startupTimer = setTimeout(() => {
+    void stop(new SshTunnelError('SSH_TIMEOUT', 'SSH connection timed out. Check the host, network and SSH config.')).catch(() => {})
+  }, startupTimeoutMs)
+
+  const launch = (args: string[]): OwnedProcess => {
+    controller.signal.throwIfAborted()
+    const child = spawn(options.sshPath ?? 'ssh', args, {
+      shell: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+      detached: process.platform !== 'win32', env: options.env ?? process.env,
+    })
+    const owned: OwnedProcess = { child, done: Promise.resolve({ code: null }), settled: false, stderr: '' }
+    let spawnError: Error | undefined
+    child.stderr?.on('data', (chunk: Buffer) => { owned.stderr = (owned.stderr + chunk.toString('utf8')).slice(-8_192) })
+    child.on('error', (error) => { spawnError = error })
+    owned.done = new Promise((resolve) => {
+      child.once('close', (code) => {
+        owned.settled = true
+        children.delete(owned)
+        resolve({ code, ...(spawnError ? { error: spawnError } : {}) })
+      })
+    })
+    children.add(owned)
+    return owned
+  }
+
+  const runControl = async (args: string[]): Promise<{ child: OwnedProcess; result: ProcessResult }> => {
+    const child = launch(args)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onControlAbort: (() => void) | undefined
+    try {
+      const interruption = new Promise<never>((_, reject) => {
+        onControlAbort = () => reject(abortReason(controller.signal))
+        controller.signal.addEventListener('abort', onControlAbort, { once: true })
+        timer = setTimeout(() => {
+          signalProcess(child, 'SIGTERM')
+          reject(new SshTunnelError('SSH_TIMEOUT', 'OpenSSH control request timed out.'))
+        }, controlTimeoutMs)
+      })
+      return { child, result: await Promise.race([child.done, interruption]) }
+    } finally {
+      clearTimeout(timer)
+      if (onControlAbort) controller.signal.removeEventListener('abort', onControlAbort)
+    }
+  }
+
+  try {
+    directory = await mkdtemp(join(tmpdir(), 'dshc-'))
+    await chmod(directory, 0o700)
+    // An abort during mkdtemp must still remove the newly-created directory.
+    if (closed) { await rm(directory, { recursive: true, force: true }); throw abortReason(controller.signal) }
+    const controlPath = join(directory, 's')
+    const masterArgs = [
+      ...(options.configFile ? ['-F', options.configFile] : []),
+      '-M', '-N', '-T', '-S', controlPath,
+      '-o', 'ControlMaster=yes', '-o', 'ControlPersist=no',
+      '-o', 'ClearAllForwardings=yes', '-o', 'ExitOnForwardFailure=yes',
+      '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+      '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no',
+      '-o', 'Tunnel=no',
+      '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none',
+      '-o', 'ForkAfterAuthentication=no',
+      '-o', `ConnectTimeout=${Math.max(1, Math.min(15, Math.ceil(startupTimeoutMs / 1_000)))}`,
+      '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '--', target,
+    ]
+    master = launch(masterArgs)
+    const ownedMaster = master
+    void ownedMaster.done.then((result) => {
+      if (!closed) void stop(processError(ownedMaster, result, 'SSH_CLOSED')).catch(() => {})
+    })
+
+    for (;;) {
+      controller.signal.throwIfAborted()
+      const exists = await stat(controlPath).then((entry) => entry.isSocket(), () => false)
+      if (exists) {
+        const check = await runControl(['-F', 'none', '-S', controlPath, '-O', 'check', '--', target])
+        if (check.result.code === 0 && !check.result.error) break
+      }
+      await delay(40, controller.signal)
+    }
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const candidate = await candidatePort(controller.signal)
+      const forward = await runControl([
+        '-F', 'none', '-S', controlPath, '-o', 'ExitOnForwardFailure=yes', '-O', 'forward',
+        '-L', `127.0.0.1:${candidate}:127.0.0.1:${input.remotePort}`, '--', target,
+      ])
+      controller.signal.throwIfAborted()
+      if (forward.result.code === 0 && !forward.result.error) { port = candidate; break }
+      if (attempt === 3 || !/address already in use|cannot listen|cannot bind|port forwarding failed/i.test(forward.child.stderr)) {
+        throw processError(forward.child, forward.result, 'SSH_FORWARD')
+      }
+    }
+    controller.signal.throwIfAborted()
+    clearTimeout(startupTimer)
+    return {
+      get port() { return port },
+      close: () => stop(),
+      onClose(listener) {
+        let active = true
+        if (closed) queueMicrotask(() => { if (active) { try { listener(closeError) } catch { /* Subscriber callback. */ } } })
+        else listeners.add(listener)
+        return () => { active = false; listeners.delete(listener) }
+      },
+    }
+  } catch (error) {
+    await stop(error instanceof Error ? error : new SshTunnelError('SSH_FAILED', 'SSH could not connect.'))
+    // stop() may have completed while the asynchronous directory creation ran.
+    if (directory) await rm(directory, { recursive: true, force: true })
+    throw error
+  }
+}
