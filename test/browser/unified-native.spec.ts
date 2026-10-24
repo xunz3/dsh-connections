@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { expect, test, type FrameLocator, type Page, type Request } from '@playwright/test'
+import { expect, test, type FrameLocator, type Page, type Request, type Route } from '@playwright/test'
+import type { WorkspaceCatalog, WorkspaceViewState } from '../../src/shared/workspace-protocol.js'
 
 type Surface = Page | FrameLocator
 const fixturePath = process.env.DSH_UNIFIED_FIXTURE
@@ -30,8 +31,10 @@ async function chooseDirectory(surface: Surface, path: string): Promise<void> {
   await expect(picker).toBeHidden()
 }
 async function prepareConnection(page: Page, alias: string, remoteUrl: string): Promise<void> {
+  await expect(page.getByRole('button', { name: 'Account menu', exact: true })).toHaveCount(1)
   await page.getByRole('button', { name: 'Account menu', exact: true }).click()
   await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Connections', exact: true })).toHaveCount(1)
   await page.getByRole('button', { name: 'Connections', exact: true }).click()
   const panel = page.getByRole('region', { name: 'Connections', exact: true })
   await expect(panel.getByText('Loading connections…')).toHaveCount(0)
@@ -107,16 +110,95 @@ async function verifyRemoteMedia(page: Page, remote: FrameLocator): Promise<void
   await expect(image).toBeVisible()
   await expect.poll(() => image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBe(120)
 }
-async function selectedRemoteSession(remote: FrameLocator): Promise<string | undefined> {
+async function remoteView(remote: FrameLocator): Promise<WorkspaceViewState | undefined> {
   return remote.locator('body').evaluate(async () => {
     const channel = new URLSearchParams(window.location.hash.slice(1)).get('connections-view')
     const response = await fetch(new URL('/api/connections/workspaces', document.baseURI), {
       method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ op: 'viewState', channel }),
     })
-    const value = await response.json() as { ok: boolean; value?: { sessionId?: string } }
-    return value.ok ? value.value?.sessionId : undefined
+    const value = await response.json() as { ok: boolean; value?: WorkspaceViewState }
+    return value.ok ? value.value : undefined
   })
+}
+async function selectedRemoteSession(remote: FrameLocator): Promise<string | undefined> {
+  return (await remoteView(remote))?.sessionId
+}
+async function catalog(surface: Surface): Promise<WorkspaceCatalog> {
+  return surface.locator('body').evaluate(async () => {
+    const response = await fetch('/api/connections/workspaces', {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ op: 'catalog' }),
+    })
+    const result = await response.json() as { ok: boolean; value?: WorkspaceCatalog }
+    if (!result.ok || result.value === undefined) throw new Error('The native workspace catalog was unavailable.')
+    return result.value
+  })
+}
+async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise<void> {
+  const remote = page.frameLocator('iframe[title="Remote workspace"]')
+  const surface = source === 'local' ? page : remote
+  const expectedOrigin = source === 'local' ? new URL(page.url()).origin
+    : new URL((await page.locator('iframe[title="Remote workspace"]').getAttribute('src'))!).origin
+  if (source === 'remote') {
+    const selectedSource = await page.evaluate(() => {
+      const saved = localStorage.getItem('@xunz/dsh-connections/selection')
+      return saved ? (JSON.parse(saved) as { sourceId?: string }).sourceId : undefined
+    })
+    expect(selectedSource).toBeTruthy()
+    expect(selectedSource).not.toBe('local')
+  }
+  const before = new Set((await catalog(surface)).sessions.map(session => session.id))
+  const origins: string[] = []
+  const observe = (request: Request) => {
+    const url = new URL(request.url())
+    if (url.pathname === '/api/session/create') origins.push(url.origin)
+  }
+  page.context().on('request', observe)
+  try {
+    const created = page.context().waitForEvent('response', {
+      predicate: response => new URL(response.url()).pathname === '/api/session/create', timeout: 15_000,
+    })
+    await page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' }).click()
+    const response = await created
+    expect(new URL(response.url()).origin).toBe(expectedOrigin)
+    expect(response.ok()).toBe(true)
+    await expect.poll(async () => (await catalog(surface)).sessions.some(session => !before.has(session.id))).toBe(true)
+    if (source === 'remote') {
+      await expect(page.locator('.dc-remote-loading')).toHaveCount(0)
+      await expect.poll(async () => {
+        const selected = await selectedRemoteSession(remote)
+        return selected !== undefined && !before.has(selected)
+      }).toBe(true)
+    } else await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
+    expect(origins.length).toBeGreaterThan(0)
+    expect(origins.every(origin => origin === expectedOrigin)).toBe(true)
+  } finally { page.context().off('request', observe) }
+}
+async function verifyLoadingAcknowledgement(page: Page, open: () => Promise<void>): Promise<void> {
+  let acknowledge!: () => void
+  let received = false
+  const release = new Promise<void>(resolve => { acknowledge = resolve })
+  const intercept = async (route: Route) => {
+    const body = route.request().postDataJSON() as { op?: string; presented?: boolean } | null
+    if (body?.op === 'reportView' && body.presented === true) { received = true; await release }
+    await route.continue()
+  }
+  await page.context().route('**/api/connections/workspaces', intercept)
+  try {
+    await open()
+    const remote = page.frameLocator('iframe[title="Remote workspace"]')
+    await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
+    await expect(remote.getByRole('dialog', { name: 'Select Workspace Directory', exact: true })).toBeVisible()
+    await expect.poll(() => received, { timeout: 15_000 }).toBe(true)
+    await expect(page.locator('.dc-remote-loading')).toBeVisible()
+    const pending = await remoteView(remote)
+    expect(pending!.presentedRevision).toBeLessThan(pending!.revision)
+    acknowledge()
+    await expect(page.locator('.dc-remote-loading')).toHaveCount(0, { timeout: 15_000 })
+    const presented = await remoteView(remote)
+    expect(presented!.presentedRevision).toBe(presented!.revision)
+  } finally { acknowledge(); await page.context().unroute('**/api/connections/workspaces', intercept) }
 }
 async function verifyParentShortcutGuard(page: Page): Promise<void> {
   const workspaces = page.getByRole('region', { name: 'Workspaces', exact: true })
@@ -209,8 +291,12 @@ test('one native sidebar switches local and SSH projects while remote content st
   await expect(workspaces.getByRole('alert')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /^(Open|Close) right sidebar$/ })).toBeVisible()
   await prepareConnection(page, metadata.alias, await launch(join(fixturePath!, 'remote.log')))
-  await workspaces.getByRole('button', { name: 'Add workspace', exact: true }).click()
-  await page.getByRole('dialog', { name: 'Open a project', exact: true }).getByRole('button').filter({ hasText: connectionName }).click()
+  await verifyLoadingAcknowledgement(page, async () => {
+    await workspaces.getByRole('button', { name: 'Add workspace', exact: true }).click()
+    const chooser = page.getByRole('dialog', { name: 'Open a project', exact: true })
+    await expect(chooser.getByRole('button', { name: 'This computer', exact: true })).toBeVisible()
+    await chooser.getByRole('button').filter({ hasText: connectionName }).click()
+  })
   await expect(page.locator('iframe[title="Remote workspace"]')).toBeVisible({ timeout: 30_000 })
   const remote = page.frameLocator('iframe[title="Remote workspace"]')
   await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
@@ -224,6 +310,8 @@ test('one native sidebar switches local and SSH projects while remote content st
   await verifyRemoteUpload(page, remote)
   await verifyFiles(remote, metadata.projects.remote, 'remote')
   await verifyRemoteMedia(page, remote)
+  await verifyFiles(remote, metadata.projects.remote, 'remote')
+  await verifyNewSession(page, 'remote')
   await verifyFiles(remote, metadata.projects.remote, 'remote')
   await expect(workspaces.locator('.dcw-session button[aria-current="page"]')).toHaveCount(1)
   const selectedRemote = await workspaces.locator('.dcw-session button[aria-current="page"]').getAttribute('aria-label')
@@ -239,8 +327,15 @@ test('one native sidebar switches local and SSH projects while remote content st
   await expect(workspaces.getByRole('alert')).toHaveCount(0)
   await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
   await verifyFiles(page, metadata.projects.local, 'local')
-  await remoteProject.click()
+  await verifyNewSession(page, 'local')
+  await page.getByRole('button', { name: 'Choose workspace', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add workspace…', exact: true }).click()
+  const heroChooser = page.getByRole('dialog', { name: 'Open a project', exact: true })
+  await expect(heroChooser.getByRole('button', { name: 'This computer', exact: true })).toBeVisible()
+  await heroChooser.getByRole('button').filter({ hasText: connectionName }).click()
   await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('.dc-remote-loading')).toHaveCount(0, { timeout: 15_000 })
+  await chooseDirectory(remote, metadata.projects.remote)
   await verifyFiles(remote, metadata.projects.remote, 'remote')
   await expect(workspaces.locator('.dcw-session button[aria-current="page"]')).toHaveCount(1)
   await verifyParentShortcutGuard(page)

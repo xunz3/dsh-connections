@@ -93,3 +93,21 @@ test('switching remote chats keeps the content document and shared workspace nav
   await expect(page.getByRole('button', { name: 'Local discussion', exact: true })).toBeVisible()
   expect((await snapshot(page)).opens).toBe(1)
 })
+
+test('a loaded HTTP frame stays in progress until the native workspace acknowledges presentation', async ({ page }) => {
+  await start(page, '?unpresented')
+  await expect(page.frameLocator('iframe').getByText('Remote native workspace')).toBeVisible()
+  await expect(page.getByRole('status')).toContainText('Opening workspace…')
+  await page.evaluate(() => (window as unknown as { workspaceFixture: { presented(): Promise<void> } }).workspaceFixture.presented())
+  await expect(page.getByText('Opening workspace…', { exact: false })).toHaveCount(0)
+})
+
+test('an unresponsive remote document becomes a visible retryable error instead of a blank panel', async ({ page }) => {
+  await start(page, '?unpresented&timeout')
+  await expect(page.getByRole('status')).toContainText('Opening workspace…')
+  await expect(page.getByRole('alert')).toHaveText('The remote workspace did not finish loading through SSH. Check the connection and retry.')
+  await expect(page.locator('iframe')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Reconnect', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Local discussion', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Local native workspace', exact: true })).toBeVisible()
+})

@@ -28,7 +28,14 @@ The tests cover:
 
 - Native remote boot without a second sidebar, and a clear direct-visit prompt.
 - One Workspaces sidebar containing local and remote project/session rows.
-- Native directory selection, cancellation and switching between computers.
+- Fresh plugin composition providing one native sidebar and one Connections
+  settings page, without a duplicate native sidebar deployment.
+- Both the sidebar and conversation workspace picker offering local and remote
+  computers, with native directory selection, cancellation and switching.
+- The global New Session action creating a fresh native session on the selected
+  computer, with requests reaching only that computer.
+- The loading overlay remaining until the remote native document acknowledges
+  that its directory picker or content is presented.
 - Native file trees, text previews, file upload and relative Markdown images.
 - Upload/media requests using the remote origin, with no message sent to a model.
 - Reload and local Host restart restoring the remote session while the remote
@@ -39,6 +46,16 @@ The tests cover:
 The test updates only its fixture connection's launch credential after a remote
 restart. Its launch URLs are read from private logs and never printed by the
 helper. Screenshots are written to Playwright's test output directory.
+
+The optional native reload check installs two revisions of a tiny test bundle
+under the same package name and version. It verifies that CLI replacement alone
+leaves the active code unchanged, then calls Harness's native PluginManager to
+apply the new code without restarting the Host. It removes the test bundle after
+the check and leaves the Connections bundle running:
+
+```sh
+node test/integration/native-reload.mjs /tmp/dsh-connections-unified-qa
+```
 
 ```sh
 # Restart only the local Host; the remote Host keeps running.

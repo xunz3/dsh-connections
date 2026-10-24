@@ -33,7 +33,7 @@ function fixture() {
         case 'catalog': return catalog()
         case 'openView': {
           const channel = String(++channels).padStart(43, 'a')
-          const view = { channel, revision: 0, reportedRevision: 0 }; views.set(channel, view); return view
+          const view = { channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, view); return view
         }
         case 'navigate': {
           const current = views.get(request.channel)!
@@ -109,7 +109,7 @@ test('a newly allocated replacement tunnel view is released when navigation beco
   f.respond = async (id, request) => request.op === 'navigate' ? waiting.promise : respond(id, request)
   const opening = controller.open(first, { kind: 'session', id: 'next' }); await nextTick()
   assert.equal(f.channels, 2)
-  controller.close(); waiting.resolve({ revision: 1, reportedRevision: 0 }); await opening
+  controller.close(); waiting.resolve({ revision: 1, presentedRevision: 0, reportedRevision: 0 }); await opening
   assert.equal(f.views.size, 0); controller.dispose()
 })
 
@@ -217,7 +217,7 @@ test('health checks accept acknowledged selection and reconnect restores the cho
   const f = fixture(), controller = new WorkspaceController(f.api)
   await controller.open(first, { kind: 'session', id: 'chosen-chat' }); await controller.refresh()
   const state = controller.getSnapshot()!
-  f.views.set(state.channel!, { revision: state.revision!, reportedRevision: 0, sessionId: 'older-chat' }); await controller.check()
+  f.views.set(state.channel!, { revision: state.revision!, presentedRevision: 0, reportedRevision: 0, sessionId: 'older-chat' }); await controller.check()
   assert.equal(controller.getCatalogs().selected.sessionId, 'chosen-chat')
   f.rows[0].phase = 'disconnected'; await controller.check(); assert.equal(controller.getSnapshot()?.phase, 'error'); assert.equal(controller.getSnapshot()?.url, undefined)
   await controller.reconnect(first)
@@ -229,11 +229,11 @@ test('pending replacement navigation cannot be invalidated by an older view erro
   const f = fixture(), controller = new WorkspaceController(f.api)
   await controller.open(first, { kind: 'session', id: 'first-chat' }); await controller.refresh()
   const old = controller.getSnapshot()!, waiting = deferred<WorkspaceResult>(), respond = f.respond
-  f.views.set(old.channel!, { revision: old.revision!, reportedRevision: old.revision!, error: 'NAVIGATION_FAILED' })
+  f.views.set(old.channel!, { revision: old.revision!, presentedRevision: 0, reportedRevision: old.revision!, error: 'NAVIGATION_FAILED' })
   f.respond = async (id, request) => request.op === 'navigate' ? waiting.promise : respond(id, request)
   const opening = controller.open(first, { kind: 'session', id: 'next-chat' }); await nextTick(); await controller.check()
   assert.equal(controller.getSnapshot()?.phase, 'ready')
-  f.views.set(old.channel!, { revision: 2, reportedRevision: 0 }); waiting.resolve({ revision: 2, reportedRevision: 0 }); await opening
+  f.views.set(old.channel!, { revision: 2, presentedRevision: 0, reportedRevision: 0 }); waiting.resolve({ revision: 2, presentedRevision: 0, reportedRevision: 0 }); await opening
   assert.equal(controller.getCatalogs().selected.sessionId, 'next-chat'); assert.equal(f.channels, 1); controller.dispose()
 })
 
@@ -243,7 +243,7 @@ test('cancelled remote picking retains the previous chat or returns local when n
     if (hasPrevious) await controller.open(first, { kind: 'session', id: 'original' })
     await controller.pick(first); await controller.refresh()
     const state = controller.getSnapshot()!
-    f.views.set(state.channel!, { revision: state.revision!, reportedRevision: state.revision!, error: 'PICK_CANCELLED' }); await controller.check(); await controller.check()
+    f.views.set(state.channel!, { revision: state.revision!, presentedRevision: 0, reportedRevision: state.revision!, error: 'PICK_CANCELLED' }); await controller.check(); await controller.check()
     assert.equal(controller.getCatalogs().selected.sourceId, hasPrevious ? first : 'local'); assert.equal(controller.getCatalogs().selected.sessionId, hasPrevious ? 'original' : undefined)
     assert.equal(controller.getSnapshot()?.phase, hasPrevious ? 'ready' : undefined); controller.dispose()
   }
@@ -254,6 +254,77 @@ test('local navigation delegates native IDs without creating remote placeholders
   await controller.open(first, { kind: 'session', id: 'chat' }); await controller.navigate('local', { kind: 'workspace', id: 'project' })
   assert.deepEqual(targets, [{ kind: 'workspace', id: 'project' }]); assert.equal(controller.getSnapshot(), undefined)
   assert.equal(f.calls.some(call => call.id === 'local' && call.request.op !== 'catalog'), false); controller.dispose()
+})
+
+test('New Session follows the selected source and explicit local creation supersedes restoration', async () => {
+  const f = fixture(), local: unknown[] = [], controller = new WorkspaceController(f.api, { storage: f.storage, localNavigate: target => { local.push(target) } })
+  await controller.newSession()
+  assert.deepEqual(local, [{ kind: 'newSession' }])
+  await controller.open(first, { kind: 'session', id: 'chat' })
+  await controller.newSession()
+  const last = f.calls.filter(call => call.request.op === 'navigate').at(-1)!
+  assert.equal(last.id, first)
+  assert.deepEqual(last.request.op === 'navigate' && last.request.target, { kind: 'newSession' })
+  assert.equal(local.length, 1)
+  controller.dispose()
+
+  const restoringFixture = fixture(), waiting = deferred<WorkspaceResult>(), respond = restoringFixture.respond
+  restoringFixture.saved.set(savedKey, JSON.stringify({ sourceId: first, sessionId: 'chat' }))
+  restoringFixture.respond = async (id, request) => id === 'local' && request.op === 'catalog' ? waiting.promise : respond(id, request)
+  const restored = new WorkspaceController(restoringFixture.api, { storage: restoringFixture.storage, localNavigate: target => { local.push(target) } })
+  const restoration = restored.restore(); await nextTick()
+  const creation = restored.newSession()
+  waiting.resolve(catalog()); await Promise.all([restoration, creation])
+  assert.equal(restoringFixture.opens, 0); assert.equal(restored.getCatalogs().selected.sourceId, 'local')
+  restored.dispose()
+})
+
+test('a view remains pending until native presentation and picker presentation does not complete navigation', async () => {
+  const f = fixture(), controller = new WorkspaceController(f.api)
+  await controller.pick(first)
+  await controller.check()
+  assert.equal(controller.getSnapshot()?.presented, false)
+  const state = controller.getSnapshot()!
+  f.views.set(state.channel!, { revision: state.revision!, presentedRevision: state.revision!, reportedRevision: 0 })
+  await controller.check()
+  assert.equal(controller.getSnapshot()?.presented, true)
+  assert.deepEqual(controller.getCatalogs().selected, { sourceId: first })
+  controller.dispose()
+})
+
+test('a stalled presentation times out independently of pending Host requests and ignores their late reply', async () => {
+  const f = fixture(), controller = new WorkspaceController(f.api, { presentationTimeoutMs: 20 }), waiting = deferred<WorkspaceResult>(), respond = f.respond
+  f.respond = async (id, request) => request.op === 'viewState' ? waiting.promise : respond(id, request)
+  await controller.pick(first)
+  const checking = controller.check()
+  await new Promise(resolve => setTimeout(resolve, 35))
+  assert.equal(controller.getSnapshot()?.error, 'timeout')
+  assert.equal(controller.getSnapshot()?.url, undefined)
+  waiting.resolve({ revision: 1, presentedRevision: 1, reportedRevision: 1, sessionId: 'late' }); await checking
+  assert.equal(controller.getSnapshot()?.error, 'timeout')
+  assert.equal(f.rows[0].phase, 'connected', 'presentation failure must not terminate remote work')
+  controller.dispose()
+})
+
+test('synchronous navigation observer errors reach the error surface rather than escaping the click', async () => {
+  const f = fixture(), controller = new WorkspaceController(f.api)
+  controller.subscribe(() => { if (controller.getSnapshot()?.phase === 'connecting') throw new Error('unavailable panel') })
+  await controller.open(first)
+  assert.equal(controller.getSnapshot()?.phase, 'error')
+  controller.dispose()
+})
+
+test('a native acknowledgement cannot revive a remote closed by a selection observer', async () => {
+  const f = fixture(), controller = new WorkspaceController(f.api)
+  await controller.pick(first)
+  const state = controller.getSnapshot()!
+  controller.subscribe(() => { if (controller.getCatalogs().selected.sessionId === 'chosen') controller.close() })
+  f.views.set(state.channel!, { revision: state.revision!, presentedRevision: state.revision!, reportedRevision: state.revision!, sessionId: 'chosen' })
+  await controller.check()
+  assert.equal(controller.getSnapshot(), undefined)
+  assert.equal(controller.getCatalogs().selected.sourceId, 'local')
+  assert.equal(f.views.size, 0)
+  controller.dispose()
 })
 
 test('a remote host without the content bundle reports a setup requirement without opening its full app', async () => {
@@ -290,6 +361,7 @@ test('in-app web view preserves same-site cookies and refuses unsupported parent
 
 test('native slot delegation preserves the original leaf and follows its registration lifetime', async () => {
   const { SlotCore } = await import('@deepseek-ai/dsh-client-ui-slots')
+  const { createSnapshotStore } = await import('@deepseek-ai/dsh-client-store')
   const { installWorkspaces } = await import('../src/client/workspaces.js')
   const core = new SlotCore()
   const hero = 'conversation.hero.workspace.directoryFlow'
@@ -308,16 +380,22 @@ test('native slot delegation preserves the original leaf and follows its registr
   Object.defineProperty(globalThis, 'window', { value: { location: { protocol: 'http:', hostname: '127.0.0.1' } }, configurable: true })
   const observable = <T,>(value: T) => ({ getSnapshot: () => value, subscribe: () => () => {} })
   const localCalls: unknown[][] = []
+  const panels = createSnapshotStore<{ activePanelId: string | null; wide: boolean }>({ activePanelId: null, wide: false })
   const context = {
     inject: (_keys: string[], apply: (ctx: unknown) => void) => {
       const child = Object.create(context)
       Object.defineProperty(child, 'uiWorkspace', { value: {
         openSession(id: string) { localCalls.push(['session', id]) },
         async openWorkspace(id: string) { localCalls.push(['workspace', id]) },
+        startSession(id?: string) { localCalls.push(['newSession', id]) },
       } })
       apply(child)
     },
-    layout: { beginNavigation() {}, selectPanel() {}, panelInfo: observable({ activePanelId: null }) },
+    layout: {
+      // A previous navigation's cancellation can synchronously update geometry.
+      beginNavigation() { panels.set({ ...panels.getSnapshot(), wide: !panels.getSnapshot().wide }) },
+      selectPanel(id: string | null) { panels.set({ ...panels.getSnapshot(), activePanelId: id }) }, panelInfo: panels,
+    },
     uiSession: { adapter: { current: observable({ key: undefined }) } },
     get uiWorkspace(): never { throw new Error('uiWorkspace is not available outside its injection scope') },
     workspaces: {},
@@ -358,6 +436,12 @@ test('native slot delegation preserves the original leaf and follows its registr
     core.register({ name: hero, inject }, replacement)
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(core.entries(heroAlias)[0].component, replacement)
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(controller.getSnapshot()?.phase, 'ready', 'geometry notifications must not cancel entering the remote panel')
+    assert.equal(panels.getSnapshot().activePanelId, 'connections.workspace')
+    await controller.navigate('local', { kind: 'newSession' })
+    assert.deepEqual(localCalls.at(-1), ['newSession', undefined])
+    assert.equal(controller.getSnapshot(), undefined)
     for (const dispose of injections.reverse()) dispose()
     injections.length = 0
     assert.equal(core.specDynamic(heroAlias), undefined)

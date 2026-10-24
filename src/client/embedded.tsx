@@ -1,4 +1,5 @@
-import { useSyncExternalStore } from 'react'
+import { createElement, useEffect, useSyncExternalStore } from 'react'
+import type { ComponentType } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -68,7 +69,7 @@ export function embeddedEndpoint(document: Pick<Document, 'baseURI'>, request: t
 
 interface EmbeddedState {
   readonly message?: 'waiting' | 'disconnected' | 'expired' | 'failed'
-  readonly picker?: { readonly generation: number; readonly busy: boolean }
+  readonly picker?: { readonly generation: number; readonly busy: boolean; readonly newSession?: true }
 }
 
 function waitFor<T>(source: HostObservable<T>, ready: (value: T) => boolean, signal: AbortSignal): Promise<T> {
@@ -110,6 +111,7 @@ export class EmbeddedViewController {
   private applying = false
   private queuedReport?: Report
   private reporting = false
+  private presentedGeneration?: number
   private unsubscribe?: () => void
 
   constructor(
@@ -151,6 +153,15 @@ export class EmbeddedViewController {
       },
       onError: () => { if (current()) this.failed(generation) },
     }
+  }
+
+  /** Called after the delegated native picker commits, not when its intent arrives. */
+  pickerPresented(generation: number): void {
+    if (!this.active(generation) || this.state.getSnapshot().picker?.generation !== generation
+      || this.presentedGeneration === generation) return
+    this.presentedGeneration = generation
+    this.queuedReport = { op: 'reportView', channel: this.channel, revision: this.revision, presented: true }
+    if (!this.reporting) void this.flushReports()
   }
 
   private active(generation: number): boolean {
@@ -213,10 +224,17 @@ export class EmbeddedViewController {
         this.state.set({ picker: { generation, busy: false } })
         return
       }
+      if (intent.target.kind === 'newSession' && intent.target.id === undefined
+        && this.ctx.workspaces.list.getSnapshot().items.length === 0) {
+        this.state.set({ picker: { generation, busy: false, newSession: true } })
+        return
+      }
       if (intent.target.kind === 'session') {
         const id = intent.target.id
         this.ctx.uiWorkspace.openSession(id as Parameters<UiWorkspace['openSession']>[0])
         await waitFor(this.ctx.uiSession.adapter.current, value => value.key === id, this.operation.signal)
+      } else if (intent.target.kind === 'newSession') {
+        await this.startSession(intent.target.id, generation)
       } else {
         await this.openWorkspace(intent.target.id, generation)
       }
@@ -234,14 +252,25 @@ export class EmbeddedViewController {
     if (selected !== undefined) await waitFor(this.ctx.uiSession.adapter.current, value => value.key === selected, this.operation.signal)
   }
 
+  private async startSession(id: string | undefined, generation: number): Promise<void> {
+    if (id !== undefined && !this.ctx.workspaces.list.getSnapshot().items.some(workspace => workspace.workspaceId === id)) {
+      throw new Error('Native workspace is unavailable')
+    }
+    const previous = this.ctx.uiSession.adapter.current.getSnapshot().key
+    this.ctx.uiWorkspace.startSession(id as Parameters<UiWorkspace['startSession']>[0])
+    if (!this.active(generation)) return
+    await waitFor(this.ctx.uiSession.adapter.current, value => value.key !== undefined && value.key !== previous, this.operation.signal)
+  }
+
   private async picked(generation: number, path: string): Promise<void> {
     const picker = this.state.getSnapshot().picker
     if (!this.active(generation) || picker?.generation !== generation || picker.busy) return
-    this.state.set({ picker: { generation, busy: true } })
+    this.state.set({ picker: { ...picker, busy: true } })
     try {
       const workspace = await this.ctx.workspaces.create({ path })
       if (!this.active(generation)) return
-      await this.openWorkspace(workspace.workspaceId, generation)
+      if (picker.newSession) await this.startSession(workspace.workspaceId, generation)
+      else await this.openWorkspace(workspace.workspaceId, generation)
       if (!this.active(generation)) return
       this.applying = false
       this.state.set({})
@@ -325,7 +354,15 @@ export function applyEmbedded(ctx: Context): void {
         if (entry === delegated) return
         remove?.(); remove = undefined; delegated = entry
         if (!entry || (entry.children && Object.keys(entry.children).length > 0)) return
-        remove = ctx.slots.register({ name: 'connections.embedded.directoryFlow', inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+        const NativePicker = entry.component as ComponentType<DirectoryFlowOwnerProps>
+        const PresentedPicker = (props: DirectoryFlowOwnerProps) => {
+          const picker = useSyncExternalStore(view.state.subscribe, view.state.getSnapshot).picker
+          useEffect(() => {
+            if (props.open && picker) view.pickerPresented(picker.generation)
+          }, [props.open, picker?.generation])
+          return createElement(NativePicker, props)
+        }
+        remove = ctx.slots.register({ name: 'connections.embedded.directoryFlow', inject: entry.inject, store: entry.store, locale: entry.locale } as never, PresentedPicker as never)
       }
       const off = ctx.slots.subscribe('conversation.hero.workspace.directoryFlow', sync)
       sync()

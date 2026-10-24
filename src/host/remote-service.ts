@@ -147,14 +147,65 @@ async function authenticate(port, token) {
     const req = request({ host: '127.0.0.1', port, path: '/?token=' + encodeURIComponent(token), method: 'GET', timeout: 3000 }, response => {
       response.resume();
       const expected = 'dsh-auth-' + createHash('sha256').update('127.0.0.1:' + port).digest('base64url') + '=';
-      resolve(response.statusCode === 303 && response.headers.location === './' && (response.headers['set-cookie'] ?? []).some(cookie => cookie.startsWith(expected) && /;\s*HttpOnly/i.test(cookie) && /;\s*SameSite=Strict/i.test(cookie)));
+      const cookie = (response.headers['set-cookie'] ?? []).find(cookie => cookie.startsWith(expected) && /;\s*HttpOnly(?:;|$)/i.test(cookie) && /;\s*SameSite=Strict(?:;|$)/i.test(cookie) && /;\s*Path=\/(?:;|$)/i.test(cookie) && !/;\s*Domain=/i.test(cookie));
+      const value = cookie?.split(';')[0];
+      resolve(response.statusCode === 303 && response.headers.location === './' && value && /^[\x21-\x3a\x3c-\x7e]+$/.test(value) ? value : undefined);
     });
-    req.on('timeout', () => req.destroy()); req.on('error', () => resolve(false)); req.end();
+    req.on('timeout', () => req.destroy()); req.on('error', () => resolve(undefined)); req.end();
   });
 }
+async function pluginManagerRequest(port, cookie, method, args) {
+  if (!['listPlugins', 'setPluginEnabled', 'setBundleEnabled'].includes(method)) fail('plugin-activation');
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ type: 'client-request', rpcId: 'connections-plugin-' + method, method: 'pluginManager/' + method, payload: { args } });
+    const rejectRequest = () => reject(Object.assign(new Error('plugin-activation'), { code: 'plugin-activation' }));
+    const req = request({ host: '127.0.0.1', port, path: '/api/pluginManager/' + method, method: 'POST', headers: { cookie, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, response => {
+      if (response.statusCode !== 200) { response.destroy(); rejectRequest(); return; }
+      const chunks = []; let size = 0;
+      response.on('data', chunk => { size += chunk.length; if (size > 2 * 1024 * 1024) { req.destroy(); rejectRequest(); } else chunks.push(chunk); });
+      response.on('error', rejectRequest);
+      response.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          if (body.result?.ok !== true) { rejectRequest(); return; }
+          resolve(body.result.value);
+        } catch { rejectRequest(); }
+      });
+      response.on('close', () => { if (!response.complete) rejectRequest(); });
+    });
+    const timer = setTimeout(() => { req.destroy(); rejectRequest(); }, 120000);
+    req.on('close', () => clearTimeout(timer));
+    req.on('error', rejectRequest);
+    req.end(payload);
+  });
+}
+async function activateWorkspacePlugin(context) {
+  const host = await ready(context, await currentRelease(context.root));
+  const cookie = await authenticate(host.remotePort, host.token);
+  if (!cookie) fail('plugin-activation');
+  let plugins = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
+  if (!Array.isArray(plugins)) fail('plugin-activation');
+  if (!plugins.some(plugin => plugin?.moduleName === owner)) {
+    // A bundle added for the first time may not exist in the running Loader yet.
+    // Publish only our bundle through the native lifecycle, then resolve its
+    // actual entry before using the entry-level activation path below.
+    const result = await pluginManagerRequest(host.remotePort, cookie, 'setBundleEnabled', { name: owner, enabled: true });
+    if (result?.application === 'restart-required') fail('plugin-restart');
+    if (result?.application !== 'applied') fail('plugin-activation');
+    plugins = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
+    if (!Array.isArray(plugins)) fail('plugin-activation');
+  }
+  // Select only this bundle's actual Cordis entry. Other entries, including
+  // native layout entries disabled by the remote bundle, are never mutated.
+  const entries = plugins.filter(plugin => plugin?.moduleName === owner);
+  if (entries.length !== 1 || entries[0].patchId !== 'connections' || typeof entries[0].entryId !== 'string' || entries[0].entryId.length === 0 || entries[0].entryId.length > 1024 || entries[0].readOnlyReason) fail('plugin-activation');
+  const result = await pluginManagerRequest(host.remotePort, cookie, 'setPluginEnabled', { id: entries[0].entryId, enabled: true });
+  if (result?.application === 'restart-required') fail('plugin-restart');
+  if (result?.application !== 'applied') fail('plugin-activation');
+}
 async function installWorkspacePlugin(context, plugin) {
-  try { await installWorkspacePluginContents(context, plugin); }
-  catch (error) { if (error.code === 'ownership') throw error; fail('install'); }
+  try { return await installWorkspacePluginContents(context, plugin); }
+  catch (error) { if (['ownership', 'plugin-activation', 'plugin-restart'].includes(error.code)) throw error; fail('install'); }
 }
 async function installWorkspacePluginContents(context, plugin) {
   if (plugin === undefined) return; // isolated lifecycle fixtures
@@ -165,18 +216,35 @@ async function installWorkspacePluginContents(context, plugin) {
   const directory = join(root, 'plugins');
   await privateDir(directory);
   const receipt = join(root, 'home/connections-workspace-plugin.json');
-  if (await exists(receipt) && (await json(receipt)).digest === plugin.digest) return;
+  const previous = await exists(receipt) ? await json(receipt) : undefined;
+  const installed = previous?.digest === plugin.digest;
+  if (installed && previous.schema === 2 && ['applied', 'startup'].includes(previous.activation)) return;
   const file = join(directory, plugin.digest + '.tgz');
   if (!await exists(file)) await fs.writeFile(file, archive, { flag: 'wx', mode: 0o600 });
   await privatePath(file);
   if (createHash('sha256').update(await fs.readFile(file)).digest('hex') !== plugin.digest) fail('ownership');
-  const installer = join(root, 'installer');
-  await privateDir(installer);
-  const pnpm = join(installer, 'node_modules/pnpm/bin/pnpm.cjs');
-  if (!await exists(pnpm)) await run('npm', ['install', '--prefix', installer, '--save-exact', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--', 'pnpm@11.13.1'], { timeout: 600000, log: join(root, 'install.log') });
-  const env = { ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: join(installer, 'node_modules/.bin') + ':' + dirname(marker.node) + ':' + (process.env.PATH ?? '/usr/bin:/bin') };
-  await run(marker.node, [join(root, 'current/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'plugin', '--profile', 'web', 'add', '--save-exact', file], { timeout: 600000, env, log: join(root, 'install.log') });
-  await atomic(receipt, JSON.stringify({ digest: plugin.digest }));
+  if (!installed) {
+    const installer = join(root, 'installer');
+    await privateDir(installer);
+    const pnpm = join(installer, 'node_modules/pnpm/bin/pnpm.cjs');
+    if (!await exists(pnpm)) await run('npm', ['install', '--prefix', installer, '--save-exact', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--', 'pnpm@11.13.1'], { timeout: 600000, log: join(root, 'install.log') });
+    const env = { ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: join(installer, 'node_modules/.bin') + ':' + dirname(marker.node) + ':' + (process.env.PATH ?? '/usr/bin:/bin') };
+    await run(marker.node, [join(root, 'current/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'plugin', '--profile', 'web', 'add', '--save-exact', file], { timeout: 600000, env, log: join(root, 'install.log') });
+  }
+  if ((await properties(context.unit)).ActiveState === 'active') {
+    // CLI installation updates files but the native manifest watcher may skip a
+    // same-bundle change. Setting this entry enabled reconciles it without a
+    // Host restart, including migration from legacy install-only receipts.
+    await activateWorkspacePlugin(context);
+    await atomic(receipt, JSON.stringify({ schema: 2, digest: plugin.digest, activation: 'applied' }));
+    return;
+  }
+  return { receipt, digest: plugin.digest };
+}
+async function readyInstalled(context, version, installation) {
+  const result = await ready(context, version);
+  if (installation) await atomic(installation.receipt, JSON.stringify({ schema: 2, digest: installation.digest, activation: 'startup' }));
+  return result;
 }
 async function ready(context, version) {
   const { root, unit } = context;
@@ -256,13 +324,13 @@ async function worker(input) {
   if (previous === undefined) {
     await stage(context, input.version);
     await select(root, input.version);
-    await installWorkspacePlugin(context, input.plugin);
+    const installation = await installWorkspacePlugin(context, input.plugin);
     await installUnit(context);
     await start(context);
-    return ready(context, input.version);
+    return readyInstalled(context, input.version, installation);
   }
   await installUnit(context);
-  if (input.action === 'prepare' || input.version === previous) { await installWorkspacePlugin(context, input.plugin); await start(context); return ready(context, previous); }
+  if (input.action === 'prepare' || input.version === previous) { const installation = await installWorkspacePlugin(context, input.plugin); await start(context); return readyInstalled(context, previous, installation); }
   // Installation and validation occur while the previous Harness is still serving.
   await stage(context, input.version);
   const transaction = { previous, next: input.version, phase: 'stopping' };
@@ -275,9 +343,9 @@ async function worker(input) {
     transaction.phase = 'snapshot'; await atomic(transactionPath, JSON.stringify(transaction));
     await select(root, input.version);
     transaction.phase = 'switched'; await atomic(transactionPath, JSON.stringify(transaction));
-    await installWorkspacePlugin(context, input.plugin);
+    const installation = await installWorkspacePlugin(context, input.plugin);
     await start(context);
-    const result = await ready(context, input.version);
+    const result = await readyInstalled(context, input.version, installation);
     await fs.rm(transactionPath);
     await fs.rm(join(root, 'rollback.tar'), { force: true }).catch(() => {});
     return result;
@@ -328,7 +396,7 @@ async function main(encoded) {
     if (!['prepare', 'update'].includes(input.action) || !/^0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) || !/^[0-9a-f-]{36}$/.test(input.operation)) fail('ownership');
     result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input, encoded);
   } catch (error) {
-    result = { error: ['unavailable', 'linger', 'ownership', 'install', 'startup', 'rollback', 'recovery', 'busy'].includes(error.code) ? error.code : 'startup' };
+    result = { error: ['unavailable', 'linger', 'ownership', 'install', 'plugin-activation', 'plugin-restart', 'startup', 'rollback', 'recovery', 'busy'].includes(error.code) ? error.code : 'startup' };
   }
   if (process.argv[2] === '--worker') {
     const root = input.root ?? join(homedir(), '.local/share/dsh-connections');

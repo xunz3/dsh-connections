@@ -57,11 +57,44 @@ if (process.argv[2] === 'plugin') {
 if (version === '0.2.98') { await writeFile(process.env.DSH_HOME + '/state.txt', 'new incompatible state'); process.exit(1); }
 if (version === '0.2.99') await new Promise(resolve => setTimeout(resolve, 1000));
 const token = randomBytes(32).toString('base64url');
-const server = createServer((req, res) => {
-  if (req.url !== '/?token=' + token) { res.writeHead(401).end(); return; }
+const installedPath = process.env.DSH_HOME + '/workspace-plugin-installed';
+const runtimePath = process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-runtime';
+await writeFile(runtimePath, await readFile(installedPath, 'utf8').catch(() => ''));
+const server = createServer(async (req, res) => {
   const authority = req.headers.host;
-  const cookie = 'dsh-auth-' + createHash('sha256').update(authority).digest('base64url');
-  res.writeHead(303, { location: './', 'set-cookie': cookie + '=v1.fixture; HttpOnly; SameSite=Strict; Path=/' }).end();
+  const cookie = 'dsh-auth-' + createHash('sha256').update(authority).digest('base64url') + '=v1.fixture';
+  if (req.url === '/?token=' + token) { res.writeHead(303, { location: './', 'set-cookie': cookie + '; HttpOnly; SameSite=Strict; Path=/' }).end(); return; }
+  if (req.headers.cookie !== cookie || req.method !== 'POST') { res.writeHead(401).end(); return; }
+  const chunks = []; for await (const chunk of req) chunks.push(chunk);
+  const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (input.type !== 'client-request' || req.url !== '/api/' + input.method) { res.writeHead(400).end(); return; }
+  const respond = value => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ result: { ok: true, value } }));
+  if (input.method === 'pluginManager/listPlugins') {
+    const loaded = await readFile(runtimePath, 'utf8');
+    const duplicate = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-duplicate', 'utf8').then(() => true, () => false);
+    respond([
+      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz/dsh-connections', patchId: 'connections', enabled: true }] : []),
+      ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz/dsh-connections', patchId: 'duplicate', enabled: true }] : []),
+      { entryId: 'web:ui-layout', moduleName: '@deepseek/ui-layout', patchId: 'ui-layout', enabled: false },
+    ]); return;
+  }
+  if (input.method === 'pluginManager/setBundleEnabled') {
+    const args = input.payload?.args;
+    if (args?.name !== '@xunz/dsh-connections' || args.enabled !== true || Object.keys(args).length !== 2) { res.writeHead(400).end(); return; }
+    const application = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/bundle-application', 'utf8').catch(() => 'applied');
+    await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/bundle-activations.jsonl', JSON.stringify({ args, application }) + '\\n');
+    if (application === 'applied') await writeFile(runtimePath, await readFile(installedPath, 'utf8'));
+    respond({ application, changed: false, warnings: [], message: 'Private native error ' + token }); return;
+  }
+  if (input.method === 'pluginManager/setPluginEnabled') {
+    const args = input.payload?.args;
+    if (args?.id !== 'web:connections' || args.enabled !== true || Object.keys(args).length !== 2) { res.writeHead(400).end(); return; }
+    const application = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-application', 'utf8').catch(() => 'applied');
+    await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-activations.jsonl', JSON.stringify({ args, application, previousDigest: await readFile(runtimePath, 'utf8') }) + '\\n');
+    if (application === 'applied') await writeFile(runtimePath, await readFile(installedPath, 'utf8'));
+    respond({ application, changed: false, warnings: [], message: 'Private native error ' + token }); return;
+  }
+  res.writeHead(404).end();
 });
 server.listen(0, '127.0.0.1', () => console.log('dsh web: http://127.0.0.1:' + server.address().port + '/?token=' + token));
 process.on('SIGTERM', () => server.close(() => process.exit(0)));

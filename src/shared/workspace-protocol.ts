@@ -28,6 +28,7 @@ export interface WorkspaceCatalog {
 }
 export type WorkspaceNavigationTarget =
   | { kind: 'session' | 'workspace'; id: string }
+  | { kind: 'newSession'; id?: string }
   | { kind: 'pick' }
 export interface WorkspaceViewIntent {
   revision: number
@@ -40,6 +41,8 @@ export interface WorkspaceViewState {
   revision: number
   /** Last navigation acknowledged by the native remote document. */
   reportedRevision: number
+  /** Last navigation whose native content or directory picker is visible. */
+  presentedRevision: number
   intent?: WorkspaceViewIntent
   sessionId?: string
   error?: WorkspaceNavigationError
@@ -54,7 +57,7 @@ export type WorkspaceRequest =
   | { op: 'openView' }
   | { op: 'navigate'; channel: string; requestId: string; target: WorkspaceNavigationTarget }
   | { op: 'pollView'; channel: string; afterRevision: number }
-  | { op: 'reportView'; channel: string; revision: number; sessionId?: string; error?: WorkspaceNavigationError }
+  | { op: 'reportView'; channel: string; revision: number; presented?: true; sessionId?: string; error?: WorkspaceNavigationError }
   | { op: 'viewState'; channel: string }
   | { op: 'closeView'; channel: string }
 
@@ -134,6 +137,10 @@ function navigationError(value: unknown): WorkspaceNavigationError {
 export function parseWorkspaceTarget(value: unknown): WorkspaceNavigationTarget {
   const target = object(value)
   if (target.kind === 'pick') { keys(target, ['kind']); return { kind: 'pick' } }
+  if (target.kind === 'newSession') {
+    keys(target, ['kind', 'id'])
+    return { kind: 'newSession', ...(target.id === undefined ? {} : { id: parseWorkspaceId(target.id) }) }
+  }
   if (target.kind !== 'session' && target.kind !== 'workspace') throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   keys(target, ['kind', 'id'])
   return { kind: target.kind, id: parseWorkspaceId(target.id) }
@@ -160,9 +167,12 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
       keys(input, ['op', 'channel', 'afterRevision'])
       return { op, channel: parseWorkspaceChannel(input.channel), afterRevision: revision(input.afterRevision) }
     case 'reportView':
-      keys(input, ['op', 'channel', 'revision', 'sessionId', 'error'])
+      keys(input, ['op', 'channel', 'revision', 'presented', 'sessionId', 'error'])
+      if (input.presented !== undefined && input.presented !== true) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+      if (input.presented === true && (input.sessionId !== undefined || input.error !== undefined)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
       return {
         op, channel: parseWorkspaceChannel(input.channel), revision: revision(input.revision),
+        ...(input.presented === undefined ? {} : { presented: true }),
         ...(input.sessionId === undefined ? {} : { sessionId: parseWorkspaceId(input.sessionId) }),
         ...(input.error === undefined ? {} : { error: navigationError(input.error) }),
       }
@@ -203,11 +213,15 @@ export function parseWorkspaceViewState(value: unknown): WorkspaceViewState {
   const intent = state.intent === undefined ? undefined : object(state.intent)
   const result: WorkspaceViewState = {
     revision: revision(state.revision), reportedRevision: revision(state.reportedRevision),
+    // Older remote bundles have no presentation acknowledgement. Never infer
+    // visible content from their accepted or completed navigation alone.
+    presentedRevision: state.presentedRevision === undefined ? 0 : revision(state.presentedRevision),
     ...(intent === undefined ? {} : { intent: { revision: revision(intent.revision), requestId: parseWorkspaceId(intent.requestId), target: parseWorkspaceTarget(intent.target) } }),
     ...(state.sessionId === undefined ? {} : { sessionId: parseWorkspaceId(state.sessionId) }),
     ...(state.error === undefined ? {} : { error: navigationError(state.error) }),
   }
-  if (result.reportedRevision > result.revision || (result.intent !== undefined && result.intent.revision !== result.revision)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  if (result.reportedRevision > result.revision || result.presentedRevision > result.revision
+    || (result.intent !== undefined && result.intent.revision !== result.revision)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   return result
 }
 /** Project trusted shapes at both sides of the local Host's HTTP relay. */

@@ -55,13 +55,13 @@ export function installWorkspaceShortcuts(shortcuts: WorkspaceShortcuts, callbac
     if (row === undefined || row.conflicts.length !== 0 || !commands.has(row.id)) return
 
     const sourceId = callbacks.getRemoteSourceId()
-    if (row.id !== 'session.search' && row.id !== 'workspace.add' && sourceId === undefined) return
+    if (row.id !== 'session.search' && row.id !== 'workspace.add' && row.id !== 'session.new' && sourceId === undefined) return
     input.consume()
     if (gesture.repeat) return
     switch (row.id) {
       case 'session.search': callbacks.onSearch(); break
       case 'workspace.add': callbacks.onAddWorkspace(); break
-      case 'session.new': callbacks.onNewSession(sourceId!); break
+      case 'session.new': callbacks.onNewSession(sourceId ?? 'local'); break
       case 'session.archive': callbacks.onBlocked('session.archive', sourceId!); break
       case 'session.fork': callbacks.onBlocked('session.fork', sourceId!); break
     }

@@ -205,7 +205,7 @@ export class WorkspaceEndpoint {
         this.expire()
         if (this.channels.size >= this.maxChannels) throw new EndpointError('CONFLICT')
         const channel = randomBytes(32).toString('base64url')
-        const view: ViewChannel = { expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0 }, requests: new Map(), waiters: new Set() }
+        const view: ViewChannel = { expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set() }
         this.channels.set(channel, view)
         return { channel, ...view.state }
       }
@@ -227,7 +227,7 @@ export class WorkspaceEndpoint {
         view.requests.set(input.requestId, target)
         const revision = view.state.revision + 1
         view.state = {
-          revision, reportedRevision: view.state.reportedRevision,
+          revision, reportedRevision: view.state.reportedRevision, presentedRevision: view.state.presentedRevision,
           intent: { revision, requestId: input.requestId, target: input.target },
           ...(view.state.sessionId === undefined ? {} : { sessionId: view.state.sessionId }),
         }
@@ -244,8 +244,12 @@ export class WorkspaceEndpoint {
         const view = this.get(input.channel)
         if (input.revision > view.state.revision) throw new EndpointError('BAD_REQUEST')
         if (input.revision < view.state.revision) return view.state
+        if (input.presented === true) {
+          view.state = { ...view.state, presentedRevision: input.revision }
+          return view.state
+        }
         view.state = {
-          revision: view.state.revision, reportedRevision: input.revision,
+          revision: view.state.revision, reportedRevision: input.revision, presentedRevision: input.revision,
           ...(view.state.intent === undefined ? {} : { intent: view.state.intent }),
           ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
           ...(input.error === undefined ? {} : { error: input.error }),

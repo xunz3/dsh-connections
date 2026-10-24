@@ -19,6 +19,10 @@ try {
   for (const target of [manifest.exports['.'].default, manifest.exports['.'].types, manifest.exports['./client']]) assert(entries.includes(`package/${target.replace(/^\.\//, '')}`))
   assert(read('dist/client.js').includes(`window.__ModuleLoader__.load({id:${JSON.stringify(manifest.name)}`))
   assert(read('cordis.patch.yml').includes(manifest.name))
+  assert.match(read('cordis.patch.yml'), /id: ui-sidebar[\s\S]*disabled: true/)
+  assert(!read('cordis.patch.yml').includes('directory-picker'), 'The local profile must retain its native picker choice')
+  assert.match(read('dist/native-sidebar.LICENSE'), /Copyright \(c\) 2026 DeepSeek/)
+  assert(!read('dist/client.js').includes('require("@deepseek-ai/dsh-client-ui-sidebar/client")'), 'Disabled sidebar must be composed from the installed native factory')
   assert(!read('dist/client.js').includes('node:child_process'), 'Host implementation leaked into the browser bundle')
   const remoteArchive = join(directory, 'remote-content.tgz')
   await writeFile(remoteArchive, execFileSync('tar', ['-xOzf', archive, 'package/dist/remote-plugin.tgz']))
@@ -32,8 +36,17 @@ try {
   assert(remoteEntries.includes('package/dist/client.js'))
   assert(!remoteEntries.includes('package/dist/remote-plugin.tgz'), 'Remote archive must not contain itself')
   assert.equal(remoteRead('dist/client.js'), read('dist/client.js'), 'Both profiles must use identical client code')
-  assert.match(remoteRead('cordis.patch.yml'), /id: ui-layout[\s\S]*disabled: true/)
-  assert.match(remoteRead('cordis.patch.yml'), /embedded: true/)
+  assert.equal(remoteRead('dist/native-sidebar.LICENSE'), read('dist/native-sidebar.LICENSE'))
+  const remotePatch = remoteRead('cordis.patch.yml')
+  assert.match(remotePatch, /id: ui-layout[\s\S]*disabled: true/)
+  assert.match(remotePatch, /embedded: true/)
+  assert.match(remotePatch, /- id: directory-picker\n  name: '@deepseek-ai\/dsh-host-directory-picker-auto'\n  disabled: true/,
+    'Remote profiles must disable auto selection before pinning the browser picker')
+  assert.match(remotePatch, /    - id: directory-picker-browse\n      name: '@deepseek-ai\/dsh-host-directory-picker-browse'/,
+    'Remote profiles need the native browser directory service')
+  assert.match(remotePatch, /    - id: ui-directory-picker-browse\n      name: '@deepseek-ai\/dsh-client-ui-directory-picker-browse'/,
+    'Remote profiles need the matching native browser directory surface')
+  assert(!remotePatch.includes('directory-picker-native'), 'Remote profiles must not open a server-side system dialog')
   for (const entry of entries.filter(path => path.endsWith('.md'))) {
     for (const match of read(entry.slice('package/'.length)).matchAll(/\]\(([^)#]+)(?:#[^)]*)?\)/g)) {
       const target = match[1]

@@ -11,12 +11,14 @@ export interface WorkspaceState {
   url?: string
   channel?: string
   revision?: number
-  error?: 'failed' | 'unavailable' | 'disconnected' | 'pluginRequired'
+  presented?: boolean
+  error?: 'failed' | 'unavailable' | 'disconnected' | 'pluginRequired' | 'timeout'
 }
 export interface WorkspaceOptions {
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
   prepareUrl?: (url: string) => string
   localNavigate?: (target: WorkspaceNavigationTarget) => void | Promise<void>
+  presentationTimeoutMs?: number
 }
 const STORAGE_KEY = '@xunz/dsh-connections/selection'
 const LEGACY_KEY = '@xunz/dsh-connections/selected'
@@ -43,6 +45,9 @@ export class WorkspaceController {
   private pickFallback?: WorkspaceSelection
   private refreshing?: Promise<void>
   private timer?: ReturnType<typeof setTimeout>
+  private presentationTimer?: ReturnType<typeof setTimeout>
+  private presentationDeadline?: ReturnType<typeof setTimeout>
+  private target?: WorkspaceNavigationTarget
   private readonly listeners = new Set<() => void>()
   readonly getSnapshot = () => this.state
   readonly getCatalogs = () => this.catalogs
@@ -133,10 +138,13 @@ export class WorkspaceController {
     await this.refresh()
   }
   async reconnect(id: string): Promise<void> {
-    if (this.state?.id === id) await this.open(id, selectionTarget(this.catalogs.selected))
+    if (this.state?.id === id) await this.open(id, this.target ?? selectionTarget(this.catalogs.selected))
     else { await this.api.connect(id); await this.refresh() }
   }
-  pick(id: string): Promise<void> { return this.open(id, { kind: 'pick' }) }
+  pick(id: string): Promise<void> { return this.navigate(id, { kind: 'pick' }) }
+  newSession(workspaceId?: string): Promise<void> {
+    return this.navigate(this.catalogs.selected.sourceId, { kind: 'newSession', ...(workspaceId === undefined ? {} : { id: workspaceId }) })
+  }
   async navigate(id: string, target: WorkspaceNavigationTarget): Promise<void> {
     if (id === 'local') { this.close(); await this.options.localNavigate?.(target); await this.refresh(); return }
     await this.open(id, target)
@@ -152,14 +160,16 @@ export class WorkspaceController {
     const previousDestination = this.destination
     const previousSelection = this.catalogs.selected
     const version = ++this.version
+    this.stopPresentationWatch()
+    this.target = target
     this.navigating = version
     const current = () => !this.disposed && version === this.version
     const reuse = previous?.id === id && previous.phase === 'ready' && previous.channel !== undefined
-    if (!reuse) { this.release(previous); this.destination = undefined; this.publish({ id, name: this.rows.find(row => row.id === id)?.name ?? '', phase: 'connecting' }) }
-    this.select({ sourceId: id, ...(target?.kind === 'session' ? { sessionId: target.id } : target?.kind === 'workspace' ? { workspaceId: target.id } : {}) })
     let channel: string | undefined
     let acquired = false
     try {
+      if (!reuse) { this.release(previous); this.destination = undefined; this.publish({ id, name: this.rows.find(row => row.id === id)?.name ?? '', phase: 'connecting' }) }
+      this.select({ sourceId: id, ...(target?.kind === 'session' ? { sessionId: target.id } : target?.kind === 'workspace' || target?.kind === 'newSession' && target.id !== undefined ? { workspaceId: target.id } : {}) })
       const row = (await this.api.list()).find(row => row.id === id)
       if (!current()) return
       if (!row) throw new Error('missing-connection')
@@ -173,6 +183,7 @@ export class WorkspaceController {
         target = workspace ? { kind: 'workspace', id: workspace.id } : { kind: 'pick' }
       }
       if (!current()) return
+      this.target = target
       let url: string
       if (reuse && sameAuthority(previousDestination, connected)) {
         channel = previous.channel!; url = previous.url!
@@ -194,7 +205,8 @@ export class WorkspaceController {
       if (!current()) { if (acquired) this.release({ id, name: '', phase: 'ready', channel }); return }
       this.destination = connected
       this.pickFallback = target.kind === 'pick' && previousSelection.sourceId === id && previous?.phase === 'ready' ? previousSelection : undefined
-      this.publish({ id, name: row.name, phase: 'ready', url, channel, revision: view.revision })
+      this.publish({ id, name: row.name, phase: 'ready', url, channel, revision: view.revision, presented: false })
+      this.watchPresentation(version)
       void this.refresh()
     } catch (error) {
       if (!current()) { if (channel && acquired) this.release({ id, name: '', phase: 'ready', channel }); return }
@@ -208,8 +220,29 @@ export class WorkspaceController {
   private release(state?: WorkspaceState): void {
     if (state?.channel) void this.api.workspace(state.id, { op: 'closeView', channel: state.channel }).catch(() => {})
   }
+  private stopPresentationWatch(): void {
+    clearTimeout(this.presentationTimer); clearTimeout(this.presentationDeadline)
+  }
+  private watchPresentation(version: number): void {
+    const pending = () => !this.disposed && version === this.version && this.state?.phase === 'ready' && this.state.presented !== true
+    if (!pending()) return
+    // A navigable HTTP address is not proof that the native document loaded.
+    // Keep this deadline independent of slow catalog or HTTP health requests.
+    this.presentationDeadline = setTimeout(() => {
+      if (!pending()) return
+      const state = this.state!
+      this.stopPresentationWatch(); this.release(state); this.destination = undefined
+      this.publish({ id: state.id, name: state.name, phase: 'error', error: 'timeout' })
+    }, this.options.presentationTimeoutMs ?? 30_000)
+    const poll = async () => {
+      if (!pending()) return
+      await this.check()
+      if (pending()) this.presentationTimer = setTimeout(poll, 1000)
+    }
+    void poll()
+  }
   /** Closing the view never stops a connection, native session or running task. */
-  close(): void { this.version++; this.release(this.state); this.state = undefined; this.destination = undefined; this.pickFallback = undefined; this.select({ sourceId: 'local' }); this.remember({ sourceId: 'local' }); this.emit() }
+  close(): void { this.version++; this.stopPresentationWatch(); this.release(this.state); this.state = undefined; this.destination = undefined; this.target = undefined; this.pickFallback = undefined; this.select({ sourceId: 'local' }); this.remember({ sourceId: 'local' }); this.emit() }
   async check(): Promise<void> {
     const state = this.state
     if (!state || state.phase !== 'ready' || this.navigating === this.version) return
@@ -224,18 +257,28 @@ export class WorkspaceController {
       if (view.reportedRevision >= (state.revision ?? 0)) {
         if (view.error === 'NAVIGATION_FAILED') throw new Error('navigation-failed')
         if (view.error === 'PICK_CANCELLED') {
-          if (this.pickFallback && selectionTarget(this.pickFallback)) this.select(this.pickFallback)
+          if (this.pickFallback && selectionTarget(this.pickFallback)) {
+            this.target = selectionTarget(this.pickFallback); this.select(this.pickFallback)
+            if (!current()) return
+            this.stopPresentationWatch(); this.publish({ ...state, presented: true })
+          }
           else this.close()
           return
         }
-        if (view.sessionId !== undefined) this.select({ sourceId: state.id, sessionId: view.sessionId })
+        if (view.sessionId !== undefined) { this.target = { kind: 'session', id: view.sessionId }; this.select({ sourceId: state.id, sessionId: view.sessionId }) }
+      }
+      if (!current()) return
+      if (view.presentedRevision >= (state.revision ?? 0) && state.presented !== true) {
+        this.stopPresentationWatch()
+        this.publish({ ...state, presented: true })
       }
     } catch (error) {
       if (!current()) return
+      this.stopPresentationWatch()
       this.release(state)
       this.destination = undefined
       this.publish({ id: state.id, name: state.name, phase: 'error', error: error instanceof Error && error.message === 'navigation-failed' ? 'failed' : 'disconnected' })
     }
   }
-  dispose(): void { this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
+  dispose(): void { this.stopPresentationWatch(); this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
 }

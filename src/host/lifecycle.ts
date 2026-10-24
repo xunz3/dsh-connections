@@ -34,6 +34,8 @@ const messages = {
   linger: 'Enable persistent user services on the remote host: loginctl enable-linger "$USER". Then reconnect.',
   ownership: 'The remote Connections directory or service belongs to another installation. Resolve that conflict before connecting.',
   install: 'The remote Harness installation failed. Check the remote npm registry, disk space, and private install.log, then reconnect.',
+  'plugin-activation': 'The remote Connections update could not be activated. Check the remote plugin status and private service.log, then reconnect. The Harness service was not restarted.',
+  'plugin-restart': 'The remote Connections update requires a Harness restart. Finish active work, restart the managed service, then reconnect. No restart was performed automatically.',
   startup: 'The remote Harness service did not become ready. Check its private service.log and systemctl --user status dsh-connections.service.',
   rollback: 'The update failed; the previous Harness version and state were restored.',
   recovery: 'The update could not be rolled back automatically. The private recovery snapshot was preserved; inspect the remote installation before retrying.',

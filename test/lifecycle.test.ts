@@ -108,7 +108,8 @@ test('transfers the private workspace bundle through a request file and installs
     const first = await prepareHost({ target: 'dev' }, f.options)
     const root = f.options.remoteRoot!
     const digest = createHash('sha256').update(archive).digest('hex')
-    assert.deepEqual(JSON.parse(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')), { digest })
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')), { schema: 2, digest, activation: 'startup' })
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), digest)
     assert.deepEqual(await readFile(join(root, 'plugins', `${digest}.tgz`)), archive)
     assert.equal((await stat(join(root, 'plugins', `${digest}.tgz`))).mode & 0o777, 0o600)
     const installs = (await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; digest: string; home: string; agents: string; path: string })
@@ -142,9 +143,17 @@ test('adding and refreshing remote workspace support preserves the existing Host
     await writeFile(state, 'Existing native state must survive', { mode: 0o600 })
     const archive = await workspaceArchive()
     f.setWorkspacePlugin(archive)
+    await writeFile(join(f.directory, 'bundle-application'), 'restart-required')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-restart' })
+    await assert.rejects(stat(join(root, 'home/connections-workspace-plugin.json')), { code: 'ENOENT' })
+    assert.equal((await f.state()).pid, first.pid)
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), '')
+    await rm(join(f.directory, 'bundle-application'))
     const attached = await prepareHost({ target: 'dev' }, f.options)
     assert.deepEqual(attached, first)
     const previousReceipt = await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')
+    assert.equal(JSON.parse(previousReceipt).activation, 'applied')
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), createHash('sha256').update(archive).digest('hex'))
     // Changing the gzip timestamp preserves its contents and changes the digest.
     archive[4] = archive[4]! ^ 1
     await writeFile(join(f.directory, 'plugin-fail'), '')
@@ -154,10 +163,62 @@ test('adding and refreshing remote workspace support preserves the existing Host
     await rm(join(f.directory, 'plugin-fail'))
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
     assert.notEqual(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8'), previousReceipt)
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), createHash('sha256').update(archive).digest('hex'))
+    const activations = (await readFile(join(f.directory, 'plugin-activations.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: unknown; application: string; previousDigest: string })
+    assert.equal(activations.length, 2)
+    assert.ok(activations.every(row => row.application === 'applied'))
+    assert.deepEqual(activations.map(row => row.args), [{ id: 'web:connections', enabled: true }, { id: 'web:connections', enabled: true }])
+    assert.deepEqual(activations.map(row => row.previousDigest), [JSON.parse(previousReceipt).digest, JSON.parse(previousReceipt).digest])
+    const bundles = (await readFile(join(f.directory, 'bundle-activations.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: unknown; application: string })
+    assert.deepEqual(bundles, [
+      { args: { name: '@xunz/dsh-connections', enabled: true }, application: 'restart-required' },
+      { args: { name: '@xunz/dsh-connections', enabled: true }, application: 'applied' },
+    ])
     assert.equal(await readFile(state, 'utf8'), 'Existing native state must survive')
     const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
     assert.equal(commands.filter(row => row.command === 'systemctl' && row.args.includes('stop')).length, 0)
     assert.equal(commands.filter(row => row.command === 'npm' && row.args.at(-1) === 'pnpm@11.13.1').length, 1)
+  } finally { await f.dispose() }
+})
+
+test('migrates install-only receipts and retries failed native activation without restarting the Host', { timeout: 40_000 }, async () => {
+  const archive = await workspaceArchive()
+  const f = await fixture({}, archive)
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const digest = createHash('sha256').update(archive).digest('hex')
+    const receipt = join(f.options.remoteRoot!, 'home/connections-workspace-plugin.json')
+    const legacy = JSON.stringify({ digest })
+    await writeFile(receipt, legacy)
+    // Model the real failure: CLI files/receipt are new, but the same running
+    // native bundle has not been reconciled and is still serving old code.
+    await writeFile(join(f.directory, 'plugin-runtime'), 'old-runtime')
+    await writeFile(join(f.directory, 'plugin-duplicate'), '')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-activation' })
+    assert.equal(await readFile(receipt, 'utf8'), legacy)
+    await assert.rejects(stat(join(f.directory, 'plugin-activations.jsonl')), { code: 'ENOENT' })
+    await rm(join(f.directory, 'plugin-duplicate'))
+    for (const [application, code] of [['failed', 'plugin-activation'], ['restart-required', 'plugin-restart']] as const) {
+      await writeFile(join(f.directory, 'plugin-application'), application)
+      await assert.rejects(prepareHost({ target: 'dev' }, f.options), error => {
+        assert.ok(error instanceof RemoteHostError)
+        assert.equal(error.code, code)
+        assert.ok(!error.message.includes(first.token))
+        return true
+      })
+      assert.equal(await readFile(receipt, 'utf8'), legacy)
+      assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), 'old-runtime')
+      assert.equal((await f.state()).pid, first.pid)
+    }
+    await rm(join(f.directory, 'plugin-application'))
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.deepEqual(JSON.parse(await readFile(receipt, 'utf8')), { schema: 2, digest, activation: 'applied' })
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), digest)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.equal((await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').length, 1)
+    assert.equal((await readFile(join(f.directory, 'plugin-activations.jsonl'), 'utf8')).trim().split('\n').length, 3)
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.equal(commands.filter(row => row.command === 'systemctl' && row.args.includes('stop')).length, 0)
   } finally { await f.dispose() }
 })
 

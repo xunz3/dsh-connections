@@ -4,6 +4,8 @@
 
 Install into the local Harness Web profile and restart it. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux is the verified controller platform; macOS OpenSSH follows the same path but is unverified. Windows ControlMaster is not supported.
 
+The local bundle reuses Harness's native sidebar with navigation routed to the selected computer. Disable the whole Connections bundle to remove its composition patch and restore the original sidebar deployment; disabling only its individual plugin entry leaves the bundle's sidebar patch in place.
+
 Configure SSH normally and verify `ssh devbox` in a terminal first. Connections uses noninteractive key/agent authentication and existing `known_hosts`. Password prompts and first-use host trust are handled in the terminal. Ports, IPv6 targets, jump hosts and other settings belong in SSH config.
 
 For **Run in the background**, the remote computer needs:
@@ -19,8 +21,10 @@ If linger is disabled, configure it using your host's normal policy (`loginctl e
 1. In **Settings → Connections → Add connection**, select an SSH host from the dropdown or choose **Add manually** to enter an alias or `user@hostname`. The name is filled from your selection and can be edited.
 2. Keep **Run in the background** selected. No launch URL is needed. **Connect automatically when Harness starts** is enabled by default for new managed connections.
 3. Save the connection, then select **Connect**. Saving does not initiate SSH. The first connection installs pinned Harness `0.2.1-rc.2`, its Connections content bundle, and starts its user service. Later connections reuse it.
-4. Connected computers appear in the unified **Workspaces** sidebar. Select an existing remote project or chat, or use **Add workspace** and choose its computer.
-5. Choose a directory using the remote native picker. Conversation and files appear in the main area; the local Workspaces sidebar stays available. Select a local row or the top **New Session** button to return to this computer. Click a remote workspace row to create or reuse its new chat.
+4. Local and remote projects share the **Workspaces** sidebar and the same entry points. Select a project or chat, or use **Add workspace** and choose its computer.
+5. Choose a directory using that computer's native picker. Remote computers use Harness's built-in browser directory list, so selection takes place in this window even if the server has a graphical desktop. Conversation and files appear in the main area while the unified sidebar stays available. The top **New Session** button and keyboard command create a chat on the currently selected computer. Select a local row to switch back to this computer.
+
+Selecting a remote computer shows connection and loading feedback in the main area. Loading ends when the native directory picker is mounted or the requested session has become current. If that content-loading stage receives no readiness acknowledgement within 30 seconds, it shows an error: use **Reconnect** to retry the operation, or **Cancel** to return to this computer. SSH setup and first-time installation have their own connection progress; the 30-second limit applies to presenting remote content.
 
 Configure models, accounts and plugins on the remote Harness Host, using its native configuration and plugin commands. Local accounts, API keys and plugins are not copied. Opening a remote directory does not create a workspace with that path on the local Host.
 
@@ -30,17 +34,21 @@ Discovery lists concrete aliases only; wildcard and negated patterns are not cho
 
 Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS and other browser origins are not supported. The native desktop content path is currently disabled: its menu accelerators bypass document-local command routing and could target a local session. Its guest bridge adapter remains covered by contract tests, pending a native source-aware command interface.
 
-The top native **New Session** button currently belongs to this computer. The New Session keyboard command follows the selected remote workspace; search/add commands use the unified list. With focus in the parent sidebar, archive/fork shortcuts show guidance instead of touching the previous local session. Focus the remote conversation to use its native shortcuts, or use its source-labelled row actions.
+The native brand/New Session controls and New Session keyboard command share the same source-aware action. Search/add commands use the unified list. With focus in the parent sidebar, archive/fork shortcuts show guidance instead of touching the previous local session. Focus the remote conversation to use its native shortcuts, or use its source-labelled row actions.
 
 ## Closing and restoring
 
-**Selecting a local workspace/chat or the top New Session button** closes the remote view. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
+**Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
 
 The next local startup reconnects saved auto-connect entries. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
+
+Explicit navigation, including creating a new local session while startup restoration is pending, cancels the older restoration request. Native background restoration of the previous local session does not erase the saved remote selection.
 
 The local preference stores the selected computer and native session ID, so selection can be restored when the content document is recreated. File pane preferences still follow native document storage. The plugin does not persist remote catalogs or conversation logs locally.
 
 The service has `Restart=on-failure` and is enabled for the user's systemd target. Linger allows the user manager to remain after logout and start at boot. Remote task behavior after a Host crash or reboot follows Harness's own recovery rules; process supervision is not a guarantee that an interrupted model operation resumes.
+
+When Connections refreshes its own remote content bundle, it asks the native plugin manager to apply that change without restarting the Host. It records success only after native activation succeeds. If Harness reports that a restart is required, Connections reports that requirement and leaves the Host running.
 
 ## Explicit updates
 
@@ -97,6 +105,7 @@ Choose **Use an existing service** locally and supply the complete loopback laun
 | Maintenance still running | Reconnect after the active operation completes; a second operation waits on its lock. |
 | SSH forwarding failed | Check network routing and the server's TCP forwarding policy. |
 | Existing Host authentication failed | Confirm the Host is running and update its launch URL. |
+| Remote content did not finish loading | Check the SSH connection, then use Reconnect to retry or Cancel to return to this computer. |
 | Local address opens on the wrong machine | Use a browser on the same computer as the local Harness. |
 
 All connection management requires Harness owner authorization. Tunnels listen only on local loopback and preserve native application authentication.

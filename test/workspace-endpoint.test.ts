@@ -7,6 +7,7 @@ import { WorkspaceEndpoint, installWorkspaceEndpoint } from '../src/host/workspa
 import type { WorkspaceEndpointHandle, WorkspaceEndpointServices } from '../src/host/workspace-endpoint.js'
 import {
   WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_REQUEST_LIMIT, parseWorkspaceRequest, parseWorkspaceResponse,
+  parseWorkspaceViewState,
 } from '../src/shared/workspace-protocol.js'
 import type { WorkspaceOperation, WorkspaceRequest, WorkspaceResponse, WorkspaceResultMap } from '../src/shared/workspace-protocol.js'
 
@@ -128,10 +129,12 @@ test('view navigation wakes long polls, deduplicates requests and ignores stale 
   try {
     const opened = await call(endpoint, { op: 'openView' })
     assert.match(opened.channel, /^[A-Za-z0-9_-]{43}$/)
+    assert.equal(opened.presentedRevision, 0)
     const channel = opened.channel
     const pending = call(endpoint, { op: 'pollView', channel, afterRevision: 0 })
     const first = await call(endpoint, { op: 'navigate', channel, requestId: 'request-1', target: { kind: 'workspace', id: 'workspace-1' } })
     assert.equal(first.revision, 1)
+    assert.equal(first.presentedRevision, 0, 'accepting navigation does not mean the document has rendered')
     assert.deepEqual(await pending, first)
     assert.deepEqual(await call(endpoint, { op: 'navigate', channel, requestId: 'request-1', target: { kind: 'workspace', id: 'workspace-1' } }), first)
     await call(endpoint, { op: 'reportView', channel, revision: 1, sessionId: 'session-1' })
@@ -143,11 +146,65 @@ test('view navigation wakes long polls, deduplicates requests and ignores stale 
     assert.deepEqual(await call(endpoint, { op: 'reportView', channel, revision: 1, sessionId: 'stale-session', error: 'NAVIGATION_FAILED' }), second)
     const acknowledged = await call(endpoint, { op: 'reportView', channel, revision: 2, sessionId: 'session-1', error: 'PICK_CANCELLED' })
     assert.equal(acknowledged.reportedRevision, 2)
+    assert.equal(acknowledged.presentedRevision, 2, 'a final native report also acknowledges presentation')
     assert.equal(acknowledged.error, 'PICK_CANCELLED')
     assert.deepEqual(await call(endpoint, { op: 'reportView', channel, revision: 2, sessionId: 'session-1', error: 'PICK_CANCELLED' }), acknowledged)
     assert.deepEqual(await call(endpoint, { op: 'pollView', channel, afterRevision: 2 }), acknowledged)
     failure(await endpoint.handle({ op: 'pollView', channel, afterRevision: 3 }, new AbortController().signal), 'BAD_REQUEST')
   } finally { endpoint.dispose() }
+})
+
+test('presentation acknowledges visible native content without completing an open picker', async () => {
+  const { services, calls } = nativeServices()
+  const endpoint = new WorkspaceEndpoint(services)
+  try {
+    const { channel } = await call(endpoint, { op: 'openView' })
+    await call(endpoint, { op: 'navigate', channel, requestId: 'first', target: { kind: 'session', id: 'session-1' } })
+    const completed = await call(endpoint, { op: 'reportView', channel, revision: 1, sessionId: 'session-1' })
+    assert.equal(completed.presentedRevision, 1)
+    const pending = await call(endpoint, { op: 'navigate', channel, requestId: 'picker', target: { kind: 'pick' } })
+    assert.equal(pending.revision, 2)
+    assert.equal(pending.reportedRevision, 1)
+    assert.equal(pending.presentedRevision, 1)
+    const presented = await call(endpoint, { op: 'reportView', channel, revision: 2, presented: true })
+    assert.deepEqual(presented, { ...pending, presentedRevision: 2 })
+    assert.equal(presented.sessionId, 'session-1', 'presenting a picker does not clear the existing selection')
+    assert.deepEqual(await call(endpoint, { op: 'reportView', channel, revision: 2, presented: true }), presented)
+    failure(await endpoint.handle({ op: 'reportView', channel, revision: 3, presented: true }, new AbortController().signal), 'BAD_REQUEST')
+
+    const next = await call(endpoint, { op: 'navigate', channel, requestId: 'new', target: { kind: 'newSession', id: 'workspace-1' } })
+    assert.deepEqual(next.intent?.target, { kind: 'newSession', id: 'workspace-1' })
+    assert.equal(next.presentedRevision, 2)
+    assert.deepEqual(await call(endpoint, { op: 'reportView', channel, revision: 2, presented: true }), next, 'a superseded picker cannot acknowledge newer content')
+    const final = await call(endpoint, { op: 'reportView', channel, revision: 3, sessionId: 'session-2' })
+    assert.equal(final.reportedRevision, 3)
+    assert.equal(final.presentedRevision, 3)
+    assert.deepEqual(await call(endpoint, { op: 'reportView', channel, revision: 3, presented: true }), final, 'a retried presentation report preserves final state')
+    const unscoped = await call(endpoint, { op: 'navigate', channel, requestId: 'unscoped', target: { kind: 'newSession' } })
+    assert.deepEqual(unscoped.intent?.target, { kind: 'newSession' })
+    assert.deepEqual(calls, [], 'new-session targets are delivered to native navigation, never executed by this endpoint')
+  } finally { endpoint.dispose() }
+})
+
+test('presentation protocol treats older bundles as unpresented and validates new navigation fields', () => {
+  assert.deepEqual(parseWorkspaceViewState({ revision: 4, reportedRevision: 4, sessionId: 'native-session' }), {
+    revision: 4, reportedRevision: 4, presentedRevision: 0, sessionId: 'native-session',
+  })
+  for (const presentedRevision of [-1, 1.5, 5, '4', null]) {
+    assert.throws(() => parseWorkspaceViewState({ revision: 4, reportedRevision: 4, presentedRevision }))
+  }
+  const channel = 'a'.repeat(43)
+  for (const target of [
+    { kind: 'newSession', id: '../workspace' }, { kind: 'newSession', id: '' },
+    { kind: 'newSession', workspaceId: 'workspace-1' }, { kind: 'newSession', prompt: secret },
+  ]) assert.throws(() => parseWorkspaceRequest({ op: 'navigate', channel, requestId: 'new', target }))
+  for (const extra of [
+    { presented: false }, { presented: 'true' },
+    { presented: true, sessionId: 'session-1' }, { presented: true, error: 'PICK_CANCELLED' },
+  ]) assert.throws(() => parseWorkspaceRequest({ op: 'reportView', channel, revision: 1, ...extra }))
+  assert.deepEqual(parseWorkspaceRequest({ op: 'reportView', channel, revision: 1, presented: true }), {
+    op: 'reportView', channel, revision: 1, presented: true,
+  })
 })
 
 test('view channels renew on access, expire, respect capacity, and release waiters on close or cancellation', async () => {

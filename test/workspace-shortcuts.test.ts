@@ -58,10 +58,11 @@ test('remote commands capture the selected computer and block local archive/fork
   assert.equal(h.key('KeyF'), 1)
   assert.deepEqual(h.calls, [['new', 'server-a'], ['blocked', 'session.archive', 'server-b'], ['blocked', 'session.fork', 'server-b']])
   h.select(undefined)
-  assert.equal(h.key('KeyN'), 0)
+  assert.equal(h.key('KeyN'), 1)
   assert.equal(h.key('KeyA'), 0)
   assert.equal(h.key('KeyF'), 0)
-  assert.equal(h.calls.length, 3)
+  assert.deepEqual(h.calls[3], ['new', 'local'])
+  assert.equal(h.calls.length, 4)
 })
 
 test('the unified search and add controls route for both local and remote selection', () => {

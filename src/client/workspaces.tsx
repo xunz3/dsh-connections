@@ -23,10 +23,11 @@ import { installWorkspaceShortcuts } from './workspace-shortcuts.js'
 export { WorkspaceController } from './workspace-controller.js'
 
 const en = {
-  choose: 'Open a project', computer: 'This computer', remote: 'Remote computers',
+  choose: 'Open a project', computer: 'This computer',
   hint: 'Choose the computer where your project lives.', empty: 'Add an SSH connection in Settings → Connections.',
   loading: 'Loading connections…', cancel: 'Cancel', back: 'Return to this computer',
   connecting: 'Connecting to remote Harness…', retry: 'Reconnect', failed: 'Unable to open this connection. Check its status in Connections and try again.',
+  opening: 'Opening workspace…', timeout: 'The remote workspace did not finish loading through SSH. Check the connection and retry.',
   unavailable: 'Open Harness in a local HTTP browser to use remote workspaces. Native desktop command routing is not supported yet.',
   shortcutBlocked: 'Use the selected remote chat’s actions or focus its conversation before using this shortcut.',
   localUnavailable: 'The local directory picker is unavailable.', frame: 'Remote workspace',
@@ -34,9 +35,10 @@ const en = {
   pluginRequired: 'Install the remote content bundle on this Harness profile to open its workspaces. See the Connections usage guide.',
 } as const
 const zh: Record<keyof typeof en, string> = {
-  choose: '打开项目', computer: '这台电脑', remote: '远端电脑', hint: '选择项目所在的电脑。',
+  choose: '打开项目', computer: '这台电脑', hint: '选择项目所在的电脑。',
   empty: '请先在「设置 → 连接」中添加 SSH 连接。', loading: '正在读取连接…', cancel: '取消', back: '返回这台电脑',
   connecting: '正在连接远端 Harness…', retry: '重新连接', failed: '无法打开此连接。请在「连接」中检查状态后重试。',
+  opening: '正在打开工作区…', timeout: '远端工作区未能通过 SSH 完成加载，请检查连接后重试。',
   unavailable: '请通过本机 HTTP 浏览器打开 Harness 使用远端工作区。原生桌面的命令路由暂未支持。',
   shortcutBlocked: '请使用远端会话的操作菜单，或先聚焦远端聊天内容再使用此快捷键。',
   localUnavailable: '本地目录选择器不可用。', frame: '远端工作区', disconnected: '此连接已不可用，请重新连接后继续。',
@@ -99,10 +101,9 @@ export function HostChooser({ owner, controller, t, renderLocal }: {
   return <dialog ref={dialog} className="dc-workspace-chooser" aria-label={t('choose')} onCancel={event => { event.preventDefault(); owner.onCancel() }}>
     <style>{workspaceCss}</style>
     <h2>{t('choose')}</h2><p>{t('hint')}</p>
-    <button className="dc-host-choice" disabled={owner.busy} onClick={() => setLocal(true)}>{t('computer')}</button>
-    <h3>{t('remote')}</h3>
+    <button className="dc-host-choice" disabled={owner.busy} onClick={() => setLocal(true)}><strong>{t('computer')}</strong></button>
     {failed ? <p role="alert">{t('failed')}</p> : rows === undefined ? <p role="status">{t('loading')}</p> : rows.length === 0 ? <p>{t('empty')}</p> : rows.map(row =>
-      <button key={row.id} className="dc-host-choice" disabled={owner.busy} onClick={() => { owner.onCancel(); void controller.pick(row.id) }}><strong>{row.name}</strong><span>{row.target}</span></button>)}
+      <button key={row.id} className="dc-host-choice" disabled={owner.busy} onClick={() => { owner.onCancel(); void controller.pick(row.id) }}><strong>{row.name}</strong>{row.target !== row.name && <span>{row.target}</span>}</button>)}
     <div className="dc-workspace-chooser-actions"><button onClick={owner.onCancel}>{t('cancel')}</button></div>
   </dialog>
 }
@@ -170,10 +171,13 @@ export function RemoteWorkspace({ controller, t, bridge }: {
   if (!state) return null
   return <section className="dc-remote-workspace" aria-label={state.name || t('frame')}>
     <style>{workspaceCss}</style>
-    {state.phase === 'connecting' ? <p className="dc-remote-status" role="status">{t('connecting')}</p>
-      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p><button onClick={() => { setGuestError(false); void controller.reconnect(state.id) }}>{t('retry')}</button></div>
-      : bridge ? <DesktopGuest bridge={bridge} id={state.id} url={state.url!} title={t('frame')} failed={failed} />
-        : <iframe key={state.url} className="dc-remote-frame" src={state.url} title={t('frame')} referrerPolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onError={failed} />}
+    {state.phase === 'connecting' ? <div className="dc-remote-status"><p role="status">{t('connecting')} {state.name}</p><button onClick={() => controller.close()}>{t('cancel')}</button></div>
+      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p><button onClick={() => { setGuestError(false); void controller.reconnect(state.id) }}>{t('retry')}</button>{' '}<button onClick={() => controller.close()}>{t('cancel')}</button></div>
+      : <>
+        {bridge ? <DesktopGuest bridge={bridge} id={state.id} url={state.url!} title={t('frame')} failed={failed} />
+          : <iframe key={state.url} className="dc-remote-frame" src={state.url} title={t('frame')} referrerPolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onError={failed} />}
+        {!state.presented && <div className="dc-remote-loading"><p role="status">{t('opening')} {state.name}</p><button onClick={() => controller.close()}>{t('cancel')}</button></div>}
+      </>}
   </section>
 }
 
@@ -216,6 +220,7 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
     localNavigate = async target => {
       if (target.kind === 'session') ctx.uiWorkspace.openSession(target.id as Parameters<typeof ctx.uiWorkspace.openSession>[0])
       else if (target.kind === 'workspace') await ctx.uiWorkspace.openWorkspace(target.id as Parameters<typeof ctx.uiWorkspace.openWorkspace>[0])
+      else if (target.kind === 'newSession') ctx.uiWorkspace.startSession(target.id as Parameters<typeof ctx.uiWorkspace.startSession>[0])
     }
 
     ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: panel, locale: 'connections.workspace' },
@@ -233,14 +238,7 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
           onSearch: () => setSearchRequest(value => value + 1),
           onAddWorkspace: () => { props.expandSidebar(); setError(false); setOpen(true) },
           onBlocked: () => setShortcutNote(true),
-          onNewSession: id => {
-            const current = controller.getCatalogs()
-            const source = current.sources.find(source => source.id === id)
-            const selected = current.selected
-            const workspace = source?.catalog?.workspaces.find(workspace => workspace.id === selected.workspaceId
-              || selected.sessionId !== undefined && workspace.sessionIds.includes(selected.sessionId))
-            void controller.navigate(id, workspace ? { kind: 'workspace', id: workspace.id } : { kind: 'pick' })
-          },
+          onNewSession: () => { void controller.newSession() },
         }), [props.expandSidebar])
         useEffect(() => { setShortcutNote(false) }, [selected.sourceId, selected.sessionId])
         const owner: DirectoryFlowOwnerProps = {
@@ -292,14 +290,25 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
     })
     ctx.effect(() => {
       let wasRemote = false
+      let transitioning = false
+      let lastPanel = ctx.layout.panelInfo.getSnapshot().activePanelId
       const sync = () => {
+        if (transitioning) return
         const remote = controller.getSnapshot() !== undefined
-        if (remote && !wasRemote) { wasRemote = true; ctx.layout.beginNavigation(); ctx.layout.selectPanel(panel) }
-        else if (!remote && wasRemote) { wasRemote = false; if (ctx.layout.panelInfo.getSnapshot().activePanelId === panel) ctx.layout.selectPanel(null) }
+        transitioning = true
+        try {
+          if (remote && !wasRemote) { ctx.layout.beginNavigation(); ctx.layout.selectPanel(panel); wasRemote = true }
+          else if (!remote && wasRemote) { wasRemote = false; if (ctx.layout.panelInfo.getSnapshot().activePanelId === panel) ctx.layout.selectPanel(null) }
+          lastPanel = ctx.layout.panelInfo.getSnapshot().activePanelId
+        } finally { transitioning = false }
       }
       const offController = controller.subscribe(sync)
       const offPanel = ctx.layout.panelInfo.subscribe(() => {
-        if (ctx.layout.panelInfo.getSnapshot().activePanelId !== panel && controller.getSnapshot()) controller.close()
+        if (transitioning) return
+        const active = ctx.layout.panelInfo.getSnapshot().activePanelId
+        const leaving = lastPanel === panel && active !== panel
+        lastPanel = active
+        if (leaving && controller.getSnapshot()) controller.close()
         if (!controller.getSnapshot()) controller.localSelection(ctx.uiSession.adapter.current.getSnapshot().key)
       })
       const offSession = ctx.uiSession.adapter.current.subscribe(() => controller.localSelection(ctx.uiSession.adapter.current.getSnapshot().key))
@@ -318,5 +327,5 @@ const workspaceCss = `
 .dc-workspace-chooser h2{font-size:19px;margin:0 0 6px}.dc-workspace-chooser h3{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary,#666);margin:24px 0 8px}.dc-workspace-chooser p{color:var(--dsw-alias-label-secondary,#666);margin:0 0 18px}
 .dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1,#f4f4f4)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid #5785bc;outline-offset:2px}
 .dc-workspace-chooser .dc-host-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;margin:6px 0;padding:12px}.dc-host-choice strong{font-weight:500}.dc-host-choice span{font-size:12px;color:var(--dsw-alias-label-secondary,#666);overflow:hidden;text-overflow:ellipsis}.dc-workspace-chooser-actions{display:flex;justify-content:flex-end;margin-top:22px}
-.dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:48px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd);box-sizing:border-box;flex:none}.dc-remote-bar strong{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dc-remote-bar button{font-size:12px;white-space:nowrap}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
+.dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--dsw-alias-bg-base,#fff);padding:32px;text-align:center}.dc-remote-loading p{color:var(--dsw-alias-label-secondary,#666)}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
 `

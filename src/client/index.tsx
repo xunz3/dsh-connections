@@ -7,6 +7,7 @@ import { Panel } from './Panel.js'
 import { en, zh, type CopyKey, type Translate } from './messages.js'
 import { installWorkspaces } from './workspaces.js'
 import { applyEmbedded } from './embedded.js'
+import { installNativeSidebar } from './native-shell-routing.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' { interface LocaleNamespaceMap { connections: CopyKey } }
 export const inject = ['slots', 'locale', 'remote', 'theme']
@@ -21,6 +22,9 @@ export async function apply(ctx: Context) {
     ctx.effect(() => ctx.locale.register('connections', { en, zh }))
     const t = ctx.locale.bind('connections') as Translate
     const workspaces = installWorkspaces(ctx, api, t)
+    ctx.inject(['uiWorkspace', 'layout', 'shortcuts'], ctx => {
+      installNativeSidebar(ctx, { startSession: id => { void workspaces.newSession(id) } })
+    })
     const SettingsPanel = () => <Panel api={api} t={t} onOpen={id => workspaces.open(id)} />
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'connections', locale: 'connections', order: 30, label: () => t('title') }, SettingsPanel))
   })

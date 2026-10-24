@@ -31,11 +31,11 @@ const api = {
       case 'catalog': result = catalog(sourceId !== 'local'); break
       case 'openView': {
         const channel = String(++viewCount).padStart(43, 'a')
-        result = { channel, revision: 0, reportedRevision: 0 }; views.set(channel, result); break
+        result = { channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, result); break
       }
       case 'navigate': {
         const previous = views.get(request.channel)!
-        result = { ...previous, revision: previous.revision + 1 }; views.set(request.channel, result); break
+        result = { ...previous, revision: previous.revision + 1, presentedRevision: query.has('unpresented') ? 0 : previous.revision + 1 }; views.set(request.channel, result); break
       }
       case 'viewState': result = views.get(request.channel)!; break
       case 'closeView': views.delete(request.channel); result = { closed: true }; break
@@ -73,6 +73,7 @@ if (query.has('desktop')) {
 const bridge = desktopBrowser()
 const controller = new WorkspaceController(api, {
   storage: localStorage, prepareUrl: url => workspaceUrl(url, location, bridge !== undefined),
+  presentationTimeoutMs: query.has('timeout') ? 1500 : 30_000,
   localNavigate: target => { if (target.kind === 'session') controller.localSelection(target.id) },
 })
 const messages = query.has('zh') ? workspaceMessages.zh : workspaceMessages.en
@@ -101,6 +102,7 @@ function App() {
 Object.assign(globalThis, { workspaceFixture: {
   snapshot: () => ({ ...calls, releases: [...calls.releases], phase: controller.getSnapshot()?.phase, selected: controller.getSnapshot()?.id }),
   settleLease: () => pendingLease?.(), popup: () => popup?.(),
+  presented: async () => { for (const view of views.values()) view.presentedRevision = view.revision; await controller.check() },
   disconnect: async () => { row.phase = 'disconnected'; delete row.localPort; await controller.check() },
   crash: () => document.querySelector('webview')?.dispatchEvent(new Event('render-process-gone')),
 } })
