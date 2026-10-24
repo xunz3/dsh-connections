@@ -11,8 +11,8 @@ import { promisify } from 'node:util'
 const execute = promisify(execFile)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const [command, input] = process.argv.slice(2)
-if (process.platform !== 'linux' || !input || !['start', 'restart', 'stop'].includes(command)) {
-  throw new Error('Usage on Linux: DSH_QA_CLI=/absolute/dsh/lib/bin.js node test/integration/native-fixture.mjs start|restart|stop /tmp/fixture-directory')
+if (process.platform !== 'linux' || !input || !['start', 'restart', 'restart-remote', 'stop'].includes(command)) {
+  throw new Error('Usage on Linux: DSH_QA_CLI=/absolute/dsh/lib/bin.js node test/integration/native-fixture.mjs start|restart|restart-remote|stop /tmp/fixture-directory')
 }
 const root = resolve(input)
 if (!root.startsWith(`${resolve(tmpdir())}/`)) throw new Error('Fixture must live under the operating system temporary directory.')
@@ -68,16 +68,37 @@ async function freePort() {
   await new Promise(resolve => server.close(resolve))
   return port
 }
-async function startHost(metadata) {
-  await mkdir(join(root, 'agents'), { mode: 0o700, recursive: true })
-  metadata.host = await startProcess(metadata.node, [metadata.cli, '--profile', 'web', '--host', '127.0.0.1', '--port', String(metadata.port), '--no-open'], {
-    ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: `${join(root, 'bin')}:${dirname(metadata.node)}:${process.env.PATH}`,
-  }, join(root, 'host.log'))
+function hostEnvironment(metadata, remote = false) {
+  return {
+    ...process.env, DSH_HOME: join(root, remote ? 'remote-home' : 'home'),
+    DSH_AGENTS_HOME: join(root, remote ? 'remote-agents' : 'agents'),
+    PATH: `${join(root, 'bin')}:${dirname(metadata.node)}:${process.env.PATH}`,
+  }
+}
+async function installRemote(metadata) {
+  const install = await execute(metadata.node, [metadata.cli, 'plugin', '--profile', 'web', 'add', '--save-exact', join(repository, 'dist/remote-plugin.tgz')], {
+    cwd: root, env: hostEnvironment(metadata, true),
+  })
+  await writeFile(join(root, 'remote-install.log'), install.stdout + install.stderr, { mode: 0o600 })
+}
+async function prepareMedia(metadata) {
+  for (const [side, project] of Object.entries(metadata.projects ?? {})) {
+    await writeFile(join(project, 'media.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect width="120" height="80" fill="#6788aa"/></svg>\n')
+    await writeFile(join(project, 'media.md'), `# ${side} media\n\n![Native ${side} preview](media.svg)\n`)
+  }
+}
+async function startHost(metadata, remote = false) {
+  const port = remote ? metadata.remotePort : metadata.port
+  const key = remote ? 'remote' : 'host'
+  const logPath = join(root, remote ? 'remote.log' : 'host.log')
+  await mkdir(join(root, remote ? 'remote-agents' : 'agents'), { mode: 0o700, recursive: true })
+  metadata[key] = await startProcess(metadata.node, [metadata.cli, '--profile', 'web', '--host', '127.0.0.1', '--port', String(port), '--no-open'], hostEnvironment(metadata, remote), logPath)
   await writeFile(metadataPath, JSON.stringify(metadata, null, 2), { mode: 0o600 })
-  for (let attempt = 0; attempt < 300; attempt++) {
-    const log = await readFile(join(root, 'host.log'), 'utf8')
-    if (/dsh web: http:\/\/127\.0\.0\.1:\d+\/\?token=/.test(log) && await tcpOpen(metadata.port)) return
-    if (await identity(metadata.host.pid) !== metadata.host.start) throw new Error('Isolated Harness failed to start. Inspect its private host.log.')
+  // The first dedicated profile may prepare native packages before logging its URL.
+  for (let attempt = 0; attempt < (metadata.remotePort ? 1200 : 300); attempt++) {
+    const log = await readFile(logPath, 'utf8')
+    if (/dsh web: http:\/\/127\.0\.0\.1:\d+\/\?token=/.test(log) && await tcpOpen(port)) return
+    if (await identity(metadata[key].pid) !== metadata[key].start) throw new Error('Isolated Harness failed to start. Inspect its private startup log.')
     await pause(100)
   }
   throw new Error('Isolated Harness startup timed out. Inspect its private host.log.')
@@ -88,10 +109,24 @@ if (command === 'start') {
   if (!cli?.startsWith('/')) throw new Error('Set DSH_QA_CLI to the installed native Harness bin.js.')
   await mkdir(root, { mode: 0o700 })
   const metadata = { node: process.execPath, cli, port: await freePort(), sshPort: await freePort(), alias: 'native-workspace-fixture' }
+  if (process.env.DSH_QA_UNIFIED === '1') {
+    metadata.remotePort = await freePort()
+    metadata.projects = { local: join(root, 'local-project'), remote: join(root, 'remote-project') }
+  }
   try {
     await mkdir(join(root, 'bin'), { mode: 0o700 })
     await mkdir(join(root, 'home'), { mode: 0o700 })
     await mkdir(join(root, 'agents'), { mode: 0o700 })
+    if (metadata.remotePort) {
+      await mkdir(join(root, 'remote-home'), { mode: 0o700 })
+      await mkdir(join(root, 'remote-agents'), { mode: 0o700 })
+      for (const [side, project] of Object.entries(metadata.projects)) {
+        await mkdir(join(project, 'nested'), { mode: 0o700, recursive: true })
+        await writeFile(join(project, 'README.md'), `# ${side} project\n\nNative ${side} workspace fixture.\n`)
+        await writeFile(join(project, 'nested/source.txt'), `native ${side} sidebar nested file\n`)
+      }
+      await prepareMedia(metadata)
+    }
     await execute('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, 'host-key')])
     await execute('/usr/bin/ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, 'client-key')])
     const publicKey = (await readFile(join(root, 'host-key.pub'), 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ')
@@ -115,25 +150,47 @@ if (command === 'start') {
       cwd: root, env: { ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: `${dirname(metadata.node)}:${process.env.PATH}` },
     })
     await writeFile(join(root, 'install.log'), install.stdout + install.stderr, { mode: 0o600 })
+    if (metadata.remotePort) await installRemote(metadata)
     metadata.sshd = await startProcess('/usr/sbin/sshd', ['-D', '-e', '-f', join(root, 'sshd_config')], process.env, join(root, 'sshd.log'))
     for (let attempt = 0; attempt < 100 && !await tcpOpen(metadata.sshPort); attempt++) await pause(50)
     if (!await tcpOpen(metadata.sshPort)) throw new Error('Isolated sshd did not listen.')
+    if (metadata.remotePort) await startHost(metadata, true)
     await startHost(metadata)
     await chmod(metadataPath, 0o600)
   } catch (error) {
     await stopProcess(metadata.host)
+    await stopProcess(metadata.remote)
     await stopProcess(metadata.sshd)
     throw error
   }
-  console.log(JSON.stringify({ pid: metadata.host.pid, port: metadata.port, alias: metadata.alias, log: join(root, 'host.log') }))
+  console.log(JSON.stringify({ pid: metadata.host.pid, port: metadata.port, alias: metadata.alias, log: join(root, 'host.log'),
+    ...(metadata.remotePort ? { remotePid: metadata.remote.pid, remotePort: metadata.remotePort, remoteLog: join(root, 'remote.log'), projects: metadata.projects } : {}),
+  }))
 } else {
   const metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+  if (command === 'restart-remote') {
+    if (!metadata.remotePort) throw new Error('This fixture has no owned remote Host.')
+    await stopProcess(metadata.remote)
+    await installRemote(metadata)
+    await prepareMedia(metadata)
+    await startHost(metadata, true)
+    console.log(JSON.stringify({ pid: metadata.remote.pid, port: metadata.remotePort, log: join(root, 'remote.log') }))
+    process.exit(0)
+  }
   await stopProcess(metadata.host)
   if (command === 'restart') {
+    if (!await tcpOpen(metadata.sshPort)) {
+      metadata.sshd = await startProcess('/usr/sbin/sshd', ['-D', '-e', '-f', join(root, 'sshd_config')], process.env, join(root, 'sshd.log'))
+      for (let attempt = 0; attempt < 100 && !await tcpOpen(metadata.sshPort); attempt++) await pause(50)
+      if (!await tcpOpen(metadata.sshPort)) throw new Error('Isolated sshd did not listen.')
+    }
     await startHost(metadata)
     console.log(JSON.stringify({ pid: metadata.host.pid, port: metadata.port, log: join(root, 'host.log') }))
   } else {
+    await stopProcess(metadata.remote)
     await stopProcess(metadata.sshd)
-    console.log(JSON.stringify({ hostClosed: !await tcpOpen(metadata.port), sshClosed: !await tcpOpen(metadata.sshPort) }))
+    console.log(JSON.stringify({ hostClosed: !await tcpOpen(metadata.port), sshClosed: !await tcpOpen(metadata.sshPort),
+      ...(metadata.remotePort ? { remoteClosed: !await tcpOpen(metadata.remotePort) } : {}),
+    }))
   }
 }

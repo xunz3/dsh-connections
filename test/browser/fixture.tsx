@@ -54,4 +54,4 @@ const api: ConnectionsApi = {
   },
 }
 const messages = query.has('zh') ? zh : en
-createRoot(document.getElementById('root')!).render(<Panel api={api} t={key => messages[key]} local={!query.has('remote')} />)
+createRoot(document.getElementById('root')!).render(<Panel onOpen={async id => { document.body.dataset.workspaceOpened = id }} api={api} t={key => messages[key]} local={!query.has('remote')} />)

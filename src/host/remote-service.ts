@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, dirname, resolve } from 'node:path';
+import { basename, join, dirname, resolve } from 'node:path';
 import { request } from 'node:http';
 
 const owner = '@xunz/dsh-connections';
@@ -152,9 +152,35 @@ async function authenticate(port, token) {
     req.on('timeout', () => req.destroy()); req.on('error', () => resolve(false)); req.end();
   });
 }
+async function installWorkspacePlugin(context, plugin) {
+  try { await installWorkspacePluginContents(context, plugin); }
+  catch (error) { if (error.code === 'ownership') throw error; fail('install'); }
+}
+async function installWorkspacePluginContents(context, plugin) {
+  if (plugin === undefined) return; // isolated lifecycle fixtures
+  if (!plugin || !/^[a-f0-9]{64}$/.test(plugin.digest) || typeof plugin.data !== 'string') fail('install');
+  const archive = Buffer.from(plugin.data, 'base64');
+  if (archive.length > 4 * 1024 * 1024 || createHash('sha256').update(archive).digest('hex') !== plugin.digest) fail('install');
+  const { root, marker } = context;
+  const directory = join(root, 'plugins');
+  await privateDir(directory);
+  const receipt = join(root, 'home/connections-workspace-plugin.json');
+  if (await exists(receipt) && (await json(receipt)).digest === plugin.digest) return;
+  const file = join(directory, plugin.digest + '.tgz');
+  if (!await exists(file)) await fs.writeFile(file, archive, { flag: 'wx', mode: 0o600 });
+  await privatePath(file);
+  if (createHash('sha256').update(await fs.readFile(file)).digest('hex') !== plugin.digest) fail('ownership');
+  const installer = join(root, 'installer');
+  await privateDir(installer);
+  const pnpm = join(installer, 'node_modules/pnpm/bin/pnpm.cjs');
+  if (!await exists(pnpm)) await run('npm', ['install', '--prefix', installer, '--save-exact', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--', 'pnpm@11.13.1'], { timeout: 600000, log: join(root, 'install.log') });
+  const env = { ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: join(installer, 'node_modules/.bin') + ':' + dirname(marker.node) + ':' + (process.env.PATH ?? '/usr/bin:/bin') };
+  await run(marker.node, [join(root, 'current/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'plugin', '--profile', 'web', 'add', '--save-exact', file], { timeout: 600000, env, log: join(root, 'install.log') });
+  await atomic(receipt, JSON.stringify({ digest: plugin.digest }));
+}
 async function ready(context, version) {
   const { root, unit } = context;
-  const deadline = Date.now() + 90000;
+  const deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
     const before = await properties(unit);
     if (before.ActiveState === 'failed') fail('startup');
@@ -230,12 +256,13 @@ async function worker(input) {
   if (previous === undefined) {
     await stage(context, input.version);
     await select(root, input.version);
+    await installWorkspacePlugin(context, input.plugin);
     await installUnit(context);
     await start(context);
     return ready(context, input.version);
   }
   await installUnit(context);
-  if (input.action === 'prepare' || input.version === previous) { await start(context); return ready(context, previous); }
+  if (input.action === 'prepare' || input.version === previous) { await installWorkspacePlugin(context, input.plugin); await start(context); return ready(context, previous); }
   // Installation and validation occur while the previous Harness is still serving.
   await stage(context, input.version);
   const transaction = { previous, next: input.version, phase: 'stopping' };
@@ -248,6 +275,7 @@ async function worker(input) {
     transaction.phase = 'snapshot'; await atomic(transactionPath, JSON.stringify(transaction));
     await select(root, input.version);
     transaction.phase = 'switched'; await atomic(transactionPath, JSON.stringify(transaction));
+    await installWorkspacePlugin(context, input.plugin);
     await start(context);
     const result = await ready(context, input.version);
     await fs.rm(transactionPath);
@@ -268,7 +296,7 @@ async function bootstrap(input, encoded) {
   // Abandoned callers may leave private result credentials behind. Maintenance
   // can run for at most 30 minutes; only files older than a day are collected.
   for (const name of await fs.readdir(context.root)) {
-    if (!/^result-[0-9a-f-]{36}\.json$/.test(name)) continue;
+    if (!/^(?:result|request)-[0-9a-f-]{36}\.json$/.test(name)) continue;
     const path = join(context.root, name);
     const stat = await exists(path);
     if (stat?.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && Date.now() - stat.mtimeMs > 86400000) await fs.rm(path);
@@ -281,8 +309,10 @@ async function bootstrap(input, encoded) {
   await privatePath(workerPath);
   if (await fs.readFile(workerPath, 'utf8') !== script) fail('ownership');
   const resultPath = join(context.root, 'result-' + input.operation + '.json');
+  const requestPath = join(context.root, 'request-' + input.operation + '.json');
+  await atomic(requestPath, encoded);
   const maintenance = 'dsh-connections-maintenance-' + input.operation;
-  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + maintenance, '--property=Type=exec', '--property=UMask=0077', '--property=EnvironmentFile=' + join(context.root, 'environment'), '--setenv=PATH=' + process.env.PATH, 'flock', '--wait', '1200', join(context.root, 'management.lock'), context.marker.node, workerPath, '--worker', encoded];
+  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + maintenance, '--property=Type=exec', '--property=UMask=0077', '--property=EnvironmentFile=' + join(context.root, 'environment'), '--setenv=PATH=' + process.env.PATH, 'flock', '--wait', '1200', join(context.root, 'management.lock'), context.marker.node, workerPath, '--worker', requestPath];
   await run('systemd-run', args, { timeout: 1800000, allowFailure: true });
   if (!await exists(resultPath)) fail('busy');
   const result = await json(resultPath);
@@ -305,5 +335,12 @@ async function main(encoded) {
     await atomic(join(root, 'result-' + input.operation + '.json'), JSON.stringify(result));
   } else process.stdout.write(JSON.stringify(result));
 }
-if (process.argv[2] === '--worker') await main(process.argv[3]);
+if (process.argv[2] === '--worker') {
+  const inputPath = process.argv[3];
+  if (!/^request-[0-9a-f-]{36}\.json$/.test(basename(inputPath))) fail('ownership');
+  await privatePath(inputPath);
+  const encoded = await fs.readFile(inputPath, 'utf8');
+  if (encoded.length > 12 * 1024 * 1024) fail('ownership');
+  try { await main(encoded); } finally { await fs.rm(inputPath, { force: true }); }
+}
 `

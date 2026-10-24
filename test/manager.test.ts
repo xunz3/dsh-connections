@@ -300,9 +300,10 @@ test('probe accepts only the expected authority-bound Harness exchange, never fo
   const server = createServer((req, res) => {
     paths.push(req.url ?? '')
     const cookieName = `dsh-auth-${createHash('sha256').update(req.headers.host!).digest('base64url')}`
+    const cookiePayload = Buffer.from(JSON.stringify({ version: 1, authority: req.headers.host, issuedAt: Date.now(), expiresAt: Date.now() + 60_000 })).toString('base64url')
     res.writeHead(mode === 'unauthorized' ? 401 : 303, {
       location: mode === 'redirect' ? 'https://example.invalid/credential-leak' : './',
-      'set-cookie': `${mode === 'cookie' ? 'other-cookie' : cookieName}=v1.payload.signature; Path=/; HttpOnly; SameSite=Strict`,
+      'set-cookie': `${mode === 'cookie' ? 'other-cookie' : cookieName}=v1.${cookiePayload}.${Buffer.alloc(32, 1).toString('base64url')}; Path=/; HttpOnly; SameSite=Strict`,
     })
     res.end()
   })

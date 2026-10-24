@@ -2,6 +2,8 @@
 
 Source review: 2026-10-24. Target Harness API baseline: `0.2.1-rc.2`. The remote installer pins this version; updates require an explicit exact `0.2.x` version.
 
+The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
+
 ## Dependency decision
 
 | Dependency | Responsibility |
@@ -22,7 +24,7 @@ The added production packages handle config parsing and Include file matching. H
 
 The official [SSH subsystem](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/ssh.md) already provides `@deepseek-ai/dsh-ssh`, `fs-ssh`, `process-ssh`, `env-ssh` and remote-agent support. Use these when a local Harness session should execute tools against a remote machine. Their SSH helper is scoped to the transport/lease lifetime; it is not a persistent full remote Harness Host.
 
-This plugin serves a different requirement: the complete Harness, with sessions, approvals, providers, plugins and files, lives on the remote computer and remains available after the controller exits. Its interface is the native remote Harness interface. The official [fs-ssh provider](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/ssh/fs-ssh/README.md) alone does not make the current native workspace picker remote: that flow also uses Host-local filesystem operations, and the provider does not implement filesystem watching. Adding it here would duplicate the full remote Host's filesystem access without solving Host lifetime.
+This plugin serves a different requirement: the complete Harness, with sessions, approvals, providers, plugins and files, lives on the remote computer and remains available after the controller exits. Its interface aggregates native workspaces in one local navigation surface and embeds only remote conversation/file content. The official [fs-ssh provider](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/ssh/fs-ssh/README.md) alone does not make the current native workspace picker remote: that flow also uses Host-local filesystem operations, and the provider does not implement filesystem watching. Adding it here would duplicate the full remote Host's filesystem access without solving Host lifetime.
 
 Reuse the official providers if a future feature needs local sessions with remote execution. Do not make them a dependency simply because both products use SSH. Reassess this design if Harness introduces a public persistent Host/service or live client Host-switch API.
 
@@ -30,14 +32,14 @@ Reuse the official providers if a future feature needs local sessions with remot
 
 A saved connection contains a name, SSH target, mode, auto-connect preference and the last successfully bound local port. It uses the existing Harness credentials provider, not another database. An existing-service connection also holds its launch credential. A managed connection retrieves a fresh credential from its private remote service log on each connection and never persists that token locally.
 
-Public views expose status, address and runtime version, never launch credentials. The owner-only Open operation returns the authenticated local URL. The UI remembers only the selected connection ID. Projects and session identities remain native Harness data.
+Public views expose status, address and runtime version, never launch credentials. The owner-only Open operation returns the authenticated local URL. The UI remembers only the selected connection ID and native session identity. Projects and session identities remain native Harness data.
 
 Adding a connection stays inline in the existing settings section. A native themed select lists config aliases, with refresh and manual entry beside it. The owner-only discovery RPC returns aliases from the Harness Host's configuration, not configuration contents. It bounds file size, Include traversal and result count; it never runs `ssh -G`, `Match exec` or configuration commands. Candidates are not stored or connected until the user acts. The connection stores the chosen alias so OpenSSH remains responsible for effective settings at connection time.
 
 ```text
 Local native project picker → Connections host chooser
   ├─ This computer → original native directory flow
-  └─ Remote host   → native remote Harness interface
+  └─ Remote host   → native remote conversation and files
 
 Local owner RPC → system SSH → systemd user service → native dsh web
 Local UI        → owned loopback SSH tunnel        → remote loopback Web Host
@@ -55,11 +57,9 @@ Only the remote SSH user's proxy, CA and npm network configuration is passed thr
 
 ## Native project and file UI
 
-Harness has no public live `switchHost` client contract in this baseline. The plugin adds a host chooser at the native `directoryFlow` slots, delegates local selection to the original slot and uses the shell overlay slot for a full remote native interface. A remote path never reaches the local `onPicked` callback. The remote Host supplies its original directory picker, sidebar file tree, preview, terminal, sessions and approvals.
+Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using public services and native conversation/rightbar slots. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
 
-Web uses a same-site loopback iframe to preserve native Strict authentication cookies. Desktop uses the existing sidebar-browser lease bridge and its isolated guest. The remote interface has no bridge into local plugin services. Returning local closes only the view.
-
-The last tunnel port is a preference, not a reservation: OpenSSH must successfully acknowledge ownership before any authentication request. An occupied port falls back to a fresh port. Stable browser origin normally preserves native selected project and sidebar state across local Host restart. The native desktop bridge currently uses nonpersistent guest partitions, so a full desktop app exit restores the remote connection but may require selecting the project again. Do not bypass that bridge to persist cookies.
+Native owner controllers supply catalogs and mutations. A revisioned view channel carries navigation and actual selected-session acknowledgements. Credentials and destination resolution remain Host-side. The child document uses native transport for all conversation, files, media and approvals. Local selection closes only the remote view. The existing SSH port preference preserves browser origin when available; native workspace/session state remains independent of that origin.
 
 ## Transport boundaries
 

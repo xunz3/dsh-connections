@@ -4,6 +4,8 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { ConnectionsApi, ConnectionView, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { rpcContribution } from '../shared/rpc.js'
 import { parseOpenResult, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
+import { parseWorkspaceCallResult, type WorkspaceApi, type WorkspaceCall, type WorkspaceCallResult } from '../shared/workspace-rpc.js'
+import type { WorkspaceRequest, WorkspaceResultMap } from '../shared/workspace-protocol.js'
 
 interface RemoteApi {
   sshHosts(): Promise<RemoteResult<string[]>>
@@ -14,6 +16,7 @@ interface RemoteApi {
   disconnect(id: string): Promise<RemoteResult<ConnectionView>>
   update(input: UpdateConnection): Promise<RemoteResult<ConnectionView>>
   open(id: string): Promise<RemoteResult<{ url: string }>>
+  workspace(input: WorkspaceCall): Promise<RemoteResult<WorkspaceCallResult>>
 }
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
@@ -27,7 +30,7 @@ async function unwrap<T>(pending: Promise<RemoteResult<T>>, parse: (value: unkno
 }
 
 export async function mountRpc(ctx: Context): Promise<void> { await ctx.remote.$mount(rpcContribution) }
-export function createApi(ctx: Context): ConnectionsApi {
+export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
   const api = ctx.remote.connections
   return {
     sshHosts: () => unwrap(api.sshHosts(), parseSshHosts),
@@ -38,5 +41,11 @@ export function createApi(ctx: Context): ConnectionsApi {
     disconnect: id => unwrap(api.disconnect(id), parseView),
     update: input => unwrap(api.update(input), parseView),
     open: id => unwrap(api.open(id), parseOpenResult),
+    async workspace<R extends WorkspaceRequest>(id: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
+      const result = await unwrap(api.workspace({ id, request }), parseWorkspaceCallResult)
+      if (result.request.op !== request.op) throw new Error('The workspace response did not match the request.')
+      if (!result.response.ok) throw Object.assign(new Error(result.response.error.message), { code: result.response.error.code })
+      return result.response.value as WorkspaceResultMap[R['op']]
+    },
   }
 }

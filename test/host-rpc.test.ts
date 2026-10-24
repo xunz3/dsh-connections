@@ -7,6 +7,7 @@ import { ConnectionsRpc, mountRpc } from '../src/host/rpc.js'
 import * as hostPlugin from '../src/host/index.js'
 import { rpcContribution } from '../src/shared/rpc.js'
 import type { ConnectionsApi, ConnectionView } from '../src/shared/types.js'
+import type { WorkspaceCall } from '../src/shared/workspace-rpc.js'
 
 const id = 'connection-12345678-1234-1234-1234-123456789abc'
 const view: ConnectionView = { id, name: 'Work', target: 'dev', remotePort: 3080, phase: 'disconnected' }
@@ -17,6 +18,8 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
   const registry = ctx.plugin(TypertRegistry)
   await registry
   let calls = 0
+  const workspaceCalls: WorkspaceCall[] = []
+  const catalog = { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
   const privateView = { ...view, token }
   const api: ConnectionsApi = {
     async sshHosts() { ++calls; return ['dev', 'build'] },
@@ -28,7 +31,12 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     async update() { ++calls; return privateView },
     async open() { ++calls; return { url: `http://127.0.0.1:41380/?token=${token}` } },
   }
-  const plugin = ctx.plugin({ name: 'connections-rpc-test', inject: ['typert'], apply(child: Context) { mountRpc(child, api) } })
+  const plugin = ctx.plugin({ name: 'connections-rpc-test', inject: ['typert'], apply(child: Context) {
+    mountRpc(child, api, async input => {
+      workspaceCalls.push(input)
+      return { ok: true, value: { ...catalog, token }, token }
+    })
+  } })
   await plugin
   try {
     for (const descriptor of rpcContribution.descriptors) {
@@ -43,9 +51,12 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
       await assert.rejects(receiver.sshHosts(), /Only the Harness owner/)
       await assert.rejects(receiver.save({ name: 'Work', target: 'dev' }), /Only the Harness owner/)
       await assert.rejects(receiver.update({ id, version: '0.2.1-rc.3' }), /Only the Harness owner/)
+      await assert.rejects(receiver.workspace({ id: 'local', request: { op: 'catalog' } }), /Only the Harness owner/)
+      await assert.rejects(receiver.workspace({ id, request: { op: 'unknown' } } as unknown as WorkspaceCall), /Only the Harness owner/)
       for (const method of ['forget', 'connect', 'disconnect', 'open'] as const) await assert.rejects(receiver[method](id), /Only the Harness owner/)
     }
     assert.equal(calls, 0)
+    assert.deepEqual(workspaceCalls, [])
     const owner = ctx.extend({ invocation: { peer: { principal: { kind: 'owner' } } } })
     const receiver = owner.get('connections' as never) as unknown as ConnectionsRpc
     assert.deepEqual(await receiver.list(), [view])
@@ -57,6 +68,25 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     assert.equal((await receiver.open(id)).url.includes(token), true)
     await receiver.forget(id)
     await assert.rejects(receiver.connect('invalid'), /Invalid connection identifier/)
+    const workspaceCall = { id: 'local', request: { op: 'catalog' as const } }
+    assert.deepEqual(await receiver.workspace(workspaceCall), { request: workspaceCall.request, response: { ok: true, value: catalog } })
+    assert.deepEqual(workspaceCalls, [workspaceCall])
+    await assert.rejects(receiver.workspace({ id, request: { op: 'prompt', token } } as unknown as WorkspaceCall), /invalid/i)
+    await assert.rejects(receiver.workspace({ id: 'other-host', request: { op: 'catalog' } }), /Invalid connection identifier/)
+    assert.equal(workspaceCalls.length, 1)
+    const descriptor = rpcContribution.descriptors.find(item => item.method === 'workspace')!
+    const parameterCodec = descriptor.parameters[0]!.codec!
+    const resultCodec = descriptor.result!
+    assert.equal(parameterCodec.mode, 'strict')
+    assert.equal(resultCodec.mode, 'strict')
+    if (parameterCodec.mode !== 'strict' || resultCodec.mode !== 'strict') throw new Error('Workspace codecs must be strict')
+    const parameter = parameterCodec.create().parse
+    const result = resultCodec.create().parse
+    assert.deepEqual(parameter(workspaceCall), workspaceCall)
+    assert.throws(() => parameter({ id, request: { op: 'prompt', token } }), /invalid/i)
+    assert.throws(() => parameter({ ...workspaceCall, token }), /invalid/i)
+    assert.deepEqual(result({ request: workspaceCall.request, response: { ok: true, value: { ...catalog, token }, token } }), { request: workspaceCall.request, response: { ok: true, value: catalog } })
+    assert.throws(() => result({ request: { op: 'unknown' }, response: { ok: false, error: { code: 'FAILED' } } }), /invalid/i)
   } finally { await plugin.dispose() }
   assert.equal(ctx.get('connections' as never), undefined)
   assert.equal(ctx.typert.local.get('connections/list'), undefined)

@@ -1,20 +1,48 @@
-import { useState } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HostChooser, RemoteWorkspace, WorkspaceController, desktopBrowser, workspaceMessages, workspaceUrl } from '../../src/client/workspaces.js'
 import type { DirectoryFlowOwnerProps } from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { DesktopBrowserBridge, DesktopBrowserLeaseId } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
 import type { ConnectionView } from '../../src/shared/types.js'
+import type { WorkspaceCatalog, WorkspaceRequest, WorkspaceResult, WorkspaceResultMap, WorkspaceViewState } from '../../src/shared/workspace-protocol.js'
+import { WorkspaceBrowser } from '../../src/client/WorkspaceBrowser.js'
 
 const query = new URLSearchParams(location.search)
 const id = 'connection-11111111-1111-4111-a111-111111111111'
 const row: ConnectionView = { id, name: 'Development', target: 'devbox', remotePort: 3000, phase: 'disconnected' }
-const calls = { connects: 0, opens: 0, localPicks: 0, leases: 0, releases: [] as string[], loads: 0, popups: 0, external: [] as string[] }
+const calls = { connects: 0, opens: 0, localPicks: 0, leases: 0, releases: [] as string[], loads: 0, popups: 0, external: [] as string[], workspaceRequests: [] as { id: string; request: WorkspaceRequest }[] }
+const views = new Map<string, WorkspaceViewState>()
+let viewCount = 0
+const catalog = (remote: boolean): WorkspaceCatalog => ({
+  workspaces: [{ id: 'project', title: remote ? 'Remote project' : 'Local project', path: '/project', sessionIds: ['chat', 'other'] }],
+  sessions: [{ id: 'chat', title: remote ? 'Remote discussion' : 'Local discussion', updatedAt: 0, running: false, blank: false }, { id: 'other', title: remote ? 'Another remote discussion' : 'Another local discussion', updatedAt: 0, running: false, blank: false }],
+  archivedSessionIds: [], pinnedSessionIds: [],
+})
 let pendingLease: (() => void) | undefined
 let popup: (() => void) | undefined
 const api = {
   async list() { return [{ ...row }] },
   async connect() { calls.connects++; row.phase = 'connected'; row.localPort = 43188; return { ...row } },
   async open() { calls.opens++; return { url: 'http://127.0.0.1:43188/?token=fixture-workspace-private-credential' } },
+  async workspace<R extends WorkspaceRequest>(sourceId: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
+    calls.workspaceRequests.push({ id: sourceId, request })
+    let result: WorkspaceResult
+    switch (request.op) {
+      case 'catalog': result = catalog(sourceId !== 'local'); break
+      case 'openView': {
+        const channel = String(++viewCount).padStart(43, 'a')
+        result = { channel, revision: 0, reportedRevision: 0 }; views.set(channel, result); break
+      }
+      case 'navigate': {
+        const previous = views.get(request.channel)!
+        result = { ...previous, revision: previous.revision + 1 }; views.set(request.channel, result); break
+      }
+      case 'viewState': result = views.get(request.channel)!; break
+      case 'closeView': views.delete(request.channel); result = { closed: true }; break
+      default: result = { done: true }
+    }
+    return result as WorkspaceResultMap[R['op']]
+  },
 }
 if (query.has('desktop')) {
   window.open = ((url?: string | URL) => { calls.external.push(String(url)); return null }) as typeof window.open
@@ -43,7 +71,10 @@ if (query.has('desktop')) {
   Object.assign(globalThis, { dshDesktop: { protocolVersion: 1, browser: bridge } })
 }
 const bridge = desktopBrowser()
-const controller = new WorkspaceController(api, { storage: localStorage, prepareUrl: url => workspaceUrl(url, location, bridge !== undefined) })
+const controller = new WorkspaceController(api, {
+  storage: localStorage, prepareUrl: url => workspaceUrl(url, location, bridge !== undefined),
+  localNavigate: target => { if (target.kind === 'session') controller.localSelection(target.id) },
+})
 const messages = query.has('zh') ? workspaceMessages.zh : workspaceMessages.en
 const t = (key: keyof typeof workspaceMessages.en) => messages[key]
 function LocalPicker({ owner }: { owner: DirectoryFlowOwnerProps }) {
@@ -52,10 +83,19 @@ function LocalPicker({ owner }: { owner: DirectoryFlowOwnerProps }) {
 function App() {
   const [open, setOpen] = useState(false)
   const [picked, setPicked] = useState('')
+  const { sources, selected } = useSyncExternalStore(controller.subscribe, controller.getCatalogs)
+  const remote = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
   const owner: DirectoryFlowOwnerProps = { open, busy: false, onCancel: () => setOpen(false), onError: () => {}, onPicked: path => { calls.localPicks++; setPicked(path); setOpen(false) } }
-  return <><button onClick={() => setOpen(true)}>Open project</button><output>{picked}</output>
+  return <><style>{`main#root{display:flex;max-width:none;margin:0;padding:0;height:100dvh}aside{width:266px;flex:none;background:#f8f9fa;padding-top:20px}.workspace-main{display:flex;min-width:0;flex:1;position:relative}.local-content{padding:36px}`}</style>
+    <aside><WorkspaceBrowser sources={sources} selected={selected} onOpenSession={(id, sessionId) => controller.navigate(id, { kind: 'session', id: sessionId })} onOpenWorkspace={(id, workspaceId) => controller.navigate(id, { kind: 'workspace', id: workspaceId })}
+      onAddWorkspace={() => setOpen(true)} onReconnect={id => controller.reconnect(id)}
+      onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
+      onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
+      onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}
+      onArchiveSession={(id, sessionId, archived) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived })}
+      onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned })} /></aside>
+    <div className="workspace-main">{remote ? <RemoteWorkspace controller={controller} t={t} bridge={bridge} /> : <div className="local-content"><h1>Local native workspace</h1><output>{picked}</output></div>}</div>
     <HostChooser owner={owner} controller={controller} t={t} renderLocal={owner => <LocalPicker owner={owner} />} />
-    <RemoteWorkspace controller={controller} t={t} bridge={bridge} />
   </>
 }
 Object.assign(globalThis, { workspaceFixture: {
@@ -65,4 +105,5 @@ Object.assign(globalThis, { workspaceFixture: {
   crash: () => document.querySelector('webview')?.dispatchEvent(new Event('render-process-gone')),
 } })
 void controller.restore()
+window.addEventListener('beforeunload', () => controller.dispose())
 createRoot(document.getElementById('root')!).render(<App />)

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConnectionsApi, ConnectionView, SaveConnection } from '../shared/types.js'
-import { parseOpenResult, parseSave } from '../shared/validation.js'
+import { parseSave } from '../shared/validation.js'
 import type { Translate } from './messages.js'
 import { css } from './styles.js'
 import { ConnectionForm } from './ConnectionForm.js'
@@ -9,7 +9,7 @@ export function isLocalPage(location: Pick<Location, 'protocol' | 'hostname'>): 
   return location.protocol === 'dsh-app:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
 }
 
-export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen?: (id: string) => Promise<void>; local?: boolean }) {
+export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen: (id: string) => Promise<void>; local?: boolean }) {
   const [rows, setRows] = useState<ConnectionView[]>()
   const [error, setError] = useState('')
   const [draft, setDraft] = useState<SaveConnection>()
@@ -17,7 +17,6 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
   const [removing, setRemoving] = useState<string>()
   const [opening, setOpening] = useState<string>()
   const [updating, setUpdating] = useState<{ id: string; version: string }>()
-  const [links, setLinks] = useState<Record<string, string>>({})
   const alive = useRef(true)
   const generation = useRef(0)
   const mutation = useRef(0)
@@ -26,7 +25,6 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
   latestRows.current = rows
   const invalidateOpen = (id: string) => {
     openVersions.current.set(id, (openVersions.current.get(id) ?? 0) + 1)
-    setLinks(current => Object.fromEntries(Object.entries(current).filter(([key]) => key !== id)))
   }
   const refresh = async () => {
     const version = ++generation.current
@@ -44,13 +42,6 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     void poll()
     return () => { stopped = true; alive.current = false; generation.current++; clearTimeout(timer) }
   }, [api, t])
-  // A new forward gets a new authority. Never reuse a link after a disconnect.
-  useEffect(() => {
-    setLinks(current => Object.fromEntries(Object.entries(current).filter(([id, url]) => {
-      const row = rows?.find(row => row.id === id)
-      return row?.phase === 'connected' && Number(new URL(url).port) === row.localPort
-    })))
-  }, [rows])
   const run = async (action: () => Promise<unknown>) => {
     const operation = ++mutation.current
     generation.current++; setError('')
@@ -76,14 +67,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     }
     setOpening(row.id); setError('')
     try {
-      if (onOpen) { await onOpen(row.id); return }
-      const { url } = parseOpenResult(await api.open(row.id))
-      if (current() && Number(new URL(url).port) === row.localPort) {
-        setLinks(current => ({ ...current, [row.id]: url }))
-        // Native Desktop intercepts HTTP window opens. The real link remains
-        // available if a browser blocks an asynchronous popup.
-        window.open(url, '_blank', 'noopener,noreferrer')
-      }
+      await onOpen(row.id)
     } catch (e) { if (current()) setError(e instanceof Error ? e.message : t('failed')) }
     finally { if (alive.current) setOpening(value => value === row.id ? undefined : value) }
   }
@@ -98,7 +82,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
         <div className="dc-row-main"><div className="dc-identity"><strong>{row.name}</strong><div className="dc-meta"><span>{row.target}</span><span className="dc-state" data-phase={row.phase} role="status">{t(row.phase)}</span>{row.runtime && <span>Harness {row.runtime.version}</span>}</div></div>
           <div className="dc-actions">
             {row.phase === 'connected' ? <>
-              {links[row.id] ? <a className="dc-link dc-primary" href={links[row.id]} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{t('open')} ↗</a> : <button className="dc-primary" disabled={!local || opening === row.id} onClick={() => void prepareOpen(row)}>{t(opening === row.id ? 'preparing' : 'open')}</button>}
+              <button className="dc-primary" disabled={!local || opening === row.id} onClick={() => void prepareOpen(row)}>{t(opening === row.id ? 'preparing' : 'open')}</button>
               <button className="dc-quiet" onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('disconnect')}</button>
             </> : row.phase === 'updating' ? <button disabled>{t('updating')}</button> : row.phase === 'connecting' ? <button onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('cancel')}</button> : <button disabled={!local} onClick={() => { invalidateOpen(row.id); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'connecting', error: undefined } : item)); void run(() => api.connect(row.id)) }}>{t(row.phase === 'error' ? 'reconnect' : 'connect')}</button>}
             <details className="dc-menu" onKeyDown={e => { if (e.key === 'Escape') { e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() } }}>
@@ -108,7 +92,6 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
           </div>
         </div>
         {row.error && <p className="dc-error">{row.error}</p>}
-        {links[row.id] && <p className="dc-note">{t('openHint')}</p>}
         {updating?.id === row.id && <form className="dc-form" onSubmit={e => { e.preventDefault(); const input = updating; invalidateOpen(row.id); setUpdating(undefined); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'updating', error: undefined } : item)); void run(() => api.update(input)) }}><label>{t('updateVersion')}<input required value={updating.version} maxLength={64} placeholder="0.2.1-rc.3" onChange={e => setUpdating({ id: row.id, version: e.target.value })} /></label><p className="dc-note">{t('updateHint')}</p><div className="dc-actions"><button type="submit">{t('updateRemote')}</button><button type="button" onClick={() => setUpdating(undefined)}>{t('cancel')}</button></div></form>}
         {removing === row.id && <div className="dc-confirm"><span>{t('confirmRemove')}</span><small className="dc-note">{t('removeHint')}</small><div className="dc-actions"><button onClick={() => { invalidateOpen(row.id); setRemoving(undefined); void run(() => api.remove(row.id)) }}>{t('remove')}</button><button onClick={() => setRemoving(undefined)}>{t('cancel')}</button></div></div>}
       </li>)}

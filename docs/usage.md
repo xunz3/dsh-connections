@@ -2,7 +2,7 @@
 
 ## Requirements
 
-Install into the local Harness Web profile and restart it. The remote Host does not need this plugin. Linux is the verified controller platform; macOS OpenSSH follows the same path but is unverified. Windows ControlMaster is not supported.
+Install into the local Harness Web profile and restart it. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux is the verified controller platform; macOS OpenSSH follows the same path but is unverified. Windows ControlMaster is not supported.
 
 Configure SSH normally and verify `ssh devbox` in a terminal first. Connections uses noninteractive key/agent authentication and existing `known_hosts`. Password prompts and first-use host trust are handled in the terminal. Ports, IPv6 targets, jump hosts and other settings belong in SSH config.
 
@@ -18,25 +18,27 @@ If linger is disabled, configure it using your host's normal policy (`loginctl e
 
 1. In **Settings → Connections → Add connection**, select an SSH host from the dropdown or choose **Add manually** to enter an alias or `user@hostname`. The name is filled from your selection and can be edited.
 2. Keep **Run in the background** selected. No launch URL is needed. **Connect automatically when Harness starts** is enabled by default for new managed connections.
-3. Save the connection, then select **Connect**. Saving does not initiate SSH. The first connection installs pinned Harness `0.2.1-rc.2` and starts its user service. Later connections reuse it.
-4. Select **Open Harness**, or use the normal **Add workspace / Choose workspace** entry and choose the remote computer.
-5. In the remote native interface, choose a project directory. Use its native sidebar file tree and previews as usual. The top bar identifies the remote connection and provides **Return to this computer**.
+3. Save the connection, then select **Connect**. Saving does not initiate SSH. The first connection installs pinned Harness `0.2.1-rc.2`, its Connections content bundle, and starts its user service. Later connections reuse it.
+4. Connected computers appear in the unified **Workspaces** sidebar. Select an existing remote project or chat, or use **Add workspace** and choose its computer.
+5. Choose a directory using the remote native picker. Conversation and files appear in the main area; the local Workspaces sidebar stays available. Select a local row or the top **New Session** button to return to this computer. Click a remote workspace row to create or reuse its new chat.
 
-Configure models, accounts and plugins in that remote Harness. Local accounts, API keys and plugins are not copied. Opening a remote directory does not create a workspace with that path on the local Host.
+Configure models, accounts and plugins on the remote Harness Host, using its native configuration and plugin commands. Local accounts, API keys and plugins are not copied. Opening a remote directory does not create a workspace with that path on the local Host.
 
 The dropdown reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** rereads it without changing the draft. Already saved targets are marked; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
 
 Discovery lists concrete aliases only; wildcard and negated patterns are not choices. Conditional includes contribute candidates without evaluating `Match` or running commands. Host-dependent include paths cannot be discovered statically. Connection settings are resolved by OpenSSH when connecting; discovery does not copy keys, resolve hosts or contact servers.
 
-Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, or use the desktop app. HTTPS and other browser origins are not supported for the embedded remote view. Desktop uses Harness's existing guest bridge; its actual Electron surface has not yet been acceptance-tested.
+Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS and other browser origins are not supported. The native desktop content path is currently disabled: its menu accelerators bypass document-local command routing and could target a local session. Its guest bridge adapter remains covered by contract tests, pending a native source-aware command interface.
+
+The top native **New Session** button currently belongs to this computer. The New Session keyboard command follows the selected remote workspace; search/add commands use the unified list. With focus in the parent sidebar, archive/fork shortcuts show guidance instead of touching the previous local session. Focus the remote conversation to use its native shortcuts, or use its source-labelled row actions.
 
 ## Closing and restoring
 
-**Return to this computer** closes the remote view. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
+**Selecting a local workspace/chat or the top New Session button** closes the remote view. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
 
 The next local startup reconnects saved auto-connect entries. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
 
-In a Web browser, a stable origin preserves the native selected project/session and file pane. The current native desktop guest partition is temporary: after fully quitting the desktop app, the remote connection can restore, but you may need to choose the project/session again. This is an upstream bridge limitation, not loss of remote work.
+The local preference stores the selected computer and native session ID, so selection can be restored when the content document is recreated. File pane preferences still follow native document storage. The plugin does not persist remote catalogs or conversation logs locally.
 
 The service has `Restart=on-failure` and is enabled for the user's systemd target. Linger allows the user manager to remain after logout and start at boot. Remote task behavior after a Host crash or reboot follows Harness's own recovery rules; process supervision is not a guarantee that an interrupted model operation resumes.
 
@@ -56,6 +58,7 @@ The owned installation is under `~/.local/share/dsh-connections`:
 
 - `home` and `agents`: dedicated native Harness data, separate from default `.dsh`.
 - `releases` and `current`: pinned packages and selected release.
+- `plugins` and `installer`: verified content bundles and a pinned pnpm used by the native plugin installer.
 - `service.log` and `install.log`: private diagnostics; the former contains the native launch credential. Do not share them unredacted.
 - `environment`: private remote proxy, CA and npm networking configuration, taken from the remote SSH environment. No local settings or model keys are copied.
 
@@ -70,13 +73,16 @@ Connecting in managed mode starts/enables it again. Remove or disable auto-conne
 
 ## Connect an existing service
 
-Choose **Use an existing service** and supply the complete loopback launch URL printed by:
+Prepare a dedicated remote Web profile with the bundled content layout. Copy `dist/remote-plugin.tgz` from the built local plugin to the remote machine, then install it through the native plugin manager:
 
 ```sh
+dsh plugin --profile web add /absolute/path/to/remote-plugin.tgz
 dsh web --host 127.0.0.1 --no-open
 ```
 
-Keep that Host running using your existing service manager. Connections does not install, restart or update it. Its launch credential is stored in the existing Harness credential provider and stays hidden when editing. Leave the URL blank to retain it; provide a fresh URL after the Host restarts or the destination changes. Existing connections saved by the first plugin version continue to work.
+Use an isolated `DSH_HOME` and configure models there if the machine already has a separate full Harness interface. The bundle replaces the layout in its selected profile; it keeps native conversation, files and overlays. Configure the Host before switching its profile to this content layout. Normal local plugin installation uses the main package, not this embedded bundle.
+
+Choose **Use an existing service** locally and supply the complete loopback launch URL printed by that Host. Keep it running using your existing service manager. Connections does not install, restart or update an existing-service Host. Its launch credential stays in the native credential provider; leave the URL blank while editing to retain it. Refresh it after the destination Host restarts. Older saved connections retain their settings, but require the remote content bundle before unified Workspaces can open them.
 
 ## Troubleshooting
 

@@ -1,11 +1,10 @@
-import { createHash } from 'node:crypto'
-import { request } from 'node:http'
 import type { ConnectionRecord, ConnectionView, ConnectionsApi, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { parseId, parseSave, parseUpdate } from '../shared/validation.js'
 import { connectTunnel, SshTunnelError, type Tunnel } from './ssh.js'
 import type { ConnectionStore } from './store.js'
 import { prepareHost, updateHost, RemoteHostError, type ManagedHost } from './lifecycle.js'
 import { discoverSshHosts } from './ssh-config.js'
+import { authenticateHarness, requestWorkspace } from './harness-http.js'
 
 export type Probe = (port: number, token: string, signal: AbortSignal) => Promise<void>
 export interface ManagerOptions {
@@ -18,26 +17,7 @@ export interface ManagerOptions {
 
 /** Verify Harness's launch-token exchange without following any redirect or exposing the URL. */
 export const probeHarness: Probe = async (port, token, signal) => {
-  const bounded = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
-  bounded.throwIfAborted()
-  const cookieName = `dsh-auth-${createHash('sha256').update(`127.0.0.1:${port}`).digest('base64url')}`
-  await new Promise<void>((resolve, reject) => {
-    const fail = () => reject(new Error('Harness authentication failed. Check the running remote Host and update its launch URL.'))
-    const req = request({
-      hostname: '127.0.0.1', port, method: 'GET', path: `/?token=${encodeURIComponent(token)}`,
-      signal: bounded, agent: false, maxHeaderSize: 16_384,
-    }, response => {
-      const cookie = response.headers['set-cookie']?.find(value => value.startsWith(`${cookieName}=`))
-      const expectedCookie = cookie !== undefined && /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(cookie.slice(cookieName.length + 1).split(';', 1)[0] ?? '')
-        && /;\s*HttpOnly(?:;|$)/i.test(cookie) && /;\s*SameSite=Strict(?:;|$)/i.test(cookie)
-      const valid = response.statusCode === 303 && response.headers.location === './' && expectedCookie
-      response.destroy()
-      if (valid) resolve()
-      else fail()
-    })
-    req.once('error', fail)
-    req.end()
-  })
+  await authenticateHarness(port, token, signal)
 }
 
 interface Runtime {
@@ -50,6 +30,7 @@ interface Runtime {
   unsubscribe?: () => void
   record?: ConnectionRecord
   managed?: ManagedHost
+  cookie?: Promise<string>
 }
 
 function sameDestination(a: ConnectionRecord, b: ConnectionRecord): boolean {
@@ -156,6 +137,7 @@ export class ConnectionsManager implements ConnectionsApi {
     delete runtime.tunnel
     delete runtime.record
     delete runtime.managed
+    delete runtime.cookie
     const closed = await Promise.allSettled([tunnel?.close(), runtime.pending])
     if (closed[0]?.status === 'rejected') throw new Error('The SSH tunnel could not be closed.')
   }
@@ -228,6 +210,7 @@ export class ConnectionsManager implements ConnectionsApi {
       const generation = ++runtime.generation
       runtime.phase = version === undefined ? 'connecting' : 'updating'
       delete runtime.error
+      delete runtime.cookie
       const controller = new AbortController()
       runtime.controller = controller
       runtime.record = record
@@ -318,6 +301,33 @@ export class ConnectionsManager implements ConnectionsApi {
       if (token === undefined) throw new Error('Connect again to refresh the remote Host credential.')
       return { url: `http://127.0.0.1:${runtime.tunnel.port}/?token=${encodeURIComponent(token)}` }
     })
+  }
+
+  /** Keep remote credentials and the transport lease entirely on the local Host. */
+  async workspace(id: string, input: unknown): Promise<unknown> {
+    const lease = await this.serialize(async () => {
+      this.assertActive()
+      const record = await this.record(id)
+      const runtime = this.runtime(id)
+      if (runtime.record && !sameDestination(runtime.record, record)) await this.stop(runtime)
+      if (runtime.phase !== 'connected' || !runtime.tunnel || !runtime.controller || !runtime.record?.token) {
+        throw new Error('Connect before opening this workspace.')
+      }
+      const { generation, controller, tunnel } = runtime
+      runtime.cookie ??= authenticateHarness(tunnel.port, runtime.record.token, controller.signal)
+      return { runtime, generation, controller, tunnel, cookie: runtime.cookie }
+    })
+    const current = () => !this.disposed && lease.runtime.generation === lease.generation && !lease.controller.signal.aborted
+    try {
+      const cookie = await lease.cookie
+      if (!current()) throw new Error('Connection changed. Select the workspace again.')
+      const result = await requestWorkspace(lease.tunnel.port, cookie, input, lease.controller.signal)
+      if (!current()) throw new Error('Connection changed. Select the workspace again.')
+      return result
+    } catch (error) {
+      if (lease.runtime.cookie === lease.cookie) delete lease.runtime.cookie
+      throw error
+    }
   }
 
   dispose(): Promise<void> {

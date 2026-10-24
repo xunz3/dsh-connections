@@ -41,10 +41,11 @@ test('save, connect, securely open, edit without redisplaying the secret, then r
   await page.getByRole('button', { name: 'Connect', exact: true }).click()
   await expect(page.getByText('Connected', { exact: true })).toBeVisible()
   await page.evaluate(() => { window.open = () => null })
-  await page.getByRole('button', { name: 'Open Harness' }).click()
-  await expect(page.getByRole('link', { name: 'Open Harness' })).toHaveAttribute('rel', 'noopener noreferrer')
+  await page.getByRole('button', { name: 'View workspaces' }).click()
+  await expect(page.locator('body')).toHaveAttribute('data-workspace-opened', 'connection-33333333-3333-4333-a333-333333333333')
+  await expect(page.getByRole('link', { name: 'View workspaces' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click()
-  await expect(page.getByRole('link', { name: 'Open Harness' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'View workspaces' })).toHaveCount(0)
   await page.getByLabel('More actions: Development').click()
   await page.getByRole('button', { name: 'Edit', exact: true }).click()
   await expect(credential).toHaveValue('')
@@ -69,21 +70,11 @@ test('connecting can be cancelled without a stale success restoring the connecti
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
-test('a late Open reply cannot navigate or restore a credential after disconnect', async ({ page }) => {
-  await page.goto('/?populated&slowopen')
-  await page.evaluate(() => { window.open = () => { document.body.dataset.opened = 'yes'; return null } })
-  await page.getByRole('button', { name: 'Open Harness' }).click()
-  await page.getByRole('button', { name: 'Disconnect', exact: true }).click()
-  await page.waitForTimeout(800) // Deliver the stale authenticated URL.
-  await expect(page.getByRole('link', { name: 'Open Harness' })).toHaveCount(0)
-  expect(await page.evaluate(() => document.body.dataset.opened)).toBeUndefined()
-})
-
 test('remote browser shows local tunnel boundary and disables connect', async ({ page }) => {
   await page.goto('/?populated&remote')
   await expect(page.getByText('This page is not on a local address.', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'Open Harness', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'View workspaces', exact: true })).toBeDisabled()
 })
 
 test('Chinese mobile layout fits and keyboard can close an edit', async ({ page }) => {

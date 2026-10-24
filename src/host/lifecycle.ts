@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { parseLaunchUrl, parseTarget, parseVersion } from '../shared/validation.js'
 import { REMOTE_SERVICE_SCRIPT } from './remote-service.js'
 
@@ -15,6 +16,8 @@ export interface ManagedHost {
 
 /** Host-only test/configuration hooks; never accepted by the client RPC. */
 export interface RemoteHostOptions {
+  /** Test-only: omit the bundled remote view during isolated service lifecycle tests. */
+  workspacePlugin?: false
   sshPath?: string
   configFile?: string
   env?: NodeJS.ProcessEnv
@@ -114,7 +117,10 @@ async function manage(action: 'prepare' | 'update', input: { target: string; ver
     if (path !== undefined && (!path.startsWith('/') || /[%\x00-\x1f\x7f]/.test(path))) throw new TypeError('Invalid managed directory.')
   }
   if (options.unit !== undefined && !/^dsh-connections(?:-[a-z0-9-]+)?\.service$/.test(options.unit)) throw new TypeError('Invalid managed service name.')
-  const payload = Buffer.from(JSON.stringify({ action, version, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
+  const archive = options.workspacePlugin === false ? undefined : await readFile(new URL('../remote-plugin.tgz', import.meta.url))
+  if (archive && archive.byteLength > 4 * 1024 * 1024) throw new RemoteHostError('install')
+  const plugin = archive === undefined ? undefined : { data: archive.toString('base64'), digest: createHash('sha256').update(archive).digest('hex') }
+  const payload = Buffer.from(JSON.stringify({ action, version, plugin, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
   const script = `${REMOTE_SERVICE_SCRIPT}\nawait main(${JSON.stringify(payload)});\n`
   const stdout = await (options.executor ?? (request => execute(request, options)))({ target, script, signal: input.signal, timeoutMs })
   if (input.signal?.aborted) throw aborted()

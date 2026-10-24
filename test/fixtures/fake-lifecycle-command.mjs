@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { readFile, writeFile, mkdir, open, access, appendFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, open, access, appendFile, stat } from 'node:fs/promises'
 import { basename, join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -16,13 +16,22 @@ const live = async pid => {
   if (!pid) return false
   try { process.kill(pid, 0); return !/^\d+ \(.+\) Z /.test(await readFile(`/proc/${pid}/stat`, 'utf8')) } catch { return false }
 }
-await appendFile(join(directory, 'commands.jsonl'), JSON.stringify({ command, action: args[0], subcommand: args[1] }) + '\n')
+const requestFile = command === 'systemd-run' && args.includes('--worker') ? await stat(args.at(-1)) : undefined
+await appendFile(join(directory, 'commands.jsonl'), JSON.stringify({ command, action: args[0], subcommand: args[1], args,
+  ...(requestFile ? { requestFileMode: requestFile.mode & 0o777, requestBytes: requestFile.size } : {}),
+}) + '\n')
 
 if (args.includes('--version')) { console.log('test command 1'); process.exit(0) }
 if (command === 'loginctl') { console.log(process.env.DSH_FIXTURE_NO_LINGER ? 'no' : 'yes'); process.exit(0) }
 
 if (command === 'npm') {
   const prefix = args[args.indexOf('--prefix') + 1]
+  if (args.at(-1) === 'pnpm@11.13.1') {
+    const module = join(prefix, 'node_modules/pnpm/bin')
+    await mkdir(module, { recursive: true })
+    await writeFile(join(module, 'pnpm.cjs'), '// Private fixture package manager\n')
+    process.exit(0)
+  }
   const version = args.at(-1).slice('@deepseek-ai/dsh@'.length)
   await writeFile(join(directory, 'installing'), version)
   if (version === '0.2.97') process.exit(1)
@@ -33,9 +42,18 @@ if (command === 'npm') {
   const source = `
 import { createServer } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile } from 'node:fs/promises';
 const version = ${JSON.stringify(version)};
 if (process.argv.includes('--version')) { console.log(version); process.exit(0); }
+if (process.argv[2] === 'plugin') {
+  const args = process.argv.slice(2);
+  if (args.length !== 6 || args[1] !== '--profile' || args[2] !== 'web' || args[3] !== 'add' || args[4] !== '--save-exact') process.exit(2);
+  const digest = createHash('sha256').update(await readFile(args[5])).digest('hex');
+  await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-installs.jsonl', JSON.stringify({ args, digest, home: process.env.DSH_HOME, agents: process.env.DSH_AGENTS_HOME, path: process.env.PATH }) + '\\n');
+  try { await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-fail'); process.exit(1); } catch {}
+  await writeFile(process.env.DSH_HOME + '/workspace-plugin-installed', digest);
+  process.exit(0);
+}
 if (version === '0.2.98') { await writeFile(process.env.DSH_HOME + '/state.txt', 'new incompatible state'); process.exit(1); }
 if (version === '0.2.99') await new Promise(resolve => setTimeout(resolve, 1000));
 const token = randomBytes(32).toString('base64url');

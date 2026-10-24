@@ -12,11 +12,11 @@ Use a runtime that permits temporary loopback TCP and Unix listeners. Browser te
 ## Layout and build
 
 - `src/host`: credential-backed records, owner RPC, owned SSH tunnels and remote native-service maintenance.
-- `src/client`: native settings, host chooser, original directory-flow delegation and remote native view.
+- `src/client`: native settings, source-aware workspace navigation, native directory delegation, embedded content layout and views.
 - `src/shared`: browser-safe contracts and validation.
 - `test`: transport, cancellation, ownership, update recovery and browser integration.
 
-The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. `cordis.patch.yml` registers the host plugin. The package checker builds and inspects a real tarball, exports, ModuleLoader identity, allowed files and documentation links.
+The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. `cordis.patch.yml` registers the host plugin. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, embedded profile patch, allowed files and documentation links. Both bundles contain identical client code. The deterministic build currently uses GNU tar.
 
 ## Transport and service tests
 
@@ -36,30 +36,21 @@ For a live lifecycle check, call the host-only `prepareHost` / `updateHost` with
 
 ## Native browser integration
 
-Use disposable Harness homes and private startup logs. The helper creates a local controller with this checkout installed, plus a real isolated sshd; the target native Web Host is prepared separately:
+Use disposable Harness homes, private startup logs and the two-Host helper:
 
 ```sh
-DSH_QA_CLI=/absolute/path/to/dsh/lib/bin.js \
+DSH_QA_UNIFIED=1 DSH_QA_CLI=/absolute/path/to/dsh/lib/bin.js \
   node test/integration/native-fixture.mjs start /tmp/dsh-native-fixture
-```
 
-The command prints only public process/address metadata and a log path, not launch credentials. It places SSH overrides on the fixture Host's own PATH. Its fixed port and ownership-checked restart allow browser-state restoration tests:
-
-```sh
-DSH_WEB_LOG=/tmp/dsh-native-fixture/host.log \
-DSH_REMOTE_NAME='Native SSH fixture' \
-DSH_REMOTE_LOG=/private/path/to/remote-host.log \
-DSH_REMOTE_TARGET=native-workspace-fixture \
-DSH_REMOTE_PROJECT=/absolute/remote/project \
-DSH_QA_RESTART_FIXTURE=/tmp/dsh-native-fixture \
-  pnpm exec playwright test --config playwright.native.config.ts
+DSH_UNIFIED_FIXTURE=/tmp/dsh-native-fixture \
+  pnpm exec playwright test unified-native.spec.ts --config playwright.native.config.ts
 
 node test/integration/native-fixture.mjs stop /tmp/dsh-native-fixture
 ```
 
-The isolated sshd forwards to its own machine's loopback, so this example requires the target fixture Host on that machine. For another authorized server, supply a private SSH config entry to the fixture instead. The remote fixture project needs `README.md` and `nested/source.txt` containing `native sidebar nested file`. Native settings testing creates and deletes a marked fake connection; project testing opens the supplied project without model requests.
+The helper installs the normal plugin in a local profile and `dist/remote-plugin.tgz` in a separate content profile. A real isolated sshd forwards between them using temporary keys/config. No user SSH configuration or default Harness home is modified. Only public process/address metadata and private log paths are printed. Full commands and restart behavior are in `test/integration/README.md` in the source checkout.
 
-`DSH_REMOTE_REOPEN=1` selects an already-created remote project. Optional `DSH_QA_REMOTE_PID` verifies the same local fixture process start time across controller restart. The restart segment uses one browser context and asserts unchanged tunnel origin, selected native session and file preview. Native tests skip unless their explicit environment is supplied; a default fixture run alone is not native integration evidence.
+For the existing user trial's settings test, supply `DSH_WEB_LOG` pointing to its private startup log and run `native.spec.ts`. `DSH_EXPECT_SSH_HOSTS=1` also requires a nonempty configuration discovery list. That test saves and removes only a marked fake connection without connecting it.
 
 ## Acceptance boundaries
 
@@ -67,11 +58,20 @@ Browser fixtures cover settings, managed-mode creation and explicit update submi
 
 SSH discovery tests cover Include resolution, literal patterns, permissions, traversal limits and command-free enumeration. Picker fixtures cover selection and naming, manual fallback, refresh failure/recovery, stale replies and targets removed from configuration. Set `DSH_EXPECT_SSH_HOSTS=1` with `DSH_WEB_LOG` for the native settings test to require a nonempty real configuration list; it saves and removes only a marked test entry without connecting.
 
-Actual Electron desktop rendering, macOS, Windows and machine reboot are not covered by these fixtures. Desktop's public bridge contract is tested with a fixture; upstream partitions are transient. No model task, account credential migration or computer-input automation is exercised.
+Actual Electron desktop rendering, macOS, Windows and machine reboot are not covered by these fixtures. Desktop opening is disabled pending source-aware native menu routing; its public guest bridge contract is tested with a fixture and upstream partitions are transient. No model task, account credential migration or computer-input automation is exercised.
 
 ## Verified on 2026-10-24
 
-SSH picker update: TypeScript and package checks passed, along with 67 Node tests (real local OpenSSH and native systemd checks enabled), 21 browser fixtures and the installed native settings test with real SSH host discovery. Discovery's final permission-error fix was retested on Node 22.12.0 and 26.5.0 (10 cases each). Light/dark, Chinese mobile and actual Harness settings captures were inspected. The tarball contains 21 files. These checks do not add a new remote lifecycle or Electron acceptance claim.
+Unified Workspaces update:
+
+- TypeScript, production build and package validation passed. The main tarball contains 28 files and includes a separately verified remote content bundle.
+- The 126-case Node suite passed with real local OpenSSH and native systemd syntax checks enabled, with no skips. A subsequent startup-restoration regression was added; all 19 controller cases passed after that fix (127 Node cases in total).
+- Twenty-eight browser fixture cases cover settings, source-qualified rows, local/remote navigation and guest bridge contracts.
+- Both real two-Host integration cases passed against Harness `0.2.1-rc.2`. They verified one Workspaces sidebar, native directory selection, text preview, real attachment upload and relative Markdown images on the remote origin. A page reload and a local-only Host restart recovered the same remote session while the remote process stayed alive.
+- Native user-customized archive/fork shortcuts in the parent sidebar were consumed safely: no corresponding local Host request or local archive mutation occurred.
+- The original isolated user trial was refreshed and its installed native settings/SSH-discovery test passed. Final remote-content and restart screenshots were inspected.
+
+Earlier SSH picker acceptance: 67 Node tests, 21 browser fixtures and the native settings test passed. Discovery's permission-error fix was also tested on Node 22.12.0 and 26.5.0 (10 cases each). Light/dark and Chinese mobile captures were inspected. These earlier checks do not add a new remote lifecycle or Electron acceptance claim.
 
 Earlier persistent-workspace acceptance:
 

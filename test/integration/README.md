@@ -1,50 +1,57 @@
-Native integration uses real Harness processes and OpenSSH. It requires Linux,
-Node, `ssh`, `sshd`, `ssh-keygen`, an installed Harness CLI, and a built plugin.
+Native integration uses two real Harness processes and OpenSSH. It requires
+Linux, Node, `ssh`, `sshd`, `ssh-keygen`, an installed Harness CLI, and a built
+plugin. It does not call a model or modify user profiles.
 
-Start an isolated controller and SSH listener:
-
-```sh
-DSH_QA_CLI=/absolute/path/to/@deepseek-ai/dsh/lib/bin.js \
-  node test/integration/native-fixture.mjs start /tmp/dsh-connections-native-qa
-```
-
-The helper links this plugin into a temporary `DSH_HOME`, selects a local port,
-and prints its PID, port, SSH alias, and private log path. Its process-local SSH
-wrapper uses temporary keys and config; no user SSH configuration is changed.
-The SSH server permits loopback forwarding and rejects command execution.
-
-Use a separate disposable Harness Host as the SSH destination. Give it a project
-directory containing `README.md` and `nested/source.txt`, whose content includes
-`native sidebar nested file`. Its startup log supplies the launch credential
-without printing it. The following test configures an existing-service connection,
-opens the remote project, checks the native file tree and preview, returns local,
-and reopens the saved project:
+Build first so `dist/remote-plugin.tgz` exists, then start the isolated fixture:
 
 ```sh
-DSH_WEB_LOG=/tmp/dsh-connections-native-qa/host.log \
-DSH_REMOTE_LOG=/tmp/remote-fixture/host.log \
-DSH_REMOTE_TARGET=native-workspace-fixture \
-DSH_REMOTE_NAME='Native workspace SSH' \
-DSH_REMOTE_PROJECT=/tmp/remote-fixture/project \
-  pnpm exec playwright test test/browser/remote-workspace.spec.ts \
+DSH_QA_UNIFIED=1 DSH_QA_CLI=/absolute/path/to/@deepseek-ai/dsh/lib/bin.js \
+  node test/integration/native-fixture.mjs start /tmp/dsh-connections-unified-qa
+
+DSH_UNIFIED_FIXTURE=/tmp/dsh-connections-unified-qa \
+  pnpm exec playwright test test/browser/unified-native.spec.ts \
     --config=playwright.native.config.ts
 ```
 
-Set `DSH_QA_RESTART_FIXTURE=/tmp/dsh-connections-native-qa` to also restart the
-owned controller inside the same browser context. This checks that the tunnel
-origin, selected remote session, and open file preview survive. If the destination
-Host is a second local process, `DSH_QA_REMOTE_PID` also verifies its Linux process
-start time is unchanged. This exercises real SSH transport and separate Host
-lifetimes; deployment to a separate machine is a separate lifecycle check.
+The helper installs the normal plugin on the local Host and the dedicated
+remote bundle on the second Host. The remote bundle uses the official profile
+patch to disable the native layout and selects the Connections content layout.
+Both keep their native conversation, files and session services. Each Host has
+its own temporary `DSH_HOME`, agent store, project directory and loopback port.
 
-For a previously saved connection, omit `DSH_REMOTE_LOG` and
-`DSH_REMOTE_TARGET`. Set `DSH_REMOTE_REOPEN=1` to select the existing project
-without calling project creation. The native config needs no mock web server.
+The process-local SSH wrapper uses temporary keys and config; no user SSH
+configuration is changed. Its SSH server permits loopback forwarding and rejects
+command execution. This verifies real SSH transport between two local processes;
+deployment to a separate machine remains a separate lifecycle check.
 
-Stop owned controller and SSH processes, retaining private logs and evidence:
+The tests cover:
+
+- Native remote boot without a second sidebar, and a clear direct-visit prompt.
+- One Workspaces sidebar containing local and remote project/session rows.
+- Native directory selection, cancellation and switching between computers.
+- Native file trees, text previews, file upload and relative Markdown images.
+- Upload/media requests using the remote origin, with no message sent to a model.
+- Reload and local Host restart restoring the remote session while the remote
+  process remains alive.
+- Native customized archive/fork shortcuts focused in the parent sidebar showing
+  a remote-action notice, without archiving or forking the retained local chat.
+
+The test updates only its fixture connection's launch credential after a remote
+restart. Its launch URLs are read from private logs and never printed by the
+helper. Screenshots are written to Playwright's test output directory.
 
 ```sh
-node test/integration/native-fixture.mjs stop /tmp/dsh-connections-native-qa
+# Restart only the local Host; the remote Host keeps running.
+node test/integration/native-fixture.mjs restart /tmp/dsh-connections-unified-qa
+
+# After rebuilding, reinstall the remote tarball and restart only that Host.
+node test/integration/native-fixture.mjs restart-remote /tmp/dsh-connections-unified-qa
+
+# Close both owned Hosts and the isolated SSH listener.
+node test/integration/native-fixture.mjs stop /tmp/dsh-connections-unified-qa
 ```
 
-The destination Host has its own lifecycle and is never stopped by this helper.
+Temporary logs, keys and project files remain under the fixture directory.
+Without `DSH_QA_UNIFIED=1`, the helper retains its single local Host mode for the
+connection-settings smoke test in `test/browser/native.spec.ts`; it then owns no
+remote Host and `stop` closes only its local Host and SSH listener.

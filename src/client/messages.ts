@@ -17,7 +17,7 @@ export const en = {
   updateHint: 'Updating restarts the remote Host. Let running tasks finish first. A failed startup restores the previous version and state.',
   save: 'Save connection', cancel: 'Cancel', edit: 'Edit', remove: 'Remove', confirmRemove: 'Remove this connection?',
   removeHint: 'The tunnel will close. Remote Harness keeps running.',
-  connect: 'Connect', reconnect: 'Reconnect', disconnect: 'Disconnect', open: 'Open Harness', preparing: 'Preparing link…',
+  connect: 'Connect', reconnect: 'Reconnect', disconnect: 'Disconnect', open: 'View workspaces', preparing: 'Preparing link…',
   connected: 'Connected', connecting: 'Connecting…', updating: 'Updating remote…', disconnected: 'Disconnected', error: 'Connection failed',
   actions: 'More actions', retry: 'Retry', failed: 'Unable to complete this action. Please try again.',
   setup: 'Set up a remote host',
@@ -26,7 +26,6 @@ export const en = {
   setupNote: 'The remote service keeps running after this app closes. It owns its files, sessions and settings. Updates happen only when you request them.',
   localNote: 'Open connections from the same computer running this Harness. Disconnect closes the tunnel and leaves the remote host running.',
   browserNote: 'This page is not on a local address. Open these settings on the computer running Harness to use its SSH tunnels.',
-  openHint: 'The link opens the remote Harness in a new tab.',
   ready: 'Ready to open',
 } as const
 export type CopyKey = keyof typeof en
@@ -49,7 +48,7 @@ export const zh: Record<CopyKey, string> = {
   updateHint: '更新会重启远端主机，请先等待运行中的任务完成。启动失败时会恢复原版本和状态。',
   save: '保存连接', cancel: '取消', edit: '编辑', remove: '移除', confirmRemove: '移除这个连接？',
   removeHint: '隧道将关闭，远端 Harness 继续运行。',
-  connect: '连接', reconnect: '重新连接', disconnect: '断开', open: '打开 Harness', preparing: '正在准备链接…',
+  connect: '连接', reconnect: '重新连接', disconnect: '断开', open: '查看工作区', preparing: '正在准备链接…',
   connected: '已连接', connecting: '正在连接…', updating: '正在更新远端…', disconnected: '未连接', error: '连接失败',
   actions: '更多操作', retry: '重试', failed: '操作未完成，请重试。',
   setup: '配置远端主机', step1: '在运行本地 Harness 的电脑上确认 SSH 可用：',
@@ -57,5 +56,5 @@ export const zh: Record<CopyKey, string> = {
   setupNote: '关闭本地应用后，远端服务仍继续运行，文件、会话和设置保留在远端。只有主动操作才会更新。',
   localNote: '请在运行此 Harness 的同一台电脑上打开连接。断开只关闭隧道，远端主机继续运行。',
   browserNote: '此页面不是本地地址。请在运行 Harness 的电脑上打开设置，以使用它的 SSH 隧道。',
-  openHint: '链接会在新标签页打开远端 Harness。', ready: '可以打开',
+  ready: '可以打开',
 }

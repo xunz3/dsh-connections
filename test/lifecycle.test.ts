@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,12 +14,12 @@ const token = 'private-launch-credential-1234567890'
 
 test('validates management input before SSH and sanitizes remote failures', async () => {
   let called = false
-  const options: RemoteHostOptions = { executor: async () => { called = true; return JSON.stringify({ error: 'install' }) } }
+  const options: RemoteHostOptions = { workspacePlugin: false, executor: async () => { called = true; return JSON.stringify({ error: 'install' }) } }
   for (const target of ['-Fother', 'host; command', 'user@host\n']) await assert.rejects(prepareHost({ target }, options), TypeError)
   for (const version of ['latest', '^0.2.1', '0.3.0', '0.2.1; command']) await assert.rejects(updateHost({ target: 'dev', version }, options), TypeError)
   assert.equal(called, false)
   await assert.rejects(prepareHost({ target: 'dev' }, options), { code: 'install' })
-  await assert.rejects(prepareHost({ target: 'dev' }, { executor: async () => JSON.stringify({ error: token }) }), error => {
+  await assert.rejects(prepareHost({ target: 'dev' }, { workspacePlugin: false, executor: async () => JSON.stringify({ error: token }) }), error => {
     assert.ok(error instanceof RemoteHostError)
     assert.equal(error.code, 'protocol')
     assert.ok(!error.message.includes(token))
@@ -28,12 +29,12 @@ test('validates management input before SSH and sanitizes remote failures', asyn
 
 test('accepts a validated native result without persisting its credential', async () => {
   const result = { remotePort: 3080, token, version: '0.2.1-rc.2', service: 'systemd', pid: 123 }
-  assert.deepEqual(await prepareHost({ target: 'dev' }, { executor: async () => JSON.stringify(result) }), result)
-  await assert.rejects(prepareHost({ target: 'dev' }, { executor: async () => JSON.stringify({ ...result, pid: 0 }) }), { code: 'protocol' })
-  await assert.rejects(prepareHost({ target: 'dev', signal: AbortSignal.abort() }, { executor: async () => { throw new Error('must not execute') } }), { name: 'AbortError' })
+  assert.deepEqual(await prepareHost({ target: 'dev' }, { workspacePlugin: false, executor: async () => JSON.stringify(result) }), result)
+  await assert.rejects(prepareHost({ target: 'dev' }, { workspacePlugin: false, executor: async () => JSON.stringify({ ...result, pid: 0 }) }), { code: 'protocol' })
+  await assert.rejects(prepareHost({ target: 'dev', signal: AbortSignal.abort() }, { workspacePlugin: false, executor: async () => { throw new Error('must not execute') } }), { name: 'AbortError' })
 })
 
-async function fixture(extraEnv: NodeJS.ProcessEnv = {}) {
+async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffer) {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-lifecycle-test-'))
   const bin = join(directory, 'bin')
   await mkdir(bin)
@@ -43,8 +44,18 @@ async function fixture(extraEnv: NodeJS.ProcessEnv = {}) {
   for (const command of ['systemctl', 'systemd-run', 'loginctl', 'npm']) await symlink(fixtureCommand, join(bin, command))
   const env = { ...process.env, ...extraEnv, PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, DSH_LIFECYCLE_FIXTURE: directory }
   const options: RemoteHostOptions = {
+    workspacePlugin: false,
     remoteRoot: join(directory, 'managed'), unit: 'dsh-connections-fixture.service', unitDirectory: join(directory, 'units'),
     executor: async ({ script, signal }) => new Promise((resolve, reject) => {
+      // Exercise the real worker transfer/install path without making the source
+      // lifecycle module depend on build output at its import-relative location.
+      if (workspacePlugin !== undefined) {
+        const match = script.match(/\nawait main\(("[^\n]+")\);\n$/)
+        if (!match || match.index === undefined) { reject(new Error('Missing fixture management payload')); return }
+        const payload = JSON.parse(Buffer.from(JSON.parse(match[1]!) as string, 'base64').toString('utf8')) as Record<string, unknown>
+        payload.plugin = { data: workspacePlugin.toString('base64'), digest: createHash('sha256').update(workspacePlugin).digest('hex') }
+        script = script.slice(0, match.index) + `\nawait main(${JSON.stringify(Buffer.from(JSON.stringify(payload)).toString('base64'))});\n`
+      }
       const child = spawn(process.execPath, ['--input-type=module', '-'], { env, stdio: ['pipe', 'pipe', 'pipe'] })
       let output = ''; let stderr = ''
       const abort = () => child.kill('SIGTERM')
@@ -63,6 +74,7 @@ async function fixture(extraEnv: NodeJS.ProcessEnv = {}) {
   }
   return {
     directory, options,
+    setWorkspacePlugin(value: Buffer) { workspacePlugin = value },
     state: async () => JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')) as { pid: number },
     dispose: async () => {
       const state = JSON.parse(await readFile(join(directory, 'state.json'), 'utf8').catch(() => '{}')) as { pid?: number }
@@ -71,6 +83,83 @@ async function fixture(extraEnv: NodeJS.ProcessEnv = {}) {
     },
   }
 }
+
+async function workspaceArchive(): Promise<Buffer> {
+  const temporary = await mkdtemp(join(tmpdir(), 'dsh-workspace-bundle-fixture-'))
+  try {
+    const packageDir = join(temporary, 'package')
+    await mkdir(packageDir)
+    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ name: '@xunz/dsh-connections', version: '0.1.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+    await writeFile(join(packageDir, 'index.js'), 'export function apply() {}\n')
+    await writeFile(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: connections\n      name: \'@xunz/dsh-connections\'\n      config:\n        embedded: true\n')
+    // Incompressible data makes the encoded transfer exceed common per-argument
+    // OS limits, catching regressions that put the archive back into argv.
+    await writeFile(join(packageDir, 'fixture-data'), randomBytes(192 * 1024))
+    const path = join(temporary, 'workspace.tgz')
+    await promisify(execFile)('tar', ['-czf', path, '-C', temporary, 'package'])
+    return await readFile(path)
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+}
+
+test('transfers the private workspace bundle through a request file and installs with the native CLI', { timeout: 40_000 }, async () => {
+  const archive = await workspaceArchive()
+  const f = await fixture({}, archive)
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const root = f.options.remoteRoot!
+    const digest = createHash('sha256').update(archive).digest('hex')
+    assert.deepEqual(JSON.parse(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')), { digest })
+    assert.deepEqual(await readFile(join(root, 'plugins', `${digest}.tgz`)), archive)
+    assert.equal((await stat(join(root, 'plugins', `${digest}.tgz`))).mode & 0o777, 0o600)
+    const installs = (await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; digest: string; home: string; agents: string; path: string })
+    assert.equal(installs.length, 1)
+    assert.deepEqual(installs[0]!.args, ['plugin', '--profile', 'web', 'add', '--save-exact', join(root, 'plugins', `${digest}.tgz`)])
+    assert.equal(installs[0]!.digest, digest)
+    assert.equal(installs[0]!.home, join(root, 'home'))
+    assert.equal(installs[0]!.agents, join(root, 'agents'))
+    assert.ok(installs[0]!.path.startsWith(`${join(root, 'installer/node_modules/.bin')}:`))
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[]; requestFileMode?: number; requestBytes?: number })
+    const worker = commands.find(row => row.command === 'systemd-run' && row.args.includes('--worker'))!
+    assert.equal(worker.requestFileMode, 0o600)
+    assert.ok(worker.requestBytes! > 128 * 1024)
+    assert.ok(worker.args.every(arg => arg.length < 4096))
+    assert.match(worker.args.at(-1)!, /\/request-[0-9a-f-]{36}\.json$/)
+    const installer = commands.find(row => row.command === 'npm' && row.args.at(-1) === 'pnpm@11.13.1')!
+    assert.ok(installer.args.includes('--ignore-scripts'))
+    assert.ok(installer.args.includes('--save-exact'))
+    assert.equal((await readdir(root)).some(name => /^(request|result)-/.test(name)), false)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.equal((await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').length, 1)
+  } finally { await f.dispose() }
+})
+
+test('adding and refreshing remote workspace support preserves the existing Host and its state', { timeout: 40_000 }, async () => {
+  const f = await fixture()
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const root = f.options.remoteRoot!
+    const state = join(root, 'home/active-task-state')
+    await writeFile(state, 'Existing native state must survive', { mode: 0o600 })
+    const archive = await workspaceArchive()
+    f.setWorkspacePlugin(archive)
+    const attached = await prepareHost({ target: 'dev' }, f.options)
+    assert.deepEqual(attached, first)
+    const previousReceipt = await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')
+    // Changing the gzip timestamp preserves its contents and changes the digest.
+    archive[4] = archive[4]! ^ 1
+    await writeFile(join(f.directory, 'plugin-fail'), '')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'install' })
+    assert.equal((await f.state()).pid, first.pid)
+    assert.equal(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8'), previousReceipt)
+    await rm(join(f.directory, 'plugin-fail'))
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.notEqual(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8'), previousReceipt)
+    assert.equal(await readFile(state, 'utf8'), 'Existing native state must survive')
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.equal(commands.filter(row => row.command === 'systemctl' && row.args.includes('stop')).length, 0)
+    assert.equal(commands.filter(row => row.command === 'npm' && row.args.at(-1) === 'pnpm@11.13.1').length, 1)
+  } finally { await f.dispose() }
+})
 
 test('missing native service prerequisites leave no installation behind', async () => {
   for (const [environment, code] of [[{ DSH_FIXTURE_NO_MANAGER: '1' }, 'unavailable'], [{ DSH_FIXTURE_NO_LINGER: '1' }, 'linger']] as const) {

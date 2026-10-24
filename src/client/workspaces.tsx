@@ -8,28 +8,42 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ConnectionsApi, ConnectionView } from '../shared/types.js'
-import { parseId, parseOpenResult } from '../shared/validation.js'
+import { parseOpenResult } from '../shared/validation.js'
 import type { Translate } from './messages.js'
+import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-shortcuts/client'
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { WorkspaceApi } from '../shared/workspace-rpc.js'
+import type { WorkspaceNavigationTarget } from '../shared/workspace-protocol.js'
+import { WorkspaceController } from './workspace-controller.js'
+import { WorkspaceBrowser } from './WorkspaceBrowser.js'
+import { installWorkspaceShortcuts } from './workspace-shortcuts.js'
+export { WorkspaceController } from './workspace-controller.js'
 
 const en = {
   choose: 'Open a project', computer: 'This computer', remote: 'Remote computers',
   hint: 'Choose the computer where your project lives.', empty: 'Add an SSH connection in Settings → Connections.',
   loading: 'Loading connections…', cancel: 'Cancel', back: 'Return to this computer',
   connecting: 'Connecting to remote Harness…', retry: 'Reconnect', failed: 'Unable to open this connection. Check its status in Connections and try again.',
-  unavailable: 'Use this Harness on http://127.0.0.1 or http://localhost, or in the desktop app, to open a remote workspace here.',
-  localUnavailable: 'The local directory picker is unavailable.', frame: 'Remote Harness',
+  unavailable: 'Open Harness in a local HTTP browser to use remote workspaces. Native desktop command routing is not supported yet.',
+  shortcutBlocked: 'Use the selected remote chat’s actions or focus its conversation before using this shortcut.',
+  localUnavailable: 'The local directory picker is unavailable.', frame: 'Remote workspace',
   disconnected: 'This connection is no longer available. Reconnect to continue.',
+  pluginRequired: 'Install the remote content bundle on this Harness profile to open its workspaces. See the Connections usage guide.',
 } as const
 const zh: Record<keyof typeof en, string> = {
   choose: '打开项目', computer: '这台电脑', remote: '远端电脑', hint: '选择项目所在的电脑。',
   empty: '请先在「设置 → 连接」中添加 SSH 连接。', loading: '正在读取连接…', cancel: '取消', back: '返回这台电脑',
   connecting: '正在连接远端 Harness…', retry: '重新连接', failed: '无法打开此连接。请在「连接」中检查状态后重试。',
-  unavailable: '请通过 http://127.0.0.1、http://localhost 或桌面应用打开本地 Harness，以在应用内使用远端项目。',
-  localUnavailable: '本地目录选择器不可用。', frame: '远端 Harness', disconnected: '此连接已不可用，请重新连接后继续。',
+  unavailable: '请通过本机 HTTP 浏览器打开 Harness 使用远端工作区。原生桌面的命令路由暂未支持。',
+  shortcutBlocked: '请使用远端会话的操作菜单，或先聚焦远端聊天内容再使用此快捷键。',
+  localUnavailable: '本地目录选择器不可用。', frame: '远端工作区', disconnected: '此连接已不可用，请重新连接后继续。',
+  pluginRequired: '请在远端 Harness 配置中安装内容插件包，再打开工作区。安装步骤见 Connections 使用文档。',
 }
 export type WorkspaceTranslate = (key: keyof typeof en) => string
 export const workspaceMessages = { en, zh }
-const STORAGE_KEY = '@xunz/dsh-connections/selected'
 type PickerSlot = 'conversation.hero.workspace.directoryFlow' | 'sidebar.workspaces.directoryFlow'
 type LocalSlot = 'connections.local.heroDirectoryFlow' | 'connections.local.sidebarDirectoryFlow'
 
@@ -57,98 +71,6 @@ export function workspaceUrl(value: string, page: Pick<Location, 'protocol' | 'h
   const target = new URL(url)
   target.hostname = page.hostname
   return target.href
-}
-
-export interface WorkspaceState {
-  id: string
-  name: string
-  phase: 'connecting' | 'ready' | 'error'
-  url?: string
-  error?: 'failed' | 'unavailable' | 'disconnected'
-}
-interface WorkspaceOptions {
-  storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
-  prepareUrl?: (url: string) => string
-}
-
-/** Presentation state only. Connections and remote Harness keep their own lifetimes. */
-export class WorkspaceController {
-  private state: WorkspaceState | undefined
-  private version = 0
-  private disposed = false
-  private readonly listeners = new Set<() => void>()
-  readonly getSnapshot = () => this.state
-  readonly subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
-  constructor(readonly api: Pick<ConnectionsApi, 'list' | 'connect' | 'open'>, private readonly options: WorkspaceOptions = {}) {}
-
-  private publish(state: WorkspaceState | undefined) {
-    this.state = state
-    for (const listener of this.listeners) listener()
-  }
-  private remember(id?: string) {
-    try {
-      if (id === undefined) this.options.storage?.removeItem(STORAGE_KEY)
-      else this.options.storage?.setItem(STORAGE_KEY, id)
-    } catch { /* Storage may be disabled; the workspace still works. */ }
-  }
-  async restore(): Promise<void> {
-    let id: string | null | undefined
-    try { id = this.options.storage?.getItem(STORAGE_KEY); if (id) parseId(id) }
-    catch { this.remember(); return }
-    if (id) await this.activate(id, true)
-  }
-  async open(id: string): Promise<void> {
-    await this.activate(id, false)
-  }
-  private async activate(id: string, restoring: boolean): Promise<void> {
-    if (this.disposed) return
-    parseId(id)
-    const version = ++this.version
-    const current = () => !this.disposed && version === this.version
-    if (!restoring) this.publish({ id, name: '', phase: 'connecting' })
-    try {
-      const row = (await this.api.list()).find(row => row.id === id)
-      if (!current()) return
-      if (!row) { this.remember(); throw new Error('missing-connection') }
-      // Remember the last selection, but respect an explicitly disabled automatic
-      // connection. A user's later picker action still opens it normally.
-      if (restoring && row.autoConnect === false && row.phase !== 'connected') {
-        this.publish(undefined)
-        return
-      }
-      this.publish({ id, name: row.name, phase: 'connecting' })
-      const connected = row.phase === 'connected' ? row : await this.api.connect(id)
-      if (!current()) return
-      const result = parseOpenResult(await this.api.open(id))
-      if (!current()) return
-      // Editing, removing or disconnecting while open is pending must never mount a stale authority.
-      const latest = (await this.api.list()).find(row => row.id === id)
-      if (!current()) return
-      if (latest?.phase !== 'connected' || latest.localPort !== connected.localPort
-        || Number(new URL(result.url).port) !== latest.localPort) throw new Error('changed-connection')
-      const url = this.options.prepareUrl?.(result.url) ?? result.url
-      this.remember(id)
-      this.publish({ id, name: latest.name, phase: 'ready', url })
-    } catch (error) {
-      if (!current()) return
-      this.publish({ id, name: this.state?.name ?? '', phase: 'error',
-        error: error instanceof Error && error.message === 'unsupported-workspace-surface' ? 'unavailable' : 'failed' })
-    }
-  }
-  /** Returning local only closes the view; it never stops a tunnel or remote work. */
-  close(): void { this.version++; this.remember(); this.publish(undefined) }
-  async check(): Promise<void> {
-    const state = this.state
-    if (!state || state.phase !== 'ready') return
-    const version = this.version
-    try {
-      const row = (await this.api.list()).find(row => row.id === state.id)
-      if (this.disposed || version !== this.version || this.state !== state) return
-      if (row?.phase === 'connected' && row.localPort === Number(new URL(state.url!).port)) return
-    } catch { if (this.disposed || version !== this.version || this.state !== state) return }
-    this.publish({ id: state.id, name: state.name, phase: 'error', error: 'disconnected' })
-  }
-  dispose(): void { this.disposed = true; this.version++; this.publish(undefined); this.listeners.clear() }
 }
 
 export function HostChooser({ owner, controller, t, renderLocal }: {
@@ -180,7 +102,7 @@ export function HostChooser({ owner, controller, t, renderLocal }: {
     <button className="dc-host-choice" disabled={owner.busy} onClick={() => setLocal(true)}>{t('computer')}</button>
     <h3>{t('remote')}</h3>
     {failed ? <p role="alert">{t('failed')}</p> : rows === undefined ? <p role="status">{t('loading')}</p> : rows.length === 0 ? <p>{t('empty')}</p> : rows.map(row =>
-      <button key={row.id} className="dc-host-choice" disabled={owner.busy} onClick={() => { owner.onCancel(); void controller.open(row.id) }}><strong>{row.name}</strong><span>{row.target}</span></button>)}
+      <button key={row.id} className="dc-host-choice" disabled={owner.busy} onClick={() => { owner.onCancel(); void controller.pick(row.id) }}><strong>{row.name}</strong><span>{row.target}</span></button>)}
     <div className="dc-workspace-chooser-actions"><button onClick={owner.onCancel}>{t('cancel')}</button></div>
   </dialog>
 }
@@ -244,74 +166,149 @@ export function RemoteWorkspace({ controller, t, bridge }: {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
   const [guestError, setGuestError] = useState(false)
   const failed = useRef(() => { setGuestError(true) }).current
-  const region = useRef<HTMLDialogElement>(null)
   useEffect(() => { setGuestError(false) }, [state?.url])
-  useEffect(() => {
-    if (!state) return
-    const previous = document.activeElement as HTMLElement | null
-    region.current?.showModal()
-    region.current?.querySelector<HTMLButtonElement>('button')?.focus()
-    return () => { if (previous?.isConnected) previous.focus() }
-  }, [!!state])
-  useEffect(() => {
-    if (state?.phase !== 'ready') return
-    let alive = true
-    let timer: ReturnType<typeof setTimeout>
-    const poll = async () => { await controller.check(); if (alive) timer = setTimeout(poll, 2500) }
-    timer = setTimeout(poll, 2500)
-    return () => { alive = false; clearTimeout(timer) }
-  }, [controller, state?.phase, state?.url])
   if (!state) return null
-  return <dialog ref={region} className="dc-remote-workspace" aria-modal="true" aria-label={state.name || t('frame')} onCancel={event => event.preventDefault()}>
+  return <section className="dc-remote-workspace" aria-label={state.name || t('frame')}>
     <style>{workspaceCss}</style>
-    <header className="dc-remote-bar"><strong>{state.name || t('frame')}</strong><button onClick={() => controller.close()}>{t('back')}</button></header>
     {state.phase === 'connecting' ? <p className="dc-remote-status" role="status">{t('connecting')}</p>
-      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p><button onClick={() => { setGuestError(false); void controller.open(state.id) }}>{t('retry')}</button></div>
+      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p><button onClick={() => { setGuestError(false); void controller.reconnect(state.id) }}>{t('retry')}</button></div>
       : bridge ? <DesktopGuest bridge={bridge} id={state.id} url={state.url!} title={t('frame')} failed={failed} />
         : <iframe key={state.url} className="dc-remote-frame" src={state.url} title={t('frame')} referrerPolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onError={failed} />}
-  </dialog>
+  </section>
 }
 
-/** Install only native extension points; both local pickers retain their existing implementation. */
-export function installWorkspaces(ctx: Context, api: ConnectionsApi, _t: Translate): WorkspaceController {
+/** Compose the native shell through public slots; remote content owns no local Session. */
+export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, _t: Translate): WorkspaceController {
   const bridge = desktopBrowser()
   let storage: Storage | undefined
   try { storage = window.localStorage } catch { /* Optional preference persistence. */ }
-  const controller = new WorkspaceController(api, { storage, prepareUrl: url => workspaceUrl(url, window.location, bridge !== undefined) })
+  let localNavigate: (target: WorkspaceNavigationTarget) => Promise<void> = async () => { throw new Error('Local workspace navigation is not ready.') }
+  const controller = new WorkspaceController(api, {
+    storage, prepareUrl: url => {
+      // Native desktop menu accelerators bypass the document-local input hook.
+      // Enable this surface only after the shell can route commands to the selected source.
+      if (bridge !== undefined) throw new Error('unsupported-workspace-surface')
+      return workspaceUrl(url, window.location, false)
+    },
+    localNavigate: target => localNavigate(target),
+  })
   ctx.effect(() => ctx.locale.register('connections.workspace', { en, zh }))
   const t = ctx.locale.bind('connections.workspace') as WorkspaceTranslate
   ctx.effect(() => () => controller.dispose())
-  ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'connections.workspace', locale: 'connections.workspace' },
-    () => <RemoteWorkspace controller={controller} t={t} {...bridge === undefined ? {} : { bridge }} />))
+  const panel = 'connections.workspace' as MainPanelId
 
-  const installPicker = (slot: PickerSlot, alias: LocalSlot) => ctx.slots.inject(slot, () => {
-    const Picker = (props: DirectoryFlowOwnerProps & PropsRenderSlots<LocalSlot>) => {
-      // Owner props override injected props in the renderer. Forward only the
-      // native owner contract, never this chooser's locale/store/render seats.
-      const { open, busy, onPicked, onCancel, onError } = props
-      const owner: DirectoryFlowOwnerProps = { open, busy, onPicked, onCancel, onError }
-      return <HostChooser owner={owner} controller={controller} t={t}
-        renderLocal={owner => props.renderSlot(alias, owner, { fallback: <p role="alert">{t('localUnavailable')} <button onClick={owner.onCancel}>{t('cancel')}</button></p> })} />
-    }
-    const removePicker = ctx.slots.register({ name: slot, priority: -100, locale: 'connections.workspace', children: { [alias]: { kind: 'single', scope: 'root' } } } as never, Picker as never)
+  const delegate = (slot: PickerSlot, alias: LocalSlot, excluded?: unknown) => {
     let delegated: StoredEntry | undefined
-    let removeDelegate: (() => void) | undefined
+    let remove: (() => void) | undefined
     const sync = () => {
-      const entry = ctx.slots.entries(slot).find(entry => entry.component !== Picker)
+      const entry = ctx.slots.entries(slot).find(entry => entry.component !== excluded)
       if (entry === delegated) return
-      removeDelegate?.(); removeDelegate = undefined; delegated = entry
+      remove?.(); remove = undefined; delegated = entry
       if (!entry || (entry.children && Object.keys(entry.children).length > 0)) return
-      // Native directory flows are leaves. Preserve their component, injected services,
-      // locale and store seats through a real child slot rather than invoking them by hand.
-      removeDelegate = ctx.slots.register({ name: alias, inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+      remove = ctx.slots.register({ name: alias, inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
     }
     const off = ctx.slots.subscribe(slot, sync)
     sync()
-    return () => { off(); removeDelegate?.(); removePicker() }
+    return () => { off(); remove?.() }
+  }
+
+  ctx.inject(['layout', 'uiWorkspace', 'uiSession', 'workspaces', 'shortcuts'], ctx => {
+    localNavigate = async target => {
+      if (target.kind === 'session') ctx.uiWorkspace.openSession(target.id as Parameters<typeof ctx.uiWorkspace.openSession>[0])
+      else if (target.kind === 'workspace') await ctx.uiWorkspace.openWorkspace(target.id as Parameters<typeof ctx.uiWorkspace.openWorkspace>[0])
+    }
+
+    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: panel, locale: 'connections.workspace' },
+      () => <RemoteWorkspace controller={controller} t={t} {...bridge === undefined ? {} : { bridge }} />))
+    ctx.slots.inject('sidebar.workspaces', () => {
+      const Browser = (props: PropsRenderSlots<'connections.local.sidebarDirectoryFlow'> & { wide: boolean; expandSidebar(): void }) => {
+        const { sources, selected } = useSyncExternalStore(controller.subscribe, controller.getCatalogs)
+        const [open, setOpen] = useState(false)
+        const [busy, setBusy] = useState(false)
+        const [error, setError] = useState(false)
+        const [shortcutNote, setShortcutNote] = useState(false)
+        const [searchRequest, setSearchRequest] = useState(0)
+        useEffect(() => installWorkspaceShortcuts(ctx.shortcuts, {
+          getRemoteSourceId: () => controller.getSnapshot()?.id,
+          onSearch: () => setSearchRequest(value => value + 1),
+          onAddWorkspace: () => { props.expandSidebar(); setError(false); setOpen(true) },
+          onBlocked: () => setShortcutNote(true),
+          onNewSession: id => {
+            const current = controller.getCatalogs()
+            const source = current.sources.find(source => source.id === id)
+            const selected = current.selected
+            const workspace = source?.catalog?.workspaces.find(workspace => workspace.id === selected.workspaceId
+              || selected.sessionId !== undefined && workspace.sessionIds.includes(selected.sessionId))
+            void controller.navigate(id, workspace ? { kind: 'workspace', id: workspace.id } : { kind: 'pick' })
+          },
+        }), [props.expandSidebar])
+        useEffect(() => { setShortcutNote(false) }, [selected.sourceId, selected.sessionId])
+        const owner: DirectoryFlowOwnerProps = {
+          open, busy, onCancel: () => { if (!busy) setOpen(false) }, onError: () => { setOpen(false); setError(true) },
+          onPicked: path => {
+            if (busy) return
+            setBusy(true)
+            void ctx.workspaces.create({ path }).then(async value => {
+              setOpen(false)
+              await controller.navigate('local', { kind: 'workspace', id: value.workspaceId })
+            }).catch(() => { setError(true); setOpen(false) }).finally(() => setBusy(false))
+          },
+        }
+        return <>
+          <style>{`.dcw-command-note{margin:8px 16px;font-size:12px;color:var(--dsw-alias-label-secondary);line-height:1.5}.dcw-command-note button{background:none;border:0;color:inherit;cursor:pointer;text-decoration:underline}`}</style>
+          <WorkspaceBrowser searchRequest={searchRequest} sources={sources} selected={selected} locale={ctx.locale.getSnapshot().active}
+            wide={props.wide} expandSidebar={props.expandSidebar}
+            onOpenSession={(id, sessionId) => controller.navigate(id, { kind: 'session', id: sessionId })}
+            onOpenWorkspace={(id, workspaceId) => controller.navigate(id, { kind: 'workspace', id: workspaceId })}
+            onAddWorkspace={() => { setError(false); setOpen(true) }} onReconnect={id => controller.reconnect(id)}
+            onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
+            onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
+            onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}
+            onArchiveSession={(id, sessionId, archived) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived })}
+            onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned })} />
+          {shortcutNote && <p className="dcw-command-note" role="status">{t('shortcutBlocked')} <button onClick={() => setShortcutNote(false)}>{t('cancel')}</button></p>}
+          {error && <p role="alert">{t('failed')} <button onClick={() => setError(false)}>{t('cancel')}</button></p>}
+          <HostChooser owner={owner} controller={controller} t={t} renderLocal={owner => props.renderSlot('connections.local.sidebarDirectoryFlow', owner, { fallback: <p role="alert">{t('localUnavailable')} <button onClick={owner.onCancel}>{t('cancel')}</button></p> })} />
+        </>
+      }
+      const remove = ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, locale: 'connections.workspace',
+        children: { 'connections.local.sidebarDirectoryFlow': { kind: 'single', scope: 'root' } },
+      }, Browser)
+      const stop = delegate('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow')
+      return () => { stop(); remove() }
+    })
+    // The empty-state picker keeps its native adoption semantics for this computer.
+    ctx.slots.inject('conversation.hero.workspace.directoryFlow', () => {
+      const Picker = (props: DirectoryFlowOwnerProps & PropsRenderSlots<'connections.local.heroDirectoryFlow'>) => {
+        const { open, busy, onPicked, onCancel, onError } = props
+        return <HostChooser owner={{ open, busy, onPicked, onCancel, onError }} controller={controller} t={t}
+          renderLocal={owner => props.renderSlot('connections.local.heroDirectoryFlow', owner)} />
+      }
+      const remove = ctx.slots.register({ name: 'conversation.hero.workspace.directoryFlow', priority: -100, locale: 'connections.workspace',
+        children: { 'connections.local.heroDirectoryFlow': { kind: 'single', scope: 'root' } },
+      }, Picker)
+      const stop = delegate('conversation.hero.workspace.directoryFlow', 'connections.local.heroDirectoryFlow', Picker)
+      return () => { stop(); remove() }
+    })
+    ctx.effect(() => {
+      let wasRemote = false
+      const sync = () => {
+        const remote = controller.getSnapshot() !== undefined
+        if (remote && !wasRemote) { wasRemote = true; ctx.layout.beginNavigation(); ctx.layout.selectPanel(panel) }
+        else if (!remote && wasRemote) { wasRemote = false; if (ctx.layout.panelInfo.getSnapshot().activePanelId === panel) ctx.layout.selectPanel(null) }
+      }
+      const offController = controller.subscribe(sync)
+      const offPanel = ctx.layout.panelInfo.subscribe(() => {
+        if (ctx.layout.panelInfo.getSnapshot().activePanelId !== panel && controller.getSnapshot()) controller.close()
+        if (!controller.getSnapshot()) controller.localSelection(ctx.uiSession.adapter.current.getSnapshot().key)
+      })
+      const offSession = ctx.uiSession.adapter.current.subscribe(() => controller.localSelection(ctx.uiSession.adapter.current.getSnapshot().key))
+      sync()
+      controller.start()
+      void controller.restore()
+      return () => { offController(); offPanel(); offSession() }
+    })
   })
-  installPicker('conversation.hero.workspace.directoryFlow', 'connections.local.heroDirectoryFlow')
-  installPicker('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow')
-  void controller.restore()
   return controller
 }
 
@@ -321,5 +318,5 @@ const workspaceCss = `
 .dc-workspace-chooser h2{font-size:19px;margin:0 0 6px}.dc-workspace-chooser h3{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary,#666);margin:24px 0 8px}.dc-workspace-chooser p{color:var(--dsw-alias-label-secondary,#666);margin:0 0 18px}
 .dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1,#f4f4f4)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid #5785bc;outline-offset:2px}
 .dc-workspace-chooser .dc-host-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;margin:6px 0;padding:12px}.dc-host-choice strong{font-weight:500}.dc-host-choice span{font-size:12px;color:var(--dsw-alias-label-secondary,#666);overflow:hidden;text-overflow:ellipsis}.dc-workspace-chooser-actions{display:flex;justify-content:flex-end;margin-top:22px}
-.dc-remote-workspace{position:fixed;inset:0;z-index:900;width:100vw;height:100dvh;max-width:none;max-height:none;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:48px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd);box-sizing:border-box;flex:none}.dc-remote-bar strong{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dc-remote-bar button{font-size:12px;white-space:nowrap}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
+.dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:48px;padding:8px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#ddd);box-sizing:border-box;flex:none}.dc-remote-bar strong{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dc-remote-bar button{font-size:12px;white-space:nowrap}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
 `
