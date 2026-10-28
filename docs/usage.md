@@ -14,7 +14,7 @@ For **Run in the background**, the remote computer needs:
 - Node.js 22.19+ or >=24 and npm available to the SSH shell; `flock` and `tar`.
 - Access to the npm registry and space for Harness, managed data and an update snapshot.
 
-If linger is disabled, configure it using your host's normal policy (`loginctl enable-linger "$USER"`) before connecting. Connections does not enable it for you. Remote service availability still depends on the operating system and machine; powered-off machines cannot run tasks.
+These installation/update requirements are separate from reconnect: an already installed service can be reused without npm or linger, but still needs Node, its systemd user manager, the maintenance lock and systemd-run. If linger is disabled, logout/boot persistence is no longer assured. For installation, configure it using your host's normal policy (`loginctl enable-linger "$USER"`) before connecting. Connections does not enable it for you. Remote service availability still depends on the operating system and machine; powered-off machines cannot run tasks.
 
 ## Add and open
 
@@ -24,15 +24,15 @@ If linger is disabled, configure it using your host's normal policy (`loginctl e
 4. Local and remote projects share the **Workspaces** sidebar and the same entry points. Select a project or chat, or use **Add workspace** and choose its computer.
 5. Choose a directory using that computer's native picker. Remote computers use Harness's built-in browser directory list, so selection takes place in this window even if the server has a graphical desktop. Conversation and files appear in the main area while the unified sidebar stays available. The top **New Session** button and keyboard command create a chat on the currently selected computer. Select a local row to switch back to this computer.
 
-Selecting a remote computer shows connection and loading feedback in the main area. Loading ends when the native directory picker is mounted or the requested session has become current. If that content-loading stage receives no readiness acknowledgement within 30 seconds, it shows an error: use **Reconnect** to retry the operation, or **Cancel** to return to this computer. SSH setup and first-time installation have their own connection progress; the 30-second limit applies to presenting remote content.
+Selecting a remote computer shows connection and loading feedback in the main area. Loading ends when the native directory picker is mounted or the requested session has become current. If that content-loading stage receives no readiness acknowledgement within 30 seconds, it shows an error: use **Reconnect** to refresh the managed Host address and authentication, rebuild its SSH tunnel and retry the operation, or **Cancel** to return to this computer. SSH setup and first-time installation have their own connection progress; the 30-second limit applies to presenting remote content.
 
-Configure models, accounts and plugins on the remote Harness Host, using its native configuration and plugin commands. Local accounts, API keys and plugins are not copied. Opening a remote directory does not create a workspace with that path on the local Host.
+Click the **Host** button beside the native **Settings** title to choose **This computer** or a remote connection. Its menu shows connection status and marks the selected Host. The selected Host supplies the entire native settings page, including Models and its plugin sections, in one native dialog. Models, accounts, API keys and plugin installations are independent; local values are not copied. See [Settings and plugin ownership](host-settings.md), including how to install additional plugins into the managed remote profile. Opening a remote directory does not create a workspace with that path on the local Host.
 
 The dropdown reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** rereads it without changing the draft. Already saved targets are marked; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
 
 Discovery lists concrete aliases only; wildcard and negated patterns are not choices. Conditional includes contribute candidates without evaluating `Match` or running commands. Host-dependent include paths cannot be discovered statically. Connection settings are resolved by OpenSSH when connecting; discovery does not copy keys, resolve hosts or contact servers.
 
-Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS and other browser origins are not supported. The native desktop content path is currently disabled: its menu accelerators bypass document-local command routing and could target a local session. Its guest bridge adapter remains covered by contract tests, pending a native source-aware command interface.
+Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS, IPv6 loopback browser URLs and other browser origins are not supported; settings and content use the same eligibility check. The native desktop content path is currently disabled: its menu accelerators bypass document-local command routing and could target a local session. Its guest bridge adapter remains covered by contract tests, pending a native source-aware command interface.
 
 The native brand/New Session controls and New Session keyboard command share the same source-aware action. Search/add commands use the unified list. With focus in the parent sidebar, archive/fork shortcuts show guidance instead of touching the previous local session. Focus the remote conversation to use its native shortcuts, or use its source-labelled row actions.
 
@@ -40,7 +40,9 @@ The native brand/New Session controls and New Session keyboard command share the
 
 **Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
 
-The next local startup reconnects saved auto-connect entries. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
+Editing the name or auto-connect preference keeps an active tunnel and view. Changing the destination or existing-service credential disconnects it.
+
+The next local startup reconnects saved auto-connect entries in batches of at most four. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
 
 Explicit navigation, including creating a new local session while startup restoration is pending, cancels the older restoration request. Native background restoration of the previous local session does not erase the saved remote selection.
 
@@ -52,7 +54,7 @@ When Connections refreshes its own remote content bundle, it asks the native plu
 
 ## Explicit updates
 
-Open the connection's **More actions → Update remote Harness**. Enter an exact compatible version such as `0.2.1-rc.3`; tags like `latest` and ranges are rejected. Cancel leaves the version unchanged. Ordinary connect never upgrades the installed version.
+Open the connection's **More actions → Update remote Harness**. Choose an explicitly supported exact version: `0.2.1-rc.2` or `0.2.1-rc.3`. Other versions, tags such as `latest`, and ranges are rejected. Local sidebar compatibility remains exactly `rc.2`; the independently built remote content bundle advertises only the tested remote versions. Cancel leaves the version unchanged. Ordinary connect never upgrades the installed version.
 
 Let running tasks finish before submitting: updating restarts the remote Host. The new package is installed and validated first. The updater then snapshots the managed Harness home and agents directory while stopped, switches release, and checks native authentication. Failed startup rolls back the previous release and managed state. It does not snapshot or revert project files outside those directories. A rollback failure preserves the recovery snapshot and reports the error.
 
@@ -67,10 +69,12 @@ The owned installation is under `~/.local/share/dsh-connections`:
 - `home` and `agents`: dedicated native Harness data, separate from default `.dsh`.
 - `releases` and `current`: pinned packages and selected release.
 - `plugins` and `installer`: verified content bundles and a pinned pnpm used by the native plugin installer.
-- `service.log` and `install.log`: private diagnostics; the former contains the native launch credential. Do not share them unredacted.
-- `environment`: private remote proxy, CA and npm networking configuration, taken from the remote SSH environment. No local settings or model keys are copied.
+- `service.log`, `install.log` and `maintenance.log`: private diagnostics; the former contains the native launch credential. Do not share them unredacted.
+- Each release retains its npm `package-lock.json` and `release.json` with the main package SRI and lock digest for auditing. npm verifies fetched tarballs against their registry integrity. This is not publisher signature verification or an offline release format.
+- Installer subprocesses receive only required execution variables plus an allowlist of proxy, CA and npm networking configuration. Native package lifecycle scripts remain enabled because Harness and its native dependencies require them.
+- `environment`: private remote proxy, CA, npm networking configuration and a filtered PATH of absolute directories, taken from the remote SSH environment. The recorded Node runtime is placed first. Refreshing this file does not restart a running Host; an updated PATH takes effect on its next normal or explicit start. No local settings or model keys are copied.
 
-The unit is `~/.config/systemd/user/dsh-connections.service`. Inspect or explicitly stop it on the remote computer:
+New installations use `$XDG_CONFIG_HOME/systemd/user/dsh-connections.service` when an absolute `XDG_CONFIG_HOME` is set, otherwise `~/.config/systemd/user/dsh-connections.service`. Existing owned installations retain their recorded unit location. The service pins its installed Node runtime so native dependency ABI stays consistent. Keep that runtime available; a removed runtime or incompatible Node/npm combination produces an explicit repair diagnostic instead of silently switching executables. Inspect or explicitly stop it on the remote computer:
 
 ```sh
 systemctl --user status dsh-connections.service
@@ -88,9 +92,9 @@ dsh plugin --profile web add /absolute/path/to/remote-plugin.tgz
 dsh web --host 127.0.0.1 --no-open
 ```
 
-Use an isolated `DSH_HOME` and configure models there if the machine already has a separate full Harness interface. The bundle replaces the layout in its selected profile; it keeps native conversation, files and overlays. Configure the Host before switching its profile to this content layout. Normal local plugin installation uses the main package, not this embedded bundle.
+Use an isolated `DSH_HOME` and configure models there if the machine already has a separate full Harness interface. The bundle replaces the layout in its selected profile; it keeps native conversation, files and overlays. Its native settings remain accessible through the local Settings host selector. Normal local plugin installation uses the main package, not this embedded bundle.
 
-Choose **Use an existing service** locally and supply the complete loopback launch URL printed by that Host. Keep it running using your existing service manager. Connections does not install, restart or update an existing-service Host. Its launch credential stays in the native credential provider; leave the URL blank while editing to retain it. Refresh it after the destination Host restarts. Older saved connections retain their settings, but require the remote content bundle before unified Workspaces can open them.
+Choose **Use an existing service** locally and supply the complete loopback launch URL printed by that Host. The service must listen on IPv4 `127.0.0.1`; a `localhost` URL alone does not establish IPv4 availability. Keep it running using your existing service manager. Connections does not install, restart or update an existing-service Host. Its launch credential stays in the native credential provider; leave the URL blank while editing to retain it. Refresh it after the destination Host restarts. Older saved connections retain their settings, but require the remote content bundle before unified Workspaces can open them.
 
 ## Troubleshooting
 
@@ -102,6 +106,8 @@ Choose **Use an existing service** locally and supply the complete loopback laun
 | Installation failed | Check registry access, disk space and private `install.log` on the remote computer. |
 | Service ownership conflict | Inspect the named managed directory/unit. Connections will not overwrite a foreign unit or drop-in. |
 | Service startup failed | Inspect `systemctl --user status` and the private `service.log`. |
+| Remote content plugin version mismatch | Update the remote content bundle from the same local package, then reconnect. Managed mode verifies/repairs activation on prepare. |
+| Maintenance failed | Inspect private `maintenance.log`; this is distinct from an operation still holding the maintenance lock. |
 | Maintenance still running | Reconnect after the active operation completes; a second operation waits on its lock. |
 | SSH forwarding failed | Check network routing and the server's TCP forwarding policy. |
 | Existing Host authentication failed | Confirm the Host is running and update its launch URL. |

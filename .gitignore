@@ -4,6 +4,7 @@ dist/
 test-results/
 playwright-report/
 .browser-test/
+.pi/fabric/
 .env
 .env.*
 !.env.example

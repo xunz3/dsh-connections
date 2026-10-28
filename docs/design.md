@@ -1,6 +1,6 @@
 # Connections design
 
-Source review: 2026-10-24. Target Harness API baseline: `0.2.1-rc.2`. The remote installer pins this version; updates require an explicit exact `0.2.x` version.
+Source review: 2026-10-28. Local sidebar baseline: exactly `0.2.1-rc.2`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
 
 The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
 
@@ -53,7 +53,11 @@ Systemd owns the process. Disconnect, removal and local plugin unload close loca
 
 Updates are explicit exact-version operations. Install and validate the requested release while the old Host is running, then stop its sole writer, snapshot managed state, atomically select the new release and verify native readiness. Failed startup restores the previous release and state. A private transaction journal supports recovery after interrupted maintenance. A transient systemd unit owns maintenance so closing the controller does not kill an in-progress update. Project directories outside the managed state are not rolled back.
 
-Only the remote SSH user's proxy, CA and npm network configuration is passed through a private environment file. Local environment values and model credentials are not copied. Installation logs, launch logs, state and maintenance results stay private to the remote user.
+Only the remote SSH user's filtered absolute PATH, proxy, CA and npm network configuration is passed through a private environment file. Local environment values and model credentials are not copied. Installation logs, launch logs, state and maintenance results stay private to the remote user.
+
+## Settings and plugin ownership
+
+The native Settings header selects the local Host or a remote connection. Models, credentials and plugin installations belong to that Host and its profile. Remote forms run in a separate native document; local forms are never rebound to another backend. Settings uses a view lease independent from workspace navigation. See [Settings, models and plugins](host-settings.md) for the ownership matrix and installation boundaries.
 
 ## Native project and file UI
 
