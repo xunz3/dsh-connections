@@ -17,7 +17,7 @@ const nothing = codec('Void', value => {
 export const rpcContribution: TypertRemoteContribution = {
   package: RPC_PACKAGE,
   // `remove` is reserved by Harness's client namespace service.
-  descriptors: [...(['sshHosts', 'list', 'save', 'forget', 'connect', 'disconnect', 'open', 'update'] as const).map((method): InvocationDescriptor => ({
+  descriptors: [...(['sshHosts', 'list', 'save', 'forget', 'connect', 'reconnect', 'disconnect', 'open', 'update'] as const).map((method): InvocationDescriptor => ({
     id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/${method}`,
     service: RPC_NAMESPACE,
     namespace: RPC_NAMESPACE,

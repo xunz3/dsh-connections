@@ -5,7 +5,7 @@ import { RPC_NAMESPACE, RPC_PACKAGE, rpcContribution } from '../shared/rpc.js'
 import { parseId, parseOpenResult, parseSave, parseSshHosts, parseUpdate, parseView, parseViews } from '../shared/validation.js'
 import type { ConnectionsApi, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { parseWorkspaceCall, type WorkspaceCall } from '../shared/workspace-rpc.js'
-import { parseWorkspaceResponse } from '../shared/workspace-protocol.js'
+import { parseWorkspaceResponse, WorkspaceProtocolError, WORKSPACE_ERRORS } from '../shared/workspace-protocol.js'
 
 export type WorkspaceHandler = (input: WorkspaceCall) => Promise<unknown>
 
@@ -26,6 +26,7 @@ export class ConnectionsRpc extends TypertRemoteService {
   async save(input: SaveConnection) { this.owner(); return parseView(await this.api.save(parseSave(input))) }
   async forget(id: string) { this.owner(); await this.api.remove(parseId(id)) }
   async connect(id: string) { this.owner(); return parseView(await this.api.connect(parseId(id))) }
+  async reconnect(id: string) { this.owner(); return parseView(await this.api.reconnect(parseId(id))) }
   async disconnect(id: string) { this.owner(); return parseView(await this.api.disconnect(parseId(id))) }
   async update(input: UpdateConnection) { this.owner(); return parseView(await this.api.update(parseUpdate(input))) }
   async open(id: string) { this.owner(); return parseOpenResult(await this.api.open(parseId(id))) }
@@ -33,7 +34,16 @@ export class ConnectionsRpc extends TypertRemoteService {
     this.owner()
     const input = parseWorkspaceCall(value)
     if (!this.workspaceHandler) throw new Error('The workspace service is unavailable.')
-    return { request: input.request, response: parseWorkspaceResponse(input.request.op, await this.workspaceHandler(input)) }
+    try {
+      return { request: input.request, response: parseWorkspaceResponse(input.request.op, await this.workspaceHandler(input)) }
+    } catch (error) {
+      // Keep compatibility failures in the typed envelope. Typert intentionally
+      // redacts unknown thrown errors, which would otherwise erase this code.
+      if (!(error instanceof WorkspaceProtocolError)) throw error
+      return { request: input.request, response: parseWorkspaceResponse(input.request.op, {
+        ok: false, error: { code: error.code, message: WORKSPACE_ERRORS[error.code] },
+      }) }
+    }
   }
 }
 

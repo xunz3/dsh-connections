@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const directory = await mkdtemp(join(tmpdir(), 'dsh-connections-package-'))
+const versions = JSON.parse(await readFile(new URL('../src/shared/harness-versions.json', import.meta.url), 'utf8'))
 try {
   execFileSync('pnpm', ['pack', '--pack-destination', directory], { stdio: 'pipe' })
   const archives = (await readdir(directory)).filter(name => name.endsWith('.tgz'))
@@ -14,6 +15,7 @@ try {
   const read = path => execFileSync('tar', ['-xOzf', archive, `package/${path}`], { encoding: 'utf8' })
   const manifest = JSON.parse(read('package.json'))
   assert.equal(manifest.name, '@xunz/dsh-connections')
+  assert.equal(manifest.engines.dsh, versions.local)
   for (const path of ['dist/host/index.js', 'dist/host/index.d.ts', 'dist/client.js', 'dist/remote-plugin.tgz', 'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/design.md', 'docs/usage.md']) assert(entries.includes(`package/${path}`), `Missing ${path}`)
   for (const entry of entries) assert(/^package\/(?:package\.json|README\.md|LICENSE|cordis\.patch\.yml|dist\/[\w./-]+|docs\/[\w.-]+\.md)$/.test(entry), `Unexpected packaged file ${entry}`)
   for (const target of [manifest.exports['.'].default, manifest.exports['.'].types, manifest.exports['./client']]) assert(entries.includes(`package/${target.replace(/^\.\//, '')}`))
@@ -23,6 +25,7 @@ try {
   assert(!read('cordis.patch.yml').includes('directory-picker'), 'The local profile must retain its native picker choice')
   assert.match(read('dist/native-sidebar.LICENSE'), /Copyright \(c\) 2026 DeepSeek/)
   assert(!read('dist/client.js').includes('require("@deepseek-ai/dsh-client-ui-sidebar/client")'), 'Disabled sidebar must be composed from the installed native factory')
+  assert(read('dist/client.js').includes('require("@deepseek-ai/dsh-client-ui-primitives")'), 'UI primitives must use the native ModuleLoader baseline')
   assert(!read('dist/client.js').includes('node:child_process'), 'Host implementation leaked into the browser bundle')
   const remoteArchive = join(directory, 'remote-content.tgz')
   await writeFile(remoteArchive, execFileSync('tar', ['-xOzf', archive, 'package/dist/remote-plugin.tgz']))
@@ -35,8 +38,12 @@ try {
   assert.equal(remoteManifest.scripts, undefined)
   assert(remoteEntries.includes('package/dist/client.js'))
   assert(!remoteEntries.includes('package/dist/remote-plugin.tgz'), 'Remote archive must not contain itself')
-  assert.equal(remoteRead('dist/client.js'), read('dist/client.js'), 'Both profiles must use identical client code')
-  assert.equal(remoteRead('dist/native-sidebar.LICENSE'), read('dist/native-sidebar.LICENSE'))
+  assert.equal(remoteManifest.engines.dsh, versions.remote.join(' || '))
+  assert.notEqual(remoteRead('dist/client.js'), read('dist/client.js'))
+  assert(!/nativeSidebar|installNativeSidebar|dsh-api-remotes/.test(remoteRead('dist/client.js')), 'Remote surface must be independent of the local shell')
+  assert(remoteRead('dist/client.js').includes('require("@deepseek-ai/dsh-client-ui-primitives")'), 'Remote settings must use its own Host native menu primitives')
+  assert(!/ConnectionsManager|node:child_process|DSH_HOME/.test(remoteRead('dist/host/index.js')), 'Remote Host must not manage SSH or local configuration')
+  assert(!remoteEntries.includes('package/dist/native-sidebar.LICENSE'))
   const remotePatch = remoteRead('cordis.patch.yml')
   assert.match(remotePatch, /id: ui-layout[\s\S]*disabled: true/)
   assert.match(remotePatch, /embedded: true/)

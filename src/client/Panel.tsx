@@ -1,3 +1,4 @@
+import { SUPPORTED_REMOTE_VERSIONS } from '../shared/validation.js'
 import { useEffect, useRef, useState } from 'react'
 import type { ConnectionsApi, ConnectionView, SaveConnection } from '../shared/types.js'
 import { parseSave } from '../shared/validation.js'
@@ -5,9 +6,8 @@ import type { Translate } from './messages.js'
 import { css } from './styles.js'
 import { ConnectionForm } from './ConnectionForm.js'
 
-export function isLocalPage(location: Pick<Location, 'protocol' | 'hostname'>): boolean {
-  return location.protocol === 'dsh-app:' || ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname)
-}
+import { isWorkspaceSurface } from './workspace-surface.js'
+export const isLocalPage = isWorkspaceSurface
 
 export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen: (id: string) => Promise<void>; local?: boolean }) {
   const [rows, setRows] = useState<ConnectionView[]>()
@@ -63,7 +63,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     openVersions.current.set(row.id, version)
     const current = () => {
       const latest = latestRows.current?.find(item => item.id === row.id)
-      return alive.current && openVersions.current.get(row.id) === version && latest?.phase === 'connected' && latest.localPort === row.localPort
+      return alive.current && openVersions.current.get(row.id) === version && latest?.phase === 'connected' && latest.localPort === row.localPort && latest.transportId === row.transportId
     }
     setOpening(row.id); setError('')
     try {
@@ -92,7 +92,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
           </div>
         </div>
         {row.error && <p className="dc-error">{row.error}</p>}
-        {updating?.id === row.id && <form className="dc-form" onSubmit={e => { e.preventDefault(); const input = updating; invalidateOpen(row.id); setUpdating(undefined); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'updating', error: undefined } : item)); void run(() => api.update(input)) }}><label>{t('updateVersion')}<input required value={updating.version} maxLength={64} placeholder="0.2.1-rc.3" onChange={e => setUpdating({ id: row.id, version: e.target.value })} /></label><p className="dc-note">{t('updateHint')}</p><div className="dc-actions"><button type="submit">{t('updateRemote')}</button><button type="button" onClick={() => setUpdating(undefined)}>{t('cancel')}</button></div></form>}
+        {updating?.id === row.id && <form className="dc-form" onSubmit={e => { e.preventDefault(); const input = updating; invalidateOpen(row.id); setUpdating(undefined); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'updating', error: undefined } : item)); void run(() => api.update(input)) }}><label>{t('updateVersion')}<select required value={updating.version} onChange={e => setUpdating({ id: row.id, version: e.target.value })}><option value="" disabled>{t('updateVersion')}</option>{SUPPORTED_REMOTE_VERSIONS.map(version => <option key={version} value={version}>{version}</option>)}</select></label><p className="dc-note">{t('updateHint')}</p><div className="dc-actions"><button type="submit">{t('updateRemote')}</button><button type="button" onClick={() => setUpdating(undefined)}>{t('cancel')}</button></div></form>}
         {removing === row.id && <div className="dc-confirm"><span>{t('confirmRemove')}</span><small className="dc-note">{t('removeHint')}</small><div className="dc-actions"><button onClick={() => { invalidateOpen(row.id); setRemoving(undefined); void run(() => api.remove(row.id)) }}>{t('remove')}</button><button onClick={() => setRemoving(undefined)}>{t('cancel')}</button></div></div>}
       </li>)}
     </ul>}

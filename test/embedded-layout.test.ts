@@ -58,13 +58,15 @@ test('native fullscreen reports retain their requested track and repeated report
 
 function element() {
   const styles = new Map<string, string>()
+  const priorities = new Map<string, string>()
   const attributes = new Map<string, string>()
   return {
     clientWidth: 1000,
     style: {
       getPropertyValue: (name: string) => styles.get(name) ?? '',
-      setProperty: (name: string, value: string) => { styles.set(name, value) },
-      removeProperty: (name: string) => { const value = styles.get(name) ?? ''; styles.delete(name); return value },
+      getPropertyPriority: (name: string) => priorities.get(name) ?? '',
+      setProperty: (name: string, value: string, priority = '') => { styles.set(name, value); priorities.set(name, priority) },
+      removeProperty: (name: string) => { const value = styles.get(name) ?? ''; styles.delete(name); priorities.delete(name); return value },
     },
     getAttribute: (name: string) => attributes.get(name) ?? null,
     setAttribute: (name: string, value: string) => { attributes.set(name, value) },
@@ -94,6 +96,29 @@ test('theme presentation follows public values and restores previous or independ
   assert.equal(document.body.style.getPropertyValue('--dsh-code-font-size'), '20px', 'teardown must not undo another owner’s change')
 })
 
+test('settings transparency restores host backgrounds and preserves later changes by another owner', () => {
+  const document = { documentElement: element(), body: element() }
+  document.documentElement.style.setProperty('background-color', 'black', 'important')
+  document.body.style.setProperty('background-image', 'linear-gradient(black, white)')
+  const presentation = new EmbeddedThemePresentation(document as unknown as Document)
+  presentation.settings(true)
+  presentation.settings(true)
+  assert.equal(document.documentElement.style.getPropertyValue('background-color'), 'transparent')
+  assert.equal(document.body.style.getPropertyValue('background-image'), 'none')
+  presentation.apply(theme('dark'))
+  assert.equal(document.documentElement.style.getPropertyValue('background-color'), 'transparent')
+  presentation.settings(false)
+  assert.equal(document.documentElement.style.getPropertyValue('background-color'), 'black')
+  assert.equal(document.documentElement.style.getPropertyPriority('background-color'), 'important')
+  assert.equal(document.body.style.getPropertyValue('background-image'), 'linear-gradient(black, white)')
+  assert.equal(document.body.style.getPropertyValue('background-color'), '')
+  presentation.settings(true)
+  document.body.style.setProperty('background-color', 'red')
+  presentation.dispose()
+  assert.equal(document.body.style.getPropertyValue('background-color'), 'red')
+  assert.equal(document.documentElement.style.getPropertyValue('background-color'), 'black')
+})
+
 test('embedded registration exposes native content and overlay slots while requiring exclusive layout ownership', () => {
   const document = { documentElement: element(), body: element() }
   const registrations: Array<{ name: string; children: Record<string, unknown> }> = []
@@ -117,10 +142,13 @@ test('embedded registration exposes native content and overlay slots while requi
   assert.deepEqual(hooks, { hooks: { panelInfo: layout.panelInfo } })
   assert.deepEqual(Object.keys(registrations[0].children).sort(), ['main', 'rightbar', 'shell.bottom', 'shell.leading', 'shell.overlay', 'sidebar'])
   assert.equal(registrations[0].name, 'root')
+  layout.showSettings(true)
+  assert.equal(document.body.style.getPropertyValue('background-color'), 'transparent')
   const pending = layout.beginNavigation()
   for (const dispose of effects.reverse()) dispose()
   assert.equal(pending.aborted, true)
   assert.equal(provided, undefined)
+  assert.equal(document.body.style.getPropertyValue('background-color'), '')
   context.get = () => layout as never
   assert.throws(() => applyEmbeddedLayout(context as never), /native ui-layout disabled/)
 })

@@ -1,3 +1,4 @@
+import { WORKSPACE_PROTOCOL } from '../../src/shared/workspace-protocol.ts'
 /** Same-version CLI bundle updates reconcile through native PluginManager, without restarting the owned Host. */
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
@@ -85,7 +86,7 @@ async function reconcile(id, enabled = true) {
 }
 let installed = false
 try {
-  const baseline = await post('/api/connections/workspaces', { op: 'catalog' })
+  const baseline = await post('/api/connections/workspaces', { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
   assert.equal(baseline.ok, true, 'The existing Connections bundle must be running.')
   await cli(['add', '--save-exact', await archive('first')], 'install-first.log')
   installed = true
@@ -100,7 +101,7 @@ try {
   const applied = await reconcile(await entry())
   assert.deepEqual(await post(routePath, {}), { marker: 'second', pid: metadata.remote.pid })
   assert.equal(await identity(), metadata.remote.start, 'The native Host must not restart during reconciliation.')
-  assert.equal((await post('/api/connections/workspaces', { op: 'catalog' })).ok, true, 'The existing Connections bundle must remain available.')
+  assert.equal((await post('/api/connections/workspaces', { op: 'catalog', protocol: WORKSPACE_PROTOCOL })).ok, true, 'The existing Connections bundle must remain available.')
   console.log(JSON.stringify({ cliLeftOldRuntime: true, nativeReconcileApplied: true, sameVersion: '0.0.1', hostPidUnchanged: true, application: applied.application }))
 } finally {
   if (installed) {

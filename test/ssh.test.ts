@@ -81,6 +81,18 @@ test('a lost port reservation is retried only after SSH rejects its bind', async
   } finally { await f.dispose() }
 })
 
+test('legacy OpenSSH ignores the new foreground option while current clients keep the override', async () => {
+  const f = await fixture({ TEST_SSH_LEGACY_OPTIONS: '1' })
+  try {
+    const tunnel = await connectTunnel({ target: 'dev', remotePort: 3080 }, f.options)
+    const args = (await f.calls()).find(call => call.args.includes('-M'))!.args
+    assert.ok(args.includes('ForkAfterAuthentication=no'))
+    assert.ok(args.indexOf('IgnoreUnknown=ForkAfterAuthentication') < args.indexOf('ForkAfterAuthentication=no'))
+    await tunnel.close()
+    await assertDisposed(await f.calls())
+  } finally { await f.dispose() }
+})
+
 test('reuses the previous origin only after owning its bind and falls back when occupied', async () => {
   const f = await fixture()
   let tunnel = await connectTunnel({ target: 'dev', remotePort: 3080 }, f.options)

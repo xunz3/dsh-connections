@@ -1,11 +1,11 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
-  parseWorkspaceRequest, parseWorkspaceResponse,
+  WORKSPACE_CATALOG_PAGE_LIMIT, WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_PROTOCOL, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
+  parseWorkspaceCatalogPage, parseWorkspaceRequest, parseWorkspaceResponse, WorkspaceProtocolError,
 } from '../shared/workspace-protocol.js'
 import type {
-  WorkspaceCatalogWorkspace, WorkspaceErrorCode, WorkspaceRequest, WorkspaceResponse,
+  WorkspaceCatalog, WorkspaceCatalogPage, WorkspaceCatalogWorkspace, WorkspaceErrorCode, WorkspaceRequest, WorkspaceResponse,
   WorkspaceResult, WorkspaceViewState,
 } from '../shared/workspace-protocol.js'
 
@@ -34,7 +34,7 @@ export interface WorkspaceEndpointServices {
     readonly pinnedSessionIds: readonly string[]
   }
   workspaceController: {
-    rename(request: { workspaceId: string; title: string }): Promise<{ workspace: NativeWorkspace }>
+    rename(request: { workspaceId: string; title: string }): Promise<unknown>
     delete(request: { workspaceId: string }): Promise<unknown>
     archiveSession(request: { sessionId: string }): Promise<unknown>
     unarchiveSession(request: { sessionId: string }): Promise<unknown>
@@ -66,11 +66,15 @@ export interface WorkspaceEndpointHandle {
   handle(input: WorkspaceRequest, signal: AbortSignal): Promise<WorkspaceResponse>
 }
 interface ViewChannel {
+  clientId: string
   expires: number
   state: WorkspaceViewState
   requests: Map<string, string>
   waiters: Set<{ resolve(): void; reject(error: EndpointError): void }>
 }
+interface CatalogSnapshot { expires: number; pages: WorkspaceCatalogPage[]; bytes: number }
+const CATALOG_TTL_MS = 2 * 60_000
+const CATALOG_CACHE_LIMIT = 64 * 1024 * 1024
 class EndpointError extends Error {
   constructor(readonly code: WorkspaceErrorCode) { super(WORKSPACE_ERRORS[code]) }
 }
@@ -78,6 +82,7 @@ const statuses: Record<WorkspaceErrorCode, number> = {
   BAD_REQUEST: 400, TOO_LARGE: 413, NOT_FOUND: 404, CONFLICT: 409,
   SESSION_ACTIVE: 409, UNAVAILABLE: 503, CANCELLED: 499, FAILED: 502,
   NOT_EMBEDDED: 503,
+  INCOMPATIBLE_PROTOCOL: 409, CATALOG_EXPIRED: 409,
 }
 
 function displayTitle(value: unknown): string {
@@ -86,9 +91,44 @@ function displayTitle(value: unknown): string {
 function workspace(row: NativeWorkspace): WorkspaceCatalogWorkspace {
   return { id: row.id ?? row.workspaceId ?? '', path: row.path, title: displayTitle(row.title), sessionIds: [...row.sessionIds] }
 }
+function emptyCatalog(): WorkspaceCatalog {
+  return { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
+}
+function catalogPages(catalog: WorkspaceCatalog, revision: string): WorkspaceCatalogPage[] {
+  const pages: WorkspaceCatalogPage[] = []
+  let page: WorkspaceCatalogPage = { ...emptyCatalog(), protocol: WORKSPACE_PROTOCOL, revision }
+  // Reserve the envelope, keys, revision and cursor; row byte counts include their commas.
+  let bytes = 512
+  let rows = 0
+  const append = <K extends keyof WorkspaceCatalog>(key: K, row: WorkspaceCatalog[K][number]) => {
+    const size = Buffer.byteLength(JSON.stringify(row)) + 1
+    if (size + 512 > WORKSPACE_CATALOG_PAGE_LIMIT) throw new EndpointError('TOO_LARGE')
+    if (bytes + size > WORKSPACE_CATALOG_PAGE_LIMIT || rows >= 4096) {
+      pages.push(page)
+      page = { ...emptyCatalog(), protocol: WORKSPACE_PROTOCOL, revision }
+      bytes = 512
+      rows = 0
+    }
+    ;(page[key] as Array<typeof row>).push(row)
+    bytes += size
+    rows++
+  }
+  for (const row of catalog.workspaces) {
+    // A workspace can itself own thousands of sessions. Split its membership too;
+    // the reader merges same-revision fragments in their native order.
+    if (!row.sessionIds.length) append('workspaces', row)
+    for (let offset = 0; offset < row.sessionIds.length; offset += 128) append('workspaces', { ...row, sessionIds: row.sessionIds.slice(offset, offset + 128) })
+  }
+  for (const row of catalog.sessions) append('sessions', row)
+  for (const id of catalog.archivedSessionIds) append('archivedSessionIds', id)
+  for (const id of catalog.pinnedSessionIds) append('pinnedSessionIds', id)
+  pages.push(page)
+  return pages.map((page, index) => parseWorkspaceCatalogPage({ ...page, ...(index + 1 < pages.length ? { nextCursor: `${revision}.${index + 1}` } : {}) }))
+}
 function safeError(error: unknown, aborted: boolean): EndpointError {
   if (aborted) return new EndpointError('CANCELLED')
   if (error instanceof EndpointError) return error
+  if (error instanceof WorkspaceProtocolError) return new EndpointError(error.code)
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
   switch (code) {
     case 'workspace/session-active': return new EndpointError('SESSION_ACTIVE')
@@ -102,6 +142,9 @@ function safeError(error: unknown, aborted: boolean): EndpointError {
 /** Owner-only transport callback. Never mount this directly on an unauthenticated server. */
 export class WorkspaceEndpoint {
   private readonly channels = new Map<string, ViewChannel>()
+  /** Sliding-expiry LRU snapshots keep active readers ahead of idle catalog revisions.
+   * Bound history by count and wire size; one current catalog may exceed the cache budget. */
+  private readonly catalogs = new Map<string, CatalogSnapshot>()
   private readonly lifetime = new AbortController()
   private readonly now: () => number
   private readonly ttlMs: number
@@ -124,6 +167,7 @@ export class WorkspaceEndpoint {
     if (this.lifetime.signal.aborted) return
     this.lifetime.abort()
     clearInterval(this.sweeper)
+    this.catalogs.clear()
     for (const [id, view] of this.channels) this.close(id, view, new EndpointError('UNAVAILABLE'))
   }
 
@@ -153,7 +197,7 @@ export class WorkspaceEndpoint {
       try {
         input = parseWorkspaceRequest(request)
         if (Buffer.byteLength(JSON.stringify(input)) > WORKSPACE_REQUEST_LIMIT) throw new EndpointError('TOO_LARGE')
-      } catch (error) { if (error instanceof EndpointError) throw error; throw new EndpointError('BAD_REQUEST') }
+      } catch (error) { if (error instanceof EndpointError || error instanceof WorkspaceProtocolError) throw error; throw new EndpointError('BAD_REQUEST') }
       const value = await this.execute(input, signal)
       signal.throwIfAborted()
       // Copy only declared fields, never native objects, projections, or errors.
@@ -174,8 +218,17 @@ export class WorkspaceEndpoint {
     const { workspaceRegistry, workspaceController, sessionController } = this.services
     switch (input.op) {
       case 'catalog': {
+        this.expire()
+        if (input.cursor) {
+          const [revision, offset] = input.cursor.split('.')
+          const snapshot = this.catalogs.get(revision!)
+          const page = snapshot?.pages[Number(offset)]
+          if (!page) throw new EndpointError('CATALOG_EXPIRED')
+          this.touchCatalog(revision!, snapshot!)
+          return page
+        }
         const { items } = await sessionController.list({}, signal)
-        return {
+        const catalog: WorkspaceCatalog = {
           workspaces: workspaceRegistry.list().map(workspace),
           sessions: items.map(row => ({
             id: row.sessionId, title: displayTitle(row.projections?.values.title), updatedAt: row.updatedAt,
@@ -186,10 +239,19 @@ export class WorkspaceEndpoint {
           })),
           archivedSessionIds: [...workspaceRegistry.archivedSessionIds], pinnedSessionIds: [...workspaceRegistry.pinnedSessionIds],
         }
+        const revision = createHash('sha256').update(JSON.stringify(catalog)).digest('base64url')
+        if (input.ifRevision === revision) return { ...emptyCatalog(), protocol: WORKSPACE_PROTOCOL, revision, unchanged: true }
+        let snapshot = this.catalogs.get(revision)
+        if (!snapshot) {
+          const pages = catalogPages(catalog, revision)
+          snapshot = { expires: 0, pages, bytes: pages.reduce((total, page) => total + Buffer.byteLength(JSON.stringify(page)), 0) }
+        }
+        this.touchCatalog(revision, snapshot)
+        return snapshot.pages[0]!
       }
       case 'renameWorkspace': {
-        const result = await workspaceController.rename({ workspaceId: input.id, title: input.title })
-        return { workspace: workspace(result.workspace) }
+        await workspaceController.rename({ workspaceId: input.id, title: input.title })
+        return { done: true }
       }
       case 'forgetWorkspace': await workspaceController.delete({ workspaceId: input.id }); return { done: true }
       case 'renameSession': await sessionController.rename({ sessionId: input.id, title: input.title }); return { done: true }
@@ -203,11 +265,16 @@ export class WorkspaceEndpoint {
         return { done: true }
       case 'openView': {
         this.expire()
+        // A stable per-tab client ID owns one lease. Rotate the channel on reload:
+        // delayed cleanup or reports from the previous document cannot affect it.
+        for (const [channel, view] of this.channels) {
+          if (view.clientId === input.clientId) this.close(channel, view, new EndpointError('NOT_FOUND'))
+        }
         if (this.channels.size >= this.maxChannels) throw new EndpointError('CONFLICT')
         const channel = randomBytes(32).toString('base64url')
-        const view: ViewChannel = { expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set() }
+        const view: ViewChannel = { clientId: input.clientId, expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set() }
         this.channels.set(channel, view)
-        return { channel, ...view.state }
+        return { channel, ...view.state, protocol: WORKSPACE_PROTOCOL }
       }
       case 'closeView': {
         const view = this.channels.get(input.channel)
@@ -260,6 +327,18 @@ export class WorkspaceEndpoint {
     }
   }
 
+  private touchCatalog(revision: string, snapshot: CatalogSnapshot): void {
+    snapshot.expires = this.now() + CATALOG_TTL_MS
+    this.catalogs.delete(revision)
+    this.catalogs.set(revision, snapshot)
+    let bytes = [...this.catalogs.values()].reduce((total, entry) => total + entry.bytes, 0)
+    while (this.catalogs.size > 1 && (this.catalogs.size > 8 || bytes > CATALOG_CACHE_LIMIT)) {
+      const oldest = this.catalogs.keys().next().value!
+      bytes -= this.catalogs.get(oldest)!.bytes
+      this.catalogs.delete(oldest)
+    }
+  }
+
   private get(id: string): ViewChannel {
     this.expire()
     const view = this.channels.get(id)
@@ -270,6 +349,7 @@ export class WorkspaceEndpoint {
   private expire(): void {
     const now = this.now()
     for (const [id, view] of this.channels) if (view.expires <= now) this.close(id, view, new EndpointError('NOT_FOUND'))
+    for (const [revision, snapshot] of this.catalogs) if (snapshot.expires <= now) this.catalogs.delete(revision)
   }
   private close(id: string, view: ViewChannel, error: EndpointError): void {
     this.channels.delete(id)

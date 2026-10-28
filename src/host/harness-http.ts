@@ -2,11 +2,15 @@ import { createHash } from 'node:crypto'
 import { request } from 'node:http'
 import type { ClientRequest, IncomingMessage } from 'node:http'
 import {
-  WORKSPACE_ENDPOINT, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
-  parseWorkspaceRequest, parseWorkspaceResponse,
+  WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
+  parseWorkspaceRequest, parseWorkspaceResponse, WorkspaceProtocolError,
 } from '../shared/workspace-protocol.js'
 
-const authenticationError = () => new Error('Harness authentication failed. Check the running remote Host and update its launch URL.')
+/** A failed HTTP exchange does not prove that the SSH transport has closed. */
+export class HarnessConnectionError extends Error {}
+/** The Host rejected this request before invoking a workspace operation. */
+export class HarnessAuthorizationError extends HarnessConnectionError {}
+const authenticationError = () => new HarnessConnectionError('Harness authentication failed. Check the running remote Host and update its launch URL.')
 const unreachable = 'The remote workspace could not be reached. Reconnect and try again.'
 const invalidResponse = 'The remote Host returned an invalid workspace response.'
 const missingPlugin = 'This Host needs the Connections workspace plugin. Update its managed workspace support, or install the plugin in its dedicated profile.'
@@ -21,7 +25,10 @@ function base64url(value: string): Buffer | undefined {
   const bytes = Buffer.from(value, 'base64url')
   return bytes.toString('base64url') === value ? bytes : undefined
 }
-/** Check the native v1 owner-cookie shape and audience; only the remote Host can verify its MAC. */
+/**
+ * Check the native browser-cookie shape and audience; only the Host verifies its MAC.
+ * Native v2 cookies identify live API operators, not the browser launch exchange.
+ */
 function validCookiePair(pair: string, port: number): boolean {
   if (pair.length > 4096 || !pair.startsWith(`${cookieName(port)}=`)) return false
   const parts = pair.slice(cookieName(port).length + 1).split('.')
@@ -94,18 +101,18 @@ export async function requestWorkspace(port: number, cookie: string, value: unkn
     payload = Buffer.from(JSON.stringify(input))
   } catch { throw new Error('The workspace request is invalid.') }
   if (payload.byteLength > WORKSPACE_REQUEST_LIMIT) throw new Error('The workspace request is too large.')
-  if (!validPort(port) || !validCookiePair(cookie, port) || signal.aborted) throw new Error(unreachable)
+  if (!validPort(port) || !validCookiePair(cookie, port) || signal.aborted) throw new HarnessConnectionError(unreachable)
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
   return new Promise((resolve, reject) => {
     let settled = false
     let req: ClientRequest | undefined
     let incoming: IncomingMessage | undefined
-    const fail = (message = unreachable) => {
+    const fail = (error: Error = new HarnessConnectionError(unreachable)) => {
       if (settled) return
       settled = true
       incoming?.destroy()
       req?.destroy()
-      reject(new Error(message))
+      reject(error)
     }
     try {
       req = request({ hostname: '127.0.0.1', port, method: 'POST', path: WORKSPACE_ENDPOINT,
@@ -113,22 +120,22 @@ export async function requestWorkspace(port: number, cookie: string, value: unkn
         signal: bounded, agent: false, maxHeaderSize: 16_384 }, response => {
         incoming = response
         const status = response.statusCode ?? 0
-        if (status === 401 || status === 403) { fail(expiredAuthorization); return }
+        if (status === 401 || status === 403) { fail(new HarnessAuthorizationError(expiredAuthorization)); return }
         // Never honor Location, including redirects to another loopback authority.
-        if (status >= 300 && status < 400) { fail(); return }
+        if (status >= 300 && status < 400) { fail(new Error(invalidResponse)); return }
         if (response.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/json') {
-          fail(status === 404 ? missingPlugin : invalidResponse); return
+          fail(new Error(status === 404 ? missingPlugin : invalidResponse)); return
         }
         const length = response.headers['content-length']
         if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > WORKSPACE_RESPONSE_LIMIT)) {
-          fail('The remote workspace list is too large.'); return
+          fail(new Error('The remote workspace list is too large.')); return
         }
         const chunks: Buffer[] = []
         let bytes = 0
         response.on('data', (chunk: Buffer) => {
           if (settled) return
           bytes += chunk.byteLength
-          if (bytes > WORKSPACE_RESPONSE_LIMIT) { fail('The remote workspace list is too large.'); return }
+          if (bytes > WORKSPACE_RESPONSE_LIMIT) { fail(new Error('The remote workspace list is too large.')); return }
           chunks.push(chunk)
         })
         response.once('aborted', () => fail())
@@ -139,10 +146,17 @@ export async function requestWorkspace(port: number, cookie: string, value: unkn
           try {
             if (!response.complete) { fail(); return }
             const result = parseWorkspaceResponse(input.op, JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')))
-            if ((status === 200) !== result.ok) { fail(status === 404 ? missingPlugin : invalidResponse); return }
+            if ((status === 200) !== result.ok) { fail(new Error(status === 404 ? missingPlugin : invalidResponse)); return }
+            // Unversioned endpoints reject the version field before they can
+            // advertise compatibility. Both requests have already been validated.
+            if (!result.ok && result.error.code === 'BAD_REQUEST' && (input.op === 'catalog' || input.op === 'openView')) {
+              settled = true
+              resolve({ ok: false, error: { code: 'INCOMPATIBLE_PROTOCOL', message: WORKSPACE_ERRORS.INCOMPATIBLE_PROTOCOL } })
+              return
+            }
             settled = true
             resolve(result)
-          } catch { fail(status === 404 ? missingPlugin : invalidResponse) }
+          } catch (error) { fail(error instanceof WorkspaceProtocolError ? error : new Error(status === 404 ? missingPlugin : invalidResponse)) }
         })
       })
       req.once('error', () => fail())

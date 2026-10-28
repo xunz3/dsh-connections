@@ -6,7 +6,8 @@ export interface WorkspaceSource {
   name: string
   phase: 'connected' | 'connecting' | 'disconnected' | 'error'
   catalog?: WorkspaceCatalog
-  error?: string
+  /** Catalog availability is independent of transport status. */
+  catalogError?: string
 }
 
 export interface WorkspaceSelection {
@@ -31,6 +32,41 @@ export interface CatalogSourceRows {
   source: WorkspaceSource
   workspaces: CatalogWorkspaceRow[]
   looseSessions: CatalogSessionRow[]
+}
+export interface CatalogSourcePage extends Omit<CatalogSourceRows, 'workspaces'> {
+  workspaces: Array<CatalogWorkspaceRow & { sessionCount: number }>
+}
+
+/** Bound mounted rows after full-catalog filtering. Selection stays reachable even
+ * beyond the current page; explicitly collapsed children consume no render budget. */
+export function pageWorkspaceRows(rows: readonly CatalogSourceRows[], {
+  limit, collapsed, selected,
+}: { limit: number; collapsed: ReadonlySet<string>; selected?: WorkspaceSelection }): { rows: CatalogSourcePage[]; hiddenCount: number } {
+  let remaining = Math.max(1, Math.floor(limit))
+  let hiddenCount = 0
+  const result = rows.map(({ source, workspaces, looseSessions }) => {
+    const selection = selected?.sourceId === source.id ? selected : undefined
+    const takeSessions = (sessions: CatalogSessionRow[]) => {
+      const visible = sessions.slice(0, remaining)
+      remaining -= visible.length
+      const selectedRow = selection?.sessionId ? sessions.find(row => row.session.id === selection.sessionId) : undefined
+      if (selectedRow && !visible.includes(selectedRow)) visible.push(selectedRow)
+      hiddenCount += sessions.length - visible.length
+      return visible
+    }
+    const visibleWorkspaces: CatalogSourcePage['workspaces'] = []
+    for (const row of workspaces) {
+      const expanded = !collapsed.has(row.key)
+      const isSelected = selection?.workspaceId === row.workspace.id
+        || selection?.sessionId !== undefined && row.sessions.some(item => item.session.id === selection.sessionId)
+      if (remaining > 0 || isSelected) {
+        remaining = Math.max(0, remaining - 1)
+        visibleWorkspaces.push({ ...row, sessionCount: row.sessions.length, sessions: expanded ? takeSessions(row.sessions) : [] })
+      } else hiddenCount += 1 + (expanded ? row.sessions.length : 0)
+    }
+    return { source, workspaces: visibleWorkspaces, looseSessions: takeSessions(looseSessions) }
+  })
+  return { rows: result, hiddenCount }
 }
 
 export function workspaceRowKey(sourceId: string, kind: 'workspace' | 'session', id: string): string {

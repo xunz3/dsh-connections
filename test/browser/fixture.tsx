@@ -23,6 +23,7 @@ const api: ConnectionsApi = {
     if (scenario === 'changing' && request > 1) return ['WSL_Ubuntu_R']
     return ['Dev', 'DH_H800', 'WSL_Ubuntu_R']
   },
+  async reconnect(id) { return api.connect(id) },
   async list() { return structuredClone(rows) },
   async save(input) {
     const old = rows.find(row => row.id === input.id)
@@ -35,6 +36,7 @@ const api: ConnectionsApi = {
     const row = rows.find(row => row.id === id)!
     row.phase = 'connecting'
     await new Promise(resolve => setTimeout(resolve, query.has('slow') ? 3000 : 100))
+    document.documentElement.dataset.connectSettled = 'true'
     if (row.phase !== 'connecting') throw new Error('Connection cancelled.')
     row.phase = 'connected'; row.localPort = 43188
     return { ...row }

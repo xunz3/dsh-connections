@@ -8,6 +8,7 @@ import * as hostPlugin from '../src/host/index.js'
 import { rpcContribution } from '../src/shared/rpc.js'
 import type { ConnectionsApi, ConnectionView } from '../src/shared/types.js'
 import type { WorkspaceCall } from '../src/shared/workspace-rpc.js'
+import { WorkspaceProtocolError, WORKSPACE_ERRORS, WORKSPACE_PROTOCOL } from '../src/shared/workspace-protocol.js'
 
 const id = 'connection-12345678-1234-1234-1234-123456789abc'
 const view: ConnectionView = { id, name: 'Work', target: 'dev', remotePort: 3080, phase: 'disconnected' }
@@ -19,7 +20,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
   await registry
   let calls = 0
   const workspaceCalls: WorkspaceCall[] = []
-  const catalog = { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
+  const catalog = { protocol: WORKSPACE_PROTOCOL, revision: 'a'.repeat(43), workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
   const privateView = { ...view, token }
   const api: ConnectionsApi = {
     async sshHosts() { ++calls; return ['dev', 'build'] },
@@ -27,6 +28,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     async save() { ++calls; return privateView },
     async remove() { ++calls },
     async connect() { ++calls; return privateView },
+    async reconnect() { ++calls; return privateView },
     async disconnect() { ++calls; return privateView },
     async update() { ++calls; return privateView },
     async open() { ++calls; return { url: `http://127.0.0.1:41380/?token=${token}` } },
@@ -51,9 +53,9 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
       await assert.rejects(receiver.sshHosts(), /Only the Harness owner/)
       await assert.rejects(receiver.save({ name: 'Work', target: 'dev' }), /Only the Harness owner/)
       await assert.rejects(receiver.update({ id, version: '0.2.1-rc.3' }), /Only the Harness owner/)
-      await assert.rejects(receiver.workspace({ id: 'local', request: { op: 'catalog' } }), /Only the Harness owner/)
+      await assert.rejects(receiver.workspace({ id: 'local', request: { op: 'catalog', protocol: WORKSPACE_PROTOCOL } }), /Only the Harness owner/)
       await assert.rejects(receiver.workspace({ id, request: { op: 'unknown' } } as unknown as WorkspaceCall), /Only the Harness owner/)
-      for (const method of ['forget', 'connect', 'disconnect', 'open'] as const) await assert.rejects(receiver[method](id), /Only the Harness owner/)
+      for (const method of ['forget', 'connect', 'reconnect', 'disconnect', 'open'] as const) await assert.rejects(receiver[method](id), /Only the Harness owner/)
     }
     assert.equal(calls, 0)
     assert.deepEqual(workspaceCalls, [])
@@ -63,16 +65,17 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     assert.deepEqual(await receiver.sshHosts(), ['dev', 'build'])
     assert.deepEqual(await receiver.save({ name: 'Work', target: 'dev' }), view)
     assert.deepEqual(await receiver.connect(id), view)
+    assert.deepEqual(await receiver.reconnect(id), view)
     assert.deepEqual(await receiver.disconnect(id), view)
     assert.deepEqual(await receiver.update({ id, version: '0.2.1-rc.3' }), view)
     assert.equal((await receiver.open(id)).url.includes(token), true)
     await receiver.forget(id)
     await assert.rejects(receiver.connect('invalid'), /Invalid connection identifier/)
-    const workspaceCall = { id: 'local', request: { op: 'catalog' as const } }
+    const workspaceCall = { id: 'local', request: { op: 'catalog', protocol: WORKSPACE_PROTOCOL } as const }
     assert.deepEqual(await receiver.workspace(workspaceCall), { request: workspaceCall.request, response: { ok: true, value: catalog } })
     assert.deepEqual(workspaceCalls, [workspaceCall])
     await assert.rejects(receiver.workspace({ id, request: { op: 'prompt', token } } as unknown as WorkspaceCall), /invalid/i)
-    await assert.rejects(receiver.workspace({ id: 'other-host', request: { op: 'catalog' } }), /Invalid connection identifier/)
+    await assert.rejects(receiver.workspace({ id: 'other-host', request: { op: 'catalog', protocol: WORKSPACE_PROTOCOL } }), /Invalid connection identifier/)
     assert.equal(workspaceCalls.length, 1)
     const descriptor = rpcContribution.descriptors.find(item => item.method === 'workspace')!
     const parameterCodec = descriptor.parameters[0]!.codec!
@@ -91,6 +94,24 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
   assert.equal(ctx.get('connections' as never), undefined)
   assert.equal(ctx.typert.local.get('connections/list'), undefined)
   await registry.dispose()
+})
+
+test('workspace protocol incompatibility retains its public code through the RPC result envelope', async () => {
+  const ctx = new Context()
+  const registry = ctx.plugin(TypertRegistry)
+  await registry
+  const plugin = ctx.plugin({ name: 'connections-protocol-rpc-test', inject: ['typert'], apply(child: Context) {
+    mountRpc(child, {} as ConnectionsApi, async () => { throw new WorkspaceProtocolError('INCOMPATIBLE_PROTOCOL') })
+  } })
+  await plugin
+  try {
+    const owner = ctx.extend({ invocation: { peer: { principal: { kind: 'owner' } } } })
+    const receiver = owner.get('connections' as never) as unknown as ConnectionsRpc
+    const request = { op: 'catalog', protocol: WORKSPACE_PROTOCOL } as const
+    assert.deepEqual(await receiver.workspace({ id, request }), {
+      request, response: { ok: false, error: { code: 'INCOMPATIBLE_PROTOCOL', message: WORKSPACE_ERRORS.INCOMPATIBLE_PROTOCOL } },
+    })
+  } finally { await plugin.dispose(); await registry.dispose() }
 })
 
 test('host plugin reuses native credentials and unloads without dropping saved records', async () => {

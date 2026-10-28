@@ -223,7 +223,9 @@ export async function connectTunnel(input: { target: string; remotePort: number;
       '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no',
       '-o', 'Tunnel=no',
       '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none',
-      '-o', 'ForkAfterAuthentication=no',
+      // Older OpenSSH has no ForkAfterAuthentication option. Newer versions
+      // must override user config so the owned master cannot daemonize.
+      '-o', 'IgnoreUnknown=ForkAfterAuthentication', '-o', 'ForkAfterAuthentication=no',
       '-o', `ConnectTimeout=${Math.max(1, Math.min(15, Math.ceil(startupTimeoutMs / 1_000)))}`,
       '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '--', target,
     ]

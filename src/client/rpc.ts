@@ -13,6 +13,7 @@ interface RemoteApi {
   save(input: SaveConnection): Promise<RemoteResult<ConnectionView>>
   forget(id: string): Promise<RemoteResult<void>>
   connect(id: string): Promise<RemoteResult<ConnectionView>>
+  reconnect(id: string): Promise<RemoteResult<ConnectionView>>
   disconnect(id: string): Promise<RemoteResult<ConnectionView>>
   update(input: UpdateConnection): Promise<RemoteResult<ConnectionView>>
   open(id: string): Promise<RemoteResult<{ url: string }>>
@@ -38,6 +39,7 @@ export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
     save: input => unwrap(api.save(input), parseView),
     remove: id => unwrap(api.forget(id), () => undefined),
     connect: id => unwrap(api.connect(id), parseView),
+    reconnect: id => unwrap(api.reconnect(id), parseView),
     disconnect: id => unwrap(api.disconnect(id), parseView),
     update: input => unwrap(api.update(input), parseView),
     open: id => unwrap(api.open(id), parseOpenResult),

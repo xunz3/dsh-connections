@@ -1,12 +1,14 @@
+import { randomUUID } from 'node:crypto'
 import type { ConnectionRecord, ConnectionView, ConnectionsApi, SaveConnection, UpdateConnection } from '../shared/types.js'
 import { parseId, parseSave, parseUpdate } from '../shared/validation.js'
 import { connectTunnel, SshTunnelError, type Tunnel } from './ssh.js'
 import type { ConnectionStore } from './store.js'
 import { prepareHost, updateHost, RemoteHostError, type ManagedHost } from './lifecycle.js'
 import { discoverSshHosts } from './ssh-config.js'
-import { authenticateHarness, requestWorkspace } from './harness-http.js'
+import { authenticateHarness, HarnessAuthorizationError, requestWorkspace } from './harness-http.js'
+import { parseWorkspaceRequest } from '../shared/workspace-protocol.js'
 
-export type Probe = (port: number, token: string, signal: AbortSignal) => Promise<void>
+export type Probe = typeof authenticateHarness
 export interface ManagerOptions {
   sshHosts?: () => Promise<string[]>
   connectTunnel?: typeof connectTunnel
@@ -16,14 +18,13 @@ export interface ManagerOptions {
 }
 
 /** Verify Harness's launch-token exchange without following any redirect or exposing the URL. */
-export const probeHarness: Probe = async (port, token, signal) => {
-  await authenticateHarness(port, token, signal)
-}
+export const probeHarness: Probe = authenticateHarness
 
 interface Runtime {
   phase: ConnectionView['phase']
   error?: string
   generation: number
+  transportId?: string
   controller?: AbortController
   pending?: Promise<ConnectionView>
   tunnel?: Tunnel
@@ -31,10 +32,11 @@ interface Runtime {
   record?: ConnectionRecord
   managed?: ManagedHost
   cookie?: Promise<string>
+  authenticating?: Promise<string>
 }
 
 function sameDestination(a: ConnectionRecord, b: ConnectionRecord): boolean {
-  return a.target === b.target && a.mode === b.mode && (a.mode === 'managed' || (a.remotePort === b.remotePort && a.token === b.token))
+  return a.target === b.target && (a.mode ?? 'existing') === (b.mode ?? 'existing') && (a.mode === 'managed' || (a.remotePort === b.remotePort && a.token === b.token))
 }
 
 function sshFailure(error: unknown): string {
@@ -54,6 +56,7 @@ function sshFailure(error: unknown): string {
 /** Owns only connection attempts and tunnels; the remote Harness owns all work. */
 export class ConnectionsManager implements ConnectionsApi {
   private readonly runtimes = new Map<string, Runtime>()
+  private readonly reconnections = new Map<string, Promise<ConnectionView>>()
   private readonly createTunnel: typeof connectTunnel
   private readonly probe: Probe
   private readonly prepare: typeof prepareHost
@@ -120,7 +123,7 @@ export class ConnectionsManager implements ConnectionsApi {
       ...((runtime?.managed?.remotePort ?? record.remotePort) === undefined ? {} : { remotePort: runtime?.managed?.remotePort ?? record.remotePort }),
       ...(runtime?.managed === undefined ? {} : { runtime: { version: runtime.managed.version, service: runtime.managed.service, pid: runtime.managed.pid } }),
       phase: runtime?.phase ?? 'disconnected',
-      ...(runtime?.phase === 'connected' && runtime.tunnel !== undefined ? { localPort: runtime.tunnel.port } : {}),
+      ...(runtime?.phase === 'connected' && runtime.tunnel !== undefined ? { localPort: runtime.tunnel.port, transportId: runtime.transportId } : {}),
       ...(runtime?.error === undefined ? {} : { error: runtime.error }),
     }
   }
@@ -138,6 +141,7 @@ export class ConnectionsManager implements ConnectionsApi {
     delete runtime.record
     delete runtime.managed
     delete runtime.cookie
+    delete runtime.authenticating
     const closed = await Promise.allSettled([tunnel?.close(), runtime.pending])
     if (closed[0]?.status === 'rejected') throw new Error('The SSH tunnel could not be closed.')
   }
@@ -160,11 +164,14 @@ export class ConnectionsManager implements ConnectionsApi {
     return this.serialize(async () => {
       this.assertActive()
       if (input.id === undefined && (await this.store.list()).length >= 100) throw new Error('At most 100 saved connections are supported.')
-      if (input.id !== undefined) {
-        await this.record(input.id)
-        await this.stop(this.runtime(input.id))
-      }
-      return this.view(await this.store.save(input))
+      const previous = input.id === undefined ? undefined : await this.record(input.id)
+      // Commit validation and credential storage before changing a live transport.
+      // Names and automatic-restore preferences do not change its destination.
+      const saved = await this.store.save(input)
+      const runtime = this.runtimes.get(saved.id)
+      if (runtime && previous && !sameDestination(runtime.record ?? previous, saved)) await this.stop(runtime)
+      else if (runtime?.record) Object.assign(runtime.record, { name: saved.name, autoConnect: saved.autoConnect })
+      return this.view(saved)
     })
   }
 
@@ -182,12 +189,25 @@ export class ConnectionsManager implements ConnectionsApi {
     return this.start(id)
   }
 
+  /** Re-resolve managed credentials and rebuild access without restarting remote work. */
+  reconnect(id: string): Promise<ConnectionView> {
+    // Coalesce at entry, before credential reads yield: a fast first attempt
+    // can finish before a simultaneous request reaches the management queue.
+    const existing = this.reconnections.get(id)
+    if (existing) return existing
+    const pending = this.start(id, undefined, undefined, true)
+    this.reconnections.set(id, pending)
+    const clear = () => { if (this.reconnections.get(id) === pending) this.reconnections.delete(id) }
+    void pending.then(clear, clear)
+    return pending
+  }
+
   async update(value: UpdateConnection): Promise<ConnectionView> {
     const { id, version } = parseUpdate(value)
     return this.start(id, version)
   }
 
-  private async start(id: string, version?: string, restoring?: ConnectionRecord): Promise<ConnectionView> {
+  private async start(id: string, version?: string, restoring?: ConnectionRecord, reconnect = false): Promise<ConnectionView> {
     parseId(id)
     const operation = await this.serialize(async () => {
       this.assertActive()
@@ -206,6 +226,7 @@ export class ConnectionsManager implements ConnectionsApi {
       }
       if (runtime.record !== undefined && !sameDestination(runtime.record, record)) await this.stop(runtime)
       if (runtime.pending !== undefined) return { pending: runtime.pending }
+      if (reconnect) await this.stop(runtime)
       if (runtime.phase === 'connected') return { pending: Promise.resolve(this.view(record)) }
       const generation = ++runtime.generation
       runtime.phase = version === undefined ? 'connecting' : 'updating'
@@ -255,8 +276,9 @@ export class ConnectionsManager implements ConnectionsApi {
         controller.abort()
       })
       stage = 'authentication'
-      await this.probe(tunnel.port, record.token, controller.signal)
+      await this.cookie(runtime, tunnel.port, record.token, controller.signal)
       if (!current()) throw new Error('Connection cancelled.')
+      runtime.transportId = randomUUID()
       runtime.phase = 'connected'
       return this.view(record)
     } catch (error) {
@@ -289,22 +311,60 @@ export class ConnectionsManager implements ConnectionsApi {
     })
   }
 
-  open(id: string): Promise<{ url: string }> {
+  async open(id: string): Promise<{ url: string }> {
     parseId(id)
-    return this.serialize(async () => {
+    const lease = await this.serialize(async () => {
       this.assertActive()
       const record = await this.record(id)
       const runtime = this.runtime(id)
       if (runtime.record !== undefined && !sameDestination(runtime.record, record)) await this.stop(runtime)
-      if (runtime.phase !== 'connected' || runtime.tunnel === undefined) throw new Error('Connect before opening this Host.')
+      if (runtime.phase !== 'connected' || runtime.tunnel === undefined || runtime.controller === undefined) throw new Error('Connect before opening this Host.')
       const token = runtime.record?.token
       if (token === undefined) throw new Error('Connect again to refresh the remote Host credential.')
-      return { url: `http://127.0.0.1:${runtime.tunnel.port}/?token=${encodeURIComponent(token)}` }
+      return { runtime, generation: runtime.generation, tunnel: runtime.tunnel, controller: runtime.controller, token,
+        cookie: this.cookie(runtime, runtime.tunnel.port, token, runtime.controller.signal, true),
+      }
+    })
+    try {
+      // An SSH master can survive a remote Host restart. Check its HTTP identity
+      // before issuing a launch URL, outside the management queue so it cancels.
+      await lease.cookie
+      if (this.disposed || lease.runtime.generation !== lease.generation || lease.controller.signal.aborted) throw new Error('Connection changed. Open the Host again.')
+      return { url: `http://127.0.0.1:${lease.tunnel.port}/?token=${encodeURIComponent(lease.token)}` }
+    } catch {
+      await this.invalidate(lease.runtime, lease.generation, 'The remote Host could not be reached or its authorization changed. Reconnect to refresh access.')
+      throw new Error('The remote Host could not be reached or its authorization changed. Reconnect to refresh access.')
+    }
+  }
+
+  /** Share concurrent exchanges and keep the verified cookie entirely on the Host. */
+  private cookie(runtime: Runtime, port: number, token: string, signal: AbortSignal, refresh = false): Promise<string> {
+    if (runtime.authenticating) return runtime.authenticating
+    if (!refresh && runtime.cookie) return runtime.cookie
+    const pending = this.probe(port, token, signal)
+    runtime.cookie = pending
+    runtime.authenticating = pending
+    void pending.then(() => {
+      if (runtime.authenticating === pending) delete runtime.authenticating
+    }, () => {
+      if (runtime.authenticating === pending) delete runtime.authenticating
+      if (runtime.cookie === pending) delete runtime.cookie
+    })
+    return pending
+  }
+
+  private invalidate(runtime: Runtime, generation: number, message: string): Promise<void> {
+    return this.serialize(async () => {
+      if (this.disposed || runtime.generation !== generation) return
+      await this.stop(runtime)
+      runtime.phase = 'error'
+      runtime.error = message
     })
   }
 
   /** Keep remote credentials and the transport lease entirely on the local Host. */
   async workspace(id: string, input: unknown): Promise<unknown> {
+    const request = parseWorkspaceRequest(input)
     const lease = await this.serialize(async () => {
       this.assertActive()
       const record = await this.record(id)
@@ -314,19 +374,39 @@ export class ConnectionsManager implements ConnectionsApi {
         throw new Error('Connect before opening this workspace.')
       }
       const { generation, controller, tunnel } = runtime
-      runtime.cookie ??= authenticateHarness(tunnel.port, runtime.record.token, controller.signal)
-      return { runtime, generation, controller, tunnel, cookie: runtime.cookie }
+      const token = runtime.record.token
+      // View allocation must follow authentication even when a caller has not
+      // requested its launch URL yet. Read polling can reuse the current cookie.
+      const cookie = this.cookie(runtime, tunnel.port, token, controller.signal, request.op === 'openView')
+      return { runtime, generation, controller, tunnel, token, cookie }
     })
     const current = () => !this.disposed && lease.runtime.generation === lease.generation && !lease.controller.signal.aborted
-    try {
-      const cookie = await lease.cookie
-      if (!current()) throw new Error('Connection changed. Select the workspace again.')
-      const result = await requestWorkspace(lease.tunnel.port, cookie, input, lease.controller.signal)
-      if (!current()) throw new Error('Connection changed. Select the workspace again.')
-      return result
-    } catch (error) {
-      if (lease.runtime.cookie === lease.cookie) delete lease.runtime.cookie
-      throw error
+    let credential = lease.cookie
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const cookie = await credential
+        if (!current()) throw new Error('Connection changed. Select the workspace again.')
+        const result = await requestWorkspace(lease.tunnel.port, cookie, request, lease.controller.signal)
+        if (!current()) throw new Error('Connection changed. Select the workspace again.')
+        return result
+      } catch (error) {
+        if (error instanceof HarnessAuthorizationError && current()) {
+          if (attempt === 0) {
+            const refreshed = await this.serialize(async () => {
+              if (!current()) throw new Error('Connection changed. Select the workspace again.')
+              // Another rejected request may already have refreshed this cookie.
+              return { cookie: lease.runtime.cookie && lease.runtime.cookie !== credential ? lease.runtime.cookie
+                : this.cookie(lease.runtime, lease.tunnel.port, lease.token, lease.controller.signal, true) }
+            })
+            credential = refreshed.cookie
+            continue
+          }
+          if (lease.runtime.cookie === credential) delete lease.runtime.cookie
+        }
+        // Never replay an ambiguous transport failure: a mutation may already
+        // have committed. HTTP failure also does not revoke the SSH lease.
+        throw error
+      }
     }
   }
 

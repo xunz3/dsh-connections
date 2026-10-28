@@ -1,4 +1,10 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
+
+async function openWithPausedClock(page: Page, url: string) {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+  await page.goto(url)
+  await page.clock.pauseAt(new Date('2026-01-01T00:01:00Z'))
+}
 
 test('background connections need no launch credential and update only on explicit submission', async ({ page }) => {
   await page.goto('/')
@@ -15,12 +21,12 @@ test('background connections need no launch credential and update only on explic
   await page.getByLabel('More actions: Background server').click()
   await page.getByRole('button', { name: 'Update remote Harness', exact: true }).click()
   await expect(page.getByText('Updating restarts the remote Host.', { exact: false })).toBeVisible()
-  await page.getByLabel('Exact Harness version').fill('0.2.1-rc.3')
+  await page.getByLabel('Exact Harness version').selectOption('0.2.1-rc.3')
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(page.getByText('Harness 0.2.1-rc.3', { exact: true })).toHaveCount(0)
   await page.getByLabel('More actions: Background server').click()
   await page.getByRole('button', { name: 'Update remote Harness', exact: true }).click()
-  await page.getByLabel('Exact Harness version').fill('0.2.1-rc.3')
+  await page.getByLabel('Exact Harness version').selectOption('0.2.1-rc.3')
   await page.getByRole('button', { name: 'Update remote Harness', exact: true }).click()
   await expect(page.getByText('Harness 0.2.1-rc.3', { exact: true })).toBeVisible()
   await expect(page.getByText('Connected', { exact: true })).toBeVisible()
@@ -58,21 +64,25 @@ test('save, connect, securely open, edit without redisplaying the secret, then r
   await expect(page.getByText('No SSH connections yet.')).toBeVisible()
 })
 
-test('connecting can be cancelled without a stale success restoring the connection', async ({ page }) => {
-  await page.goto('/?populated&slow')
+test('cancelling a connection ignores its late rejection and keeps reconnect available', async ({ page }) => {
+  await openWithPausedClock(page, '/?populated&slow')
   const row = page.locator('li').filter({ hasText: 'Research workstation' })
   await row.getByRole('button', { name: 'Connect', exact: true }).click()
   await row.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(row.getByText('Disconnected', { exact: true })).toBeVisible()
   await expect(row.getByRole('button', { name: 'Connect', exact: true })).toBeVisible()
   await expect(row.getByText('Connected', { exact: true })).toHaveCount(0)
-  await page.waitForTimeout(3100) // Wait for the original connect rejection.
+  // Settle the original request before checking that its rejection was ignored.
+  await page.clock.runFor(3000)
+  await expect(page.locator('html')).toHaveAttribute('data-connect-settled', 'true')
+  await expect(row.getByText('Disconnected', { exact: true })).toBeVisible()
+  await expect(row.getByRole('button', { name: 'Connect', exact: true })).toBeEnabled()
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
 test('remote browser shows local tunnel boundary and disables connect', async ({ page }) => {
   await page.goto('/?populated&remote')
-  await expect(page.getByText('This page is not on a local address.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Open Harness over HTTP at localhost or 127.0.0.1 on this computer to use SSH workspaces.', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'View workspaces', exact: true })).toBeDisabled()
 })
@@ -85,19 +95,9 @@ test('Chinese mobile layout fits and keyboard can close an edit', async ({ page 
   await page.getByRole('combobox', { name: /SSH 主机/ }).selectOption('DH_H800')
   await expect(page.getByLabel('名称', { exact: true })).toHaveValue('DH_H800')
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.screenshot({ path: 'test-results/connections-picker-mobile.png', fullPage: true })
   await page.keyboard.press('Escape')
   await expect(page.getByRole('form')).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.screenshot({ path: 'test-results/connections-mobile.png', fullPage: true })
-})
-
-test('light and dark settings overview', async ({ page }) => {
-  await page.goto('/?populated')
-  await expect(page.getByText('Development', { exact: true })).toBeVisible()
-  await page.screenshot({ path: 'test-results/connections-light.png', fullPage: true })
-  await page.emulateMedia({ colorScheme: 'dark' })
-  await page.screenshot({ path: 'test-results/connections-dark.png', fullPage: true })
 })
 
 test('SSH config selection fills the name and saves without connecting', async ({ page }) => {
@@ -156,11 +156,12 @@ test('SSH config errors can recover on refresh without losing a manual draft', a
 })
 
 test('late discovery replies leave manual input and focus intact', async ({ page }) => {
-  await page.goto('/?sshHosts=slow')
+  await openWithPausedClock(page, '/?sshHosts=slow')
   await page.getByRole('button', { name: 'Add connection' }).click()
   await page.getByRole('button', { name: 'Add manually', exact: true }).click()
   const target = page.getByRole('textbox', { name: /SSH host/ })
   await target.fill('manual-server')
+  await page.clock.runFor(800)
   await expect(page.locator('html')).toHaveAttribute('data-ssh-hosts-settled', '1')
   await expect(target).toHaveValue('manual-server')
   await expect(target).toBeFocused()
@@ -168,7 +169,7 @@ test('late discovery replies leave manual input and focus intact', async ({ page
 })
 
 test('a failed refresh keeps manual fallback stable during recovery', async ({ page }) => {
-  await page.goto('/?sshHosts=refresherror')
+  await openWithPausedClock(page, '/?sshHosts=refresherror')
   await page.getByRole('button', { name: 'Add connection' }).click()
   await page.getByRole('combobox', { name: /SSH host/ }).selectOption('DH_H800')
   const refresh = page.getByRole('button', { name: 'Refresh SSH hosts', exact: true })
@@ -179,6 +180,7 @@ test('a failed refresh keeps manual fallback stable during recovery', async ({ p
   await refresh.click()
   await expect(refresh).toBeDisabled()
   await expect(target).toHaveValue('manual-after-error')
+  await page.clock.runFor(800)
   await expect(page.locator('html')).toHaveAttribute('data-ssh-hosts-settled', '3')
   await expect(target).toHaveValue('manual-after-error')
   await expect(page.getByRole('combobox', { name: /SSH host/ })).toHaveCount(0)
@@ -211,10 +213,10 @@ test('inline picker follows keyboard focus and fits the light and dark layouts',
   await expect(hosts).toHaveValue('WSL_Ubuntu_R')
   await page.keyboard.press('Tab')
   await expect(page.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeFocused()
-  await page.screenshot({ path: 'test-results/connections-picker-light.png', fullPage: true })
-  await page.emulateMedia({ colorScheme: 'dark' })
-  await page.screenshot({ path: 'test-results/connections-picker-dark.png', fullPage: true })
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), { message: colorScheme }).toBe(true)
+  }
   await page.keyboard.press('Escape')
   await expect(page.getByRole('form')).toHaveCount(0)
 })

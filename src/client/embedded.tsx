@@ -13,6 +13,8 @@ import {
   type WorkspaceNavigationError, type WorkspaceRequest, type WorkspaceViewIntent, type WorkspaceViewState,
 } from '../shared/workspace-protocol.js'
 import { applyEmbeddedLayout } from './embedded-layout.js'
+import { applyEmbeddedSettings, createEmbeddedSettingsHosts, type EmbeddedSettingsAdapter } from './embedded-settings.js'
+import { installSettingsHostHeader } from './settings-host-menu.js'
 
 const en = {
   missing: 'Open this remote workspace from Connections on your computer.',
@@ -22,12 +24,16 @@ const en = {
   failed: 'Unable to open this workspace. Select it again from Connections to retry.',
   pickerUnavailable: 'The remote directory picker is unavailable.',
   cancel: 'Cancel', resize: 'Resize files panel',
+  openSettings: 'Open settings',
+  settingsUnavailable: 'Settings are unavailable on this Host. Enable its native Settings plugin to continue.',
 } as const
 const zh: Record<keyof typeof en, string> = {
   missing: '请从这台电脑的「连接」中打开远端工作区。', waiting: '正在打开远端工作区…',
   disconnected: '连接已中断，正在重新连接…', expired: '此工作区视图已关闭，请从「连接」中重新打开。',
   failed: '无法打开此工作区，请从「连接」中再次选择以重试。', pickerUnavailable: '远端目录选择器不可用。',
   cancel: '取消', resize: '调整文件栏宽度',
+  openSettings: '打开设置',
+  settingsUnavailable: '此 Host 的设置暂不可用，请启用其原生设置插件后继续。',
 }
 type Message = keyof typeof en
 type Translate = (key: Message) => string
@@ -70,6 +76,7 @@ export function embeddedEndpoint(document: Pick<Document, 'baseURI'>, request: t
 interface EmbeddedState {
   readonly message?: 'waiting' | 'disconnected' | 'expired' | 'failed'
   readonly picker?: { readonly generation: number; readonly busy: boolean; readonly newSession?: true }
+  readonly settings?: { readonly generation: number }
 }
 
 function waitFor<T>(source: HostObservable<T>, ready: (value: T) => boolean, signal: AbortSignal): Promise<T> {
@@ -119,12 +126,13 @@ export class EmbeddedViewController {
     private readonly channel: string,
     private readonly endpoint: EmbeddedEndpoint,
     readonly state = createSnapshotStore<EmbeddedState>({ message: 'waiting' }),
+    private readonly settings?: EmbeddedSettingsAdapter,
   ) {}
 
   start(): void {
     if (this.unsubscribe || this.lifetime.signal.aborted) return
     this.unsubscribe = this.ctx.uiSession.adapter.current.subscribe(() => {
-      if (this.received && !this.applying && !this.state.getSnapshot().picker) this.report()
+      if (this.received && !this.applying && !this.state.getSnapshot().picker && !this.state.getSnapshot().settings) this.report()
     })
     void this.poll()
   }
@@ -133,6 +141,7 @@ export class EmbeddedViewController {
     if (this.lifetime.signal.aborted) return
     this.lifetime.abort()
     this.operation.abort()
+    this.settings?.close()
     this.ctx.layout.beginNavigation()
     this.unsubscribe?.()
     this.unsubscribe = undefined
@@ -164,12 +173,18 @@ export class EmbeddedViewController {
     if (!this.reporting) void this.flushReports()
   }
 
+  settingsClosed(): void {
+    const settings = this.state.getSnapshot().settings
+    if (settings && this.active(settings.generation)) this.report('SETTINGS_CLOSED')
+  }
+
   private active(generation: number): boolean {
     return !this.lifetime.signal.aborted && !this.operation.signal.aborted && generation === this.generation
   }
 
   private begin(): number {
     this.operation.abort()
+    this.settings?.close()
     this.operation = new AbortController()
     this.ctx.layout.beginNavigation()
     this.applying = true
@@ -220,6 +235,15 @@ export class EmbeddedViewController {
   private async navigate(intent: WorkspaceViewIntent, generation: number): Promise<void> {
     try {
       if (!await this.ready(generation)) return
+      if (intent.target.kind === 'settings') {
+        if (!this.settings) throw new Error('Native settings are unavailable')
+        this.state.set({ settings: { generation } })
+        await this.settings.open(this.operation.signal)
+        if (!this.active(generation)) return
+        this.applying = false
+        this.report()
+        return
+      }
       if (intent.target.kind === 'pick') {
         this.state.set({ picker: { generation, busy: false } })
         return
@@ -234,9 +258,11 @@ export class EmbeddedViewController {
         this.ctx.uiWorkspace.openSession(id as Parameters<UiWorkspace['openSession']>[0])
         await waitFor(this.ctx.uiSession.adapter.current, value => value.key === id, this.operation.signal)
       } else if (intent.target.kind === 'newSession') {
-        await this.startSession(intent.target.id, generation)
-      } else {
+        await this.startSession(intent.target.id)
+      } else if (intent.target.kind === 'workspace') {
         await this.openWorkspace(intent.target.id, generation)
+      } else {
+        throw new Error('Native navigation target is unavailable')
       }
       if (!this.active(generation)) return
       this.applying = false
@@ -252,14 +278,23 @@ export class EmbeddedViewController {
     if (selected !== undefined) await waitFor(this.ctx.uiSession.adapter.current, value => value.key === selected, this.operation.signal)
   }
 
-  private async startSession(id: string | undefined, generation: number): Promise<void> {
+  private async startSession(id: string | undefined): Promise<void> {
     if (id !== undefined && !this.ctx.workspaces.list.getSnapshot().items.some(workspace => workspace.workspaceId === id)) {
       throw new Error('Native workspace is unavailable')
     }
-    const previous = this.ctx.uiSession.adapter.current.getSnapshot().key
-    this.ctx.uiWorkspace.startSession(id as Parameters<UiWorkspace['startSession']>[0])
-    if (!this.active(generation)) return
-    await waitFor(this.ctx.uiSession.adapter.current, value => value.key !== undefined && value.key !== previous, this.operation.signal)
+    // The native void command may reuse the currently selected blank Session.
+    // Its final selectPanel(null), emitted by our layout adapter even for the
+    // same panel, acknowledges completion without mistaking the old selection
+    // for a successful pending creation.
+    let selected = false
+    const panel = this.ctx.layout.panelInfo
+    const waiting = new AbortController()
+    const completion = waitFor({ getSnapshot: panel.getSnapshot, subscribe: listener => panel.subscribe(() => { selected = true; listener() }) },
+      value => selected && value.activePanelId === null && this.ctx.uiSession.adapter.current.getSnapshot().key !== undefined,
+      AbortSignal.any([this.operation.signal, waiting.signal]))
+    try {
+      await Promise.all([completion, Promise.resolve().then(() => this.ctx.uiWorkspace.startSession(id as Parameters<UiWorkspace['startSession']>[0]))])
+    } finally { waiting.abort() }
   }
 
   private async picked(generation: number, path: string): Promise<void> {
@@ -269,7 +304,7 @@ export class EmbeddedViewController {
     try {
       const workspace = await this.ctx.workspaces.create({ path })
       if (!this.active(generation)) return
-      if (picker.newSession) await this.startSession(workspace.workspaceId, generation)
+      if (picker.newSession) await this.startSession(workspace.workspaceId)
       else await this.openWorkspace(workspace.workspaceId, generation)
       if (!this.active(generation)) return
       this.applying = false
@@ -287,7 +322,7 @@ export class EmbeddedViewController {
 
   private report(error?: WorkspaceNavigationError): void {
     if (this.lifetime.signal.aborted || this.revision === 0) return
-    const sessionId = this.ctx.uiSession.adapter.current.getSnapshot().key
+    const sessionId = this.state.getSnapshot().settings ? undefined : this.ctx.uiSession.adapter.current.getSnapshot().key
     this.queuedReport = {
       op: 'reportView', channel: this.channel, revision: this.revision,
       ...(sessionId === undefined ? {} : { sessionId }), ...(error === undefined ? {} : { error }),
@@ -330,7 +365,13 @@ export function applyEmbedded(ctx: Context): void {
   if (channel === undefined) return
 
   ctx.inject(['uiWorkspace', 'uiSession', 'sessions', 'workspaces'], ctx => {
-    const view = new EmbeddedViewController(ctx, channel, embeddedEndpoint(document), initial)
+    const settings = applyEmbeddedSettings(ctx, layout, {
+      onClosed: () => view.settingsClosed(), label: t('openSettings'), unavailableLabel: t('settingsUnavailable'),
+    })
+    const hosts = createEmbeddedSettingsHosts(settings.state, channel)
+    ctx.effect(() => () => hosts.dispose())
+    installSettingsHostHeader(ctx, hosts)
+    const view = new EmbeddedViewController(ctx, channel, embeddedEndpoint(document), initial, settings)
     const Overlay = ({ renderSlot }: PropsRenderSlots<PickerSlot>) => {
       const state = useSyncExternalStore(view.state.subscribe, view.state.getSnapshot)
       const picker = state.picker

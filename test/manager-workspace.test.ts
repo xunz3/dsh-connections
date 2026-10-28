@@ -8,11 +8,12 @@ import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentia
 import { ConnectionsManager } from '../src/host/manager.js'
 import { createStore } from '../src/host/store.js'
 import type { Tunnel } from '../src/host/ssh.js'
-import { WORKSPACE_ENDPOINT } from '../src/shared/workspace-protocol.js'
+import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL } from '../src/shared/workspace-protocol.js'
 
 const token = 'workspace-manager-private-launch-token'
 const secret = 'remote-private-payload-not-for-public-projections'
 const catalog = (title: string) => ({ ok: true, value: {
+  protocol: WORKSPACE_PROTOCOL, revision: 'a'.repeat(43),
   workspaces: [{ id: 'workspace-1', path: '/remote/project', title, sessionIds: [] }],
   sessions: [], archivedSessionIds: [], pinnedSessionIds: [],
 } })
@@ -100,7 +101,6 @@ async function setup(ports: Record<string, number>) {
       tunnels.push(created)
       return created
     },
-    async probe() {},
   })
   const add = async (target: string) => {
     const saved = await manager.save({ name: target, target, launchUrl: `http://127.0.0.1:3080/?token=${token}` })
@@ -122,9 +122,9 @@ test('workspace calls share a Host-only cookie without exposing or persisting it
   const { manager, add, provider } = await setup({ dev: host.port })
   try {
     const id = await add('dev')
-    const results = await Promise.all(Array.from({ length: 4 }, () => manager.workspace(id, { op: 'catalog' })))
+    const results = await Promise.all(Array.from({ length: 4 }, () => manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })))
     results.forEach(result => assert.deepEqual(result, catalog('Remote')))
-    await manager.workspace(id, { op: 'catalog' })
+    await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
     assert.equal(host.state.auth, 1)
     assert.equal(host.state.posts, 5)
     assert.ok(host.state.receivedCookies.every(value => value === host.state.cookies[0]))
@@ -137,13 +137,13 @@ test('workspace calls share a Host-only cookie without exposing or persisting it
     assert.equal(JSON.stringify([...provider.records.values()]).includes('dsh-auth-'), false)
     await manager.disconnect(id)
     await manager.connect(id)
-    await manager.workspace(id, { op: 'catalog' })
+    await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
     assert.equal(host.state.auth, 2)
     assert.equal(host.state.receivedCookies.at(-1), host.state.cookies[1])
   } finally { await manager.dispose(); await host.close() }
 })
 
-test('disconnect, removal, edit and unload abort in-flight workspace results', async () => {
+test('disconnect, removal, destination edit and unload abort in-flight workspace results', async () => {
   for (const action of ['disconnect', 'remove', 'edit', 'unload'] as const) {
     const host = await remote()
     const { manager, add, tunnels } = await setup({ dev: host.port })
@@ -152,12 +152,12 @@ test('disconnect, removal, edit and unload abort in-flight workspace results', a
     host.state.onPost = (request, response) => { request.socket.once('close', () => closed.resolve()); received.resolve(response) }
     try {
       const id = await add('dev')
-      const pending = manager.workspace(id, { op: 'catalog' })
+      const pending = manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
       const rejected = assert.rejects(pending, safeRejection)
       const response = await received.promise
       if (action === 'disconnect') await manager.disconnect(id)
       else if (action === 'remove') await manager.remove(id)
-      else if (action === 'edit') await manager.save({ id, name: 'Edited', target: 'dev' })
+      else if (action === 'edit') await manager.save({ id, name: 'Edited', target: 'other', launchUrl: `http://127.0.0.1:3080/?token=${token}` })
       else await manager.dispose()
       await rejected
       await closed.promise
@@ -173,25 +173,27 @@ test('disconnect, removal, edit and unload abort in-flight workspace results', a
   }
 })
 
-test('cancellation during the cookie exchange never sends a workspace command', async () => {
+test('cancellation during cookie refresh never replays the rejected workspace command', async () => {
   const host = await remote()
   const { manager, add } = await setup({ dev: host.port })
   const received = deferred()
   const closed = deferred()
-  host.state.onAuth = (request, _response) => { request.socket.once('close', () => closed.resolve()); received.resolve() }
   try {
     const id = await add('dev')
-    const pending = manager.workspace(id, { op: 'catalog' })
+    host.state.onAuth = (request, _response) => { request.socket.once('close', () => closed.resolve()); received.resolve() }
+    host.state.onPost = (_request, response) => { response.writeHead(401); response.end() }
+    const pending = manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
     const rejected = assert.rejects(pending, safeRejection)
     await received.promise
     await manager.disconnect(id)
     await rejected
     await closed.promise
-    assert.equal(host.state.posts, 0)
+    assert.equal(host.state.posts, 1)
     host.state.onAuth = undefined
+    host.state.onPost = undefined
     await manager.connect(id)
-    assert.deepEqual(await manager.workspace(id, { op: 'catalog' }), catalog('Remote'))
-    assert.equal(host.state.auth, 2)
+    assert.deepEqual(await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Remote'))
+    assert.equal(host.state.auth, 3)
   } finally { await manager.dispose(); await host.close() }
 })
 
@@ -210,7 +212,7 @@ test('connections keep independent cookies and long polls do not block list or a
     await received.promise
     const started = Date.now()
     assert.equal((await manager.list()).filter(row => row.phase === 'connected').length, 2)
-    assert.deepEqual(await manager.workspace(secondId, { op: 'catalog' }), catalog('Second'))
+    assert.deepEqual(await manager.workspace(secondId, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Second'))
     await manager.disconnect(firstId)
     assert.ok(Date.now() - started < 3000, 'management must not await a long poll')
     await rejected
@@ -223,17 +225,136 @@ test('connections keep independent cookies and long polls do not block list or a
   } finally { await manager.dispose(); await first.close(); await second.close() }
 })
 
-test('a rejected cached authorization is replaced for the next workspace request', async () => {
+test('an expired cached cookie refreshes once without discarding a live tunnel', async () => {
   const host = await remote()
-  const { manager, add } = await setup({ dev: host.port })
+  const { manager, add, tunnels } = await setup({ dev: host.port })
   try {
     const id = await add('dev')
-    await manager.workspace(id, { op: 'catalog' })
-    host.state.onPost = (_request, response) => { response.writeHead(401); response.end(secret) }
-    await assert.rejects(manager.workspace(id, { op: 'catalog' }), safeRejection)
-    host.state.onPost = undefined
-    assert.deepEqual(await manager.workspace(id, { op: 'catalog' }), catalog('Remote'))
+    await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+    host.state.onPost = (request, response) => {
+      if (request.headers.cookie === host.state.cookies[0]) { response.writeHead(401); response.end(secret); return }
+      response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(catalog('Remote')))
+    }
+    assert.deepEqual(await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Remote'))
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+    assert.equal(tunnels[0]?.closes, 0)
     assert.equal(host.state.auth, 2)
     assert.equal(host.state.receivedCookies.at(-1), host.state.cookies[1])
+  } finally { await manager.dispose(); await host.close() }
+})
+
+test('a temporary background HTTP failure preserves the SSH master and its cookie', async () => {
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+    host.state.onPost = (request, _response) => { request.socket.destroy() }
+    await assert.rejects(manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), safeRejection)
+    const status = (await manager.list())[0]
+    assert.equal(status?.phase, 'connected')
+    assert.equal(status?.localPort, host.port)
+    assert.equal(tunnels[0]?.closes, 0)
+    host.state.onPost = undefined
+    assert.deepEqual(await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Remote'))
+    assert.equal(host.state.auth, 1, 'network failure does not revoke a verified cookie')
+  } finally { await manager.dispose(); await host.close() }
+})
+
+test('plugin and protocol failures do not discard a healthy SSH connection', async () => {
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    for (const status of [404, 500]) {
+      host.state.onPost = (_request, response) => { response.writeHead(status); response.end('not a workspace response') }
+      await assert.rejects(manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), safeRejection)
+      assert.equal((await manager.list())[0]?.phase, 'connected')
+      assert.equal(tunnels[0]?.closes, 0)
+    }
+  } finally { await manager.dispose(); await host.close() }
+})
+
+test('openView authenticates before allocation and open refreshes the cookie used by later calls', async () => {
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    const old = host.state.cookies[0]
+    host.state.onPost = (request, response, input) => {
+      if (request.headers.cookie === old) { response.writeHead(401); response.end(); return }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(input.op === 'openView'
+        ? { ok: true, value: { protocol: WORKSPACE_PROTOCOL, channel: 'a'.repeat(43), revision: 0, presentedRevision: 0, reportedRevision: 0 } }
+        : catalog('Remote')))
+    }
+    await manager.workspace(id, { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: 'test-browser' })
+    assert.equal(host.state.auth, 2)
+    assert.equal(host.state.posts, 1, 'the stale cached cookie never reaches view allocation')
+    assert.equal(host.state.receivedCookies[0], host.state.cookies[1])
+    await manager.open(id)
+    await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+    assert.equal(host.state.auth, 3)
+    assert.equal(host.state.receivedCookies.at(-1), host.state.cookies[2])
+    assert.equal(tunnels[0]?.closes, 0)
+  } finally { await manager.dispose(); await host.close() }
+})
+
+test('concurrent rejected cookies share one bounded authentication refresh', async () => {
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  const entered = deferred(), release = deferred()
+  try {
+    const id = await add('dev')
+    host.state.onAuth = (_request, _response, reply) => { entered.resolve(); void release.promise.then(reply) }
+    host.state.onPost = (request, response) => {
+      if (request.headers.cookie === host.state.cookies[0]) { response.writeHead(401); response.end(); return }
+      response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(catalog('Remote')))
+    }
+    const results = Promise.all([1, 2, 3].map(() => manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })))
+    await entered.promise
+    release.resolve()
+    assert.deepEqual(await results, [catalog('Remote'), catalog('Remote'), catalog('Remote')])
+    assert.equal(host.state.auth, 2)
+    assert.equal(tunnels[0]?.closes, 0)
+  } finally { release.resolve(); await manager.dispose(); await host.close() }
+})
+
+test('persistent authorization rejection retries only once and leaves SSH ownership intact', async () => {
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    host.state.onPost = (_request, response) => { response.writeHead(403); response.end(secret) }
+    await assert.rejects(manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), safeRejection)
+    assert.equal(host.state.posts, 2)
+    assert.equal(host.state.auth, 2)
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+    assert.equal(tunnels[0]?.closes, 0)
+  } finally { await manager.dispose(); await host.close() }
+})
+
+test('a workspace timeout does not close the shared tunnel or replay an ambiguous mutation', async t => {
+  const timeout = AbortSignal.timeout
+  let timeouts = 0
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => {
+    if (milliseconds === 30_000) { timeouts++; return timeout(20) }
+    return timeout(milliseconds)
+  })
+  const host = await remote()
+  const { manager, add, tunnels } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    host.state.onPost = () => {}
+    for (const request of [
+      { op: 'catalog', protocol: WORKSPACE_PROTOCOL },
+      { op: 'viewState', channel: 'a'.repeat(43) },
+      { op: 'renameSession', id: 'session-1', title: 'Updated' },
+    ]) await assert.rejects(manager.workspace(id, request), safeRejection)
+    assert.equal(timeouts, 3)
+    assert.equal(host.state.posts, 3, 'transport failures must not replay an operation')
+    assert.equal(host.state.auth, 1)
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+    assert.equal(tunnels[0]?.closes, 0)
   } finally { await manager.dispose(); await host.close() }
 })

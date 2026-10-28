@@ -7,6 +7,13 @@ const args = process.argv.slice(2)
 const controlPath = args[args.indexOf('-S') + 1]
 const log = (entry) => appendFileSync(process.env.TEST_SSH_LOG, JSON.stringify({ pid: process.pid, args, ...entry }) + '\n')
 log({ event: 'start' })
+if (process.env.TEST_SSH_LEGACY_OPTIONS && args.includes('ForkAfterAuthentication=no')) {
+  const ignored = args.indexOf('IgnoreUnknown=ForkAfterAuthentication')
+  if (ignored < 0 || ignored > args.indexOf('ForkAfterAuthentication=no')) {
+    process.stderr.write('Bad configuration option: forkafterauthentication')
+    process.exit(255)
+  }
+}
 
 if (args.includes('-M')) {
   if (process.env.TEST_SSH_DESCENDANT) {

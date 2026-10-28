@@ -1,9 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseId, parseLaunchUrl, parseOpenResult, parseSave, parseSshHosts, parseTarget, parseView } from '../src/shared/validation.js'
+import { parseId, parseLaunchUrl, parseOpenResult, parseSave, parseSshHosts, parseSupportedVersion, parseTarget, parseUpdate, parseVersion, parseView, SUPPORTED_REMOTE_VERSIONS } from '../src/shared/validation.js'
 
 const id = 'connection-a54d0a10-1234-4567-abcd-123456789012'
 const token = 'a-valid-launch-token-with-enough-entropy'
+test('only validated remote runtimes are install targets while observed versions remain parseable', () => {
+  for (const version of SUPPORTED_REMOTE_VERSIONS) {
+    assert.equal(parseSupportedVersion(version), version)
+    assert.deepEqual(parseUpdate({ id, version }), { id, version })
+  }
+  for (const version of ['0.2.1-rc.1', '0.2.1-rc.4', '0.2.2', 'latest', '^0.2.1', '0.3.0']) assert.throws(() => parseUpdate({ id, version }), TypeError)
+  assert.equal(parseVersion('0.2.1-rc.1'), '0.2.1-rc.1')
+})
 test('SSH inputs are destinations, not command lines', () => {
   for (const input of ['Dev', 'ICT_IGL16', 'user@server.example.com', 'my-server']) assert.equal(parseTarget(input), input)
   for (const input of ['-oProxyCommand=id', 'user@host -p 22', 'x;id', '$(id)', '`id`', 'x\ny', 'ssh://host', '../host', 'host:22']) assert.throws(() => parseTarget(input))

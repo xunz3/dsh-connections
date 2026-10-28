@@ -1,4 +1,7 @@
 import type { ConnectionMode, ConnectionRecord, ConnectionView, SaveConnection, UpdateConnection } from './types.js'
+import harnessVersions from './harness-versions.json' with { type: 'json' }
+
+export const SUPPORTED_REMOTE_VERSIONS: readonly string[] = Object.freeze(harnessVersions.remote)
 
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Expected an object.')
@@ -51,13 +54,19 @@ function boolean(value: unknown): boolean {
 
 export function parseVersion(value: unknown): string {
   const version = text(value, 64)
-  if (!/^0\.2\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/.test(version)) throw new TypeError('Use an exact compatible Harness 0.2 version, such as 0.2.1-rc.3.')
+  if (!/^0\.2\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$/.test(version)) throw new TypeError('Use an exact Harness version.')
+  return version
+}
+
+export function parseSupportedVersion(value: unknown): string {
+  const version = parseVersion(value)
+  if (!SUPPORTED_REMOTE_VERSIONS.includes(version)) throw new TypeError(`Supported remote Harness versions: ${SUPPORTED_REMOTE_VERSIONS.join(', ')}.`)
   return version
 }
 
 export function parseUpdate(value: unknown): UpdateConnection {
   const input = object(value)
-  return { id: parseId(input.id), version: parseVersion(input.version) }
+  return { id: parseId(input.id), version: parseSupportedVersion(input.version) }
 }
 
 export function parseLaunchUrl(value: unknown): { remotePort: number; token: string } {
@@ -102,6 +111,7 @@ export function parseView(value: unknown): ConnectionView {
   const input = object(value)
   const phase = input.phase
   if (phase !== 'disconnected' && phase !== 'connecting' && phase !== 'updating' && phase !== 'connected' && phase !== 'error') throw new TypeError('Invalid connection state.')
+  if (input.transportId !== undefined && (typeof input.transportId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.transportId))) throw new TypeError('Invalid transport identity.')
   const runtime = input.runtime === undefined ? undefined : object(input.runtime)
   if (runtime !== undefined && (runtime.service !== 'systemd' || !Number.isSafeInteger(runtime.pid) || (runtime.pid as number) < 1)) throw new TypeError('Invalid managed Host status.')
   return {
@@ -111,6 +121,7 @@ export function parseView(value: unknown): ConnectionView {
     ...(input.autoConnect === undefined ? {} : { autoConnect: boolean(input.autoConnect) }),
     ...(runtime === undefined ? {} : { runtime: { version: parseVersion(runtime.version), service: 'systemd' as const, pid: runtime.pid as number } }),
     ...(input.localPort === undefined ? {} : { localPort: port(input.localPort) }),
+    ...(input.transportId === undefined ? {} : { transportId: input.transportId as string }),
     ...(input.error === undefined ? {} : { error: text(input.error, 1000) }),
   }
 }

@@ -10,6 +10,7 @@ interface EmbeddedLayoutState {
   readonly panelInfo: PanelInfo
   readonly viewport: number
   readonly preferredWidth?: number
+  readonly settings: boolean
   readonly rightbar: { readonly shown: boolean; readonly track: boolean; readonly fullscreen: boolean }
 }
 
@@ -32,11 +33,18 @@ export class EmbeddedLayoutController implements ILayout {
     this.state = createSnapshotStore<EmbeddedLayoutState>({
       panelInfo: { activePanelId: null },
       viewport: embeddedColumns(viewport).viewport,
+      settings: false,
       rightbar: { shown: false, track: false, fullscreen: false },
     })
     this.panelInfo = {
       getSnapshot: () => this.state.getSnapshot().panelInfo,
-      subscribe: listener => this.state.subscribe(listener),
+      subscribe: listener => {
+        let previous = this.state.getSnapshot().panelInfo
+        return this.state.subscribe(() => {
+          const current = this.state.getSnapshot().panelInfo
+          if (current !== previous) { previous = current; listener() }
+        })
+      },
     }
   }
 
@@ -45,7 +53,13 @@ export class EmbeddedLayoutController implements ILayout {
     if (this.disposed) return
     this.navigation.abort()
     const state = this.state.getSnapshot()
-    if (state.panelInfo.activePanelId !== id) this.state.set({ ...state, panelInfo: { activePanelId: id } })
+    // A native selection can finish on the same blank Session and panel. Keep
+    // this completion observable even when its panel identity did not change.
+    this.state.set({ ...state, panelInfo: { activePanelId: id } })
+  }
+
+  showSettings(settings: boolean): void {
+    if (!this.disposed && this.state.getSnapshot().settings !== settings) this.state.set({ ...this.state.getSnapshot(), settings })
   }
 
   beginNavigation(): AbortSignal {
@@ -87,6 +101,7 @@ export class EmbeddedLayoutController implements ILayout {
 export class EmbeddedThemePresentation {
   private writes = new Map<string, { original: string | null; value: string | null; read(): string | null; write(value: string | null): void }>()
   private tokens = new Set<string>()
+  private backgrounds?: Array<{ style: CSSStyleDeclaration; property: string; original: string; priority: string; value: string }>
 
   constructor(private readonly document: Document) {}
 
@@ -106,7 +121,28 @@ export class EmbeddedThemePresentation {
     this.tokens = next
   }
 
-  dispose(): void { for (const key of [...this.writes.keys()]) this.restore(key); this.tokens.clear() }
+  /** Let the remote native modal's own mask cover the parent page, without a second canvas. */
+  settings(active: boolean): void {
+    if (!active) {
+      for (const entry of this.backgrounds ?? []) {
+        if (entry.style.getPropertyValue(entry.property) !== entry.value || entry.style.getPropertyPriority(entry.property) !== '') continue
+        if (entry.original) entry.style.setProperty(entry.property, entry.original, entry.priority)
+        else entry.style.removeProperty(entry.property)
+      }
+      this.backgrounds = undefined
+      return
+    }
+    if (this.backgrounds) return
+    this.backgrounds = [this.document.documentElement, this.document.body].flatMap(element =>
+      [['background-color', 'transparent'], ['background-image', 'none']].map(([property, value]) => {
+        const { style } = element
+        const original = style.getPropertyValue(property), priority = style.getPropertyPriority(property)
+        style.setProperty(property, value)
+        return { style, property, original, priority, value: style.getPropertyValue(property) }
+      }))
+  }
+
+  dispose(): void { this.settings(false); for (const key of [...this.writes.keys()]) this.restore(key); this.tokens.clear() }
 
   private style(key: string, style: CSSStyleDeclaration, property: string, value: string | null): void {
     this.set(key, () => style.getPropertyValue(property) || null, value => {
@@ -149,7 +185,7 @@ function EmbeddedFrame({ useEmbeddedLayout, renderSlot, measure, resize, resizeL
   const frame = useRef<HTMLDivElement>(null)
   const dragging = useRef<{ pointer: number; element: HTMLElement; origin: number; width: number }>()
   const columns = embeddedColumns(state.viewport, state.preferredWidth)
-  const conversation = state.panelInfo.activePanelId === null
+  const conversation = !state.settings && state.panelInfo.activePanelId === null
   const track = conversation && state.rightbar.track ? columns.rightbar : 0
   const resizeVisible = conversation && state.rightbar.shown && !state.rightbar.fullscreen && columns.canShow
 
@@ -174,11 +210,13 @@ function EmbeddedFrame({ useEmbeddedLayout, renderSlot, measure, resize, resizeL
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
   }
 
-  return <div ref={frame} className="dc-embedded-layout" style={{ gridTemplateColumns: `minmax(0,1fr) ${track}px` } as CSSProperties}>
+  return <div ref={frame} className="dc-embedded-layout" data-settings={state.settings || undefined} style={{ gridTemplateColumns: `minmax(0,1fr) ${track}px` } as CSSProperties}>
     <style>{embeddedStyles}</style>
-    <div className="dc-embedded-main">{renderSlot('main', {}, { entryKey: state.panelInfo.activePanelId ?? 'conversation' })}</div>
-    <div className="dc-embedded-right" data-rightbar-col>{renderSlot('rightbar', { width: columns.rightbar, viewportWidth: columns.viewport, canShow: columns.canShow })}</div>
-    <div className="dc-embedded-bottom" data-shell-bottom>{renderSlot('shell.bottom', {})}</div>
+    {state.settings ? <div hidden>{renderSlot('sidebar', { collapsed: true, width: 56 })}</div> : <>
+      <div className="dc-embedded-main">{renderSlot('main', {}, { entryKey: state.panelInfo.activePanelId ?? 'conversation' })}</div>
+      <div className="dc-embedded-right" data-rightbar-col>{renderSlot('rightbar', { width: columns.rightbar, viewportWidth: columns.viewport, canShow: columns.canShow })}</div>
+      <div className="dc-embedded-bottom" data-shell-bottom>{renderSlot('shell.bottom', {})}</div>
+    </>}
     <div className="dc-embedded-overlays" data-shell-overlay>{renderSlot('shell.overlay', {})}</div>
     {resizeVisible && <div className="dc-embedded-resize" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={resizeLabel}
       aria-valuemin={300} aria-valuemax={Math.floor(Math.min(columns.viewport * 0.7, columns.viewport - 400))} aria-valuenow={Math.round(columns.rightbar)}
@@ -234,15 +272,23 @@ export function applyEmbeddedLayout(ctx: Context, options: EmbeddedLayoutOptions
   const theme = new EmbeddedThemePresentation(document)
   theme.apply(ctx.theme.getTheme())
   ctx.on('theme/change', snapshot => theme.apply(snapshot))
-  ctx.effect(() => () => theme.dispose())
+  ctx.effect(() => {
+    const sync = () => theme.settings(layout.state.getSnapshot().settings)
+    sync()
+    const off = layout.state.subscribe(sync)
+    return () => { off(); theme.dispose() }
+  })
   return layout
 }
 
 const embeddedStyles = `
 .dc-embedded-layout{position:relative;display:grid;grid-template-rows:minmax(0,1fr) auto;width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}
+.dc-embedded-layout[data-settings]{background:transparent}
 .dc-embedded-main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 .dc-embedded-right{position:relative;min-width:0;min-height:0;overflow:visible}
 .dc-embedded-bottom{grid-column:1/-1;min-width:0;min-height:0;overflow:auto}
 .dc-embedded-overlays{position:absolute;inset:0;z-index:50;pointer-events:none}.dc-embedded-overlays>*{pointer-events:auto}
+.dc-embedded-settings-launcher{position:absolute;inset:0;display:grid;place-items:center}
+.dc-embedded-settings-launcher button{padding:8px 16px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer}
 .dc-embedded-resize{position:absolute;top:0;bottom:0;width:8px;z-index:10;cursor:col-resize;touch-action:none}.dc-embedded-resize:hover,.dc-embedded-resize:focus-visible{background:var(--dsw-alias-bg-layer-2)}.dc-embedded-resize:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 `

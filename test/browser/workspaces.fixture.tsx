@@ -1,19 +1,21 @@
+import { WORKSPACE_PROTOCOL } from '../../src/shared/workspace-protocol.js'
 import { useState, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HostChooser, RemoteWorkspace, WorkspaceController, desktopBrowser, workspaceMessages, workspaceUrl } from '../../src/client/workspaces.js'
 import type { DirectoryFlowOwnerProps } from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { DesktopBrowserBridge, DesktopBrowserLeaseId } from '@deepseek-ai/dsh-client-ui-sidebar-browser/types'
 import type { ConnectionView } from '../../src/shared/types.js'
-import type { WorkspaceCatalog, WorkspaceRequest, WorkspaceResult, WorkspaceResultMap, WorkspaceViewState } from '../../src/shared/workspace-protocol.js'
+import type { WorkspaceCatalogPage, WorkspaceRequest, WorkspaceResult, WorkspaceResultMap, WorkspaceViewState } from '../../src/shared/workspace-protocol.js'
 import { WorkspaceBrowser } from '../../src/client/WorkspaceBrowser.js'
 
 const query = new URLSearchParams(location.search)
 const id = 'connection-11111111-1111-4111-a111-111111111111'
 const row: ConnectionView = { id, name: 'Development', target: 'devbox', remotePort: 3000, phase: 'disconnected' }
-const calls = { connects: 0, opens: 0, localPicks: 0, leases: 0, releases: [] as string[], loads: 0, popups: 0, external: [] as string[], workspaceRequests: [] as { id: string; request: WorkspaceRequest }[] }
+const calls = { opens: 0, localPicks: 0, leases: 0, releases: [] as string[], loads: 0, external: [] as string[] }
 const views = new Map<string, WorkspaceViewState>()
 let viewCount = 0
-const catalog = (remote: boolean): WorkspaceCatalog => ({
+const catalog = (remote: boolean): WorkspaceCatalogPage => ({
+  protocol: WORKSPACE_PROTOCOL, revision: 'a'.repeat(43),
   workspaces: [{ id: 'project', title: remote ? 'Remote project' : 'Local project', path: '/project', sessionIds: ['chat', 'other'] }],
   sessions: [{ id: 'chat', title: remote ? 'Remote discussion' : 'Local discussion', updatedAt: 0, running: false, blank: false }, { id: 'other', title: remote ? 'Another remote discussion' : 'Another local discussion', updatedAt: 0, running: false, blank: false }],
   archivedSessionIds: [], pinnedSessionIds: [],
@@ -21,17 +23,17 @@ const catalog = (remote: boolean): WorkspaceCatalog => ({
 let pendingLease: (() => void) | undefined
 let popup: (() => void) | undefined
 const api = {
+  async reconnect() { return api.connect() },
   async list() { return [{ ...row }] },
-  async connect() { calls.connects++; row.phase = 'connected'; row.localPort = 43188; return { ...row } },
+  async connect() { row.phase = 'connected'; row.localPort = 43188; return { ...row } },
   async open() { calls.opens++; return { url: 'http://127.0.0.1:43188/?token=fixture-workspace-private-credential' } },
   async workspace<R extends WorkspaceRequest>(sourceId: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
-    calls.workspaceRequests.push({ id: sourceId, request })
     let result: WorkspaceResult
     switch (request.op) {
       case 'catalog': result = catalog(sourceId !== 'local'); break
       case 'openView': {
         const channel = String(++viewCount).padStart(43, 'a')
-        result = { channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, result); break
+        result = { protocol: WORKSPACE_PROTOCOL, channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, result); break
       }
       case 'navigate': {
         const previous = views.get(request.channel)!
@@ -66,7 +68,7 @@ if (query.has('desktop')) {
       return { lease: `lease-${calls.leases}` as DesktopBrowserLeaseId, partition: 'fixture-private-partition' }
     },
     async release(lease) { calls.releases.push(lease) },
-    onOpenRequested(_lease, listener) { popup = () => { calls.popups++; listener('https://example.test/') }; return () => { popup = undefined } },
+    onOpenRequested(_lease, listener) { popup = () => listener('https://example.test/'); return () => { popup = undefined } },
   }
   Object.assign(globalThis, { dshDesktop: { protocolVersion: 1, browser: bridge } })
 }
@@ -89,7 +91,8 @@ function App() {
   const owner: DirectoryFlowOwnerProps = { open, busy: false, onCancel: () => setOpen(false), onError: () => {}, onPicked: path => { calls.localPicks++; setPicked(path); setOpen(false) } }
   return <><style>{`main#root{display:flex;max-width:none;margin:0;padding:0;height:100dvh}aside{width:266px;flex:none;background:#f8f9fa;padding-top:20px}.workspace-main{display:flex;min-width:0;flex:1;position:relative}.local-content{padding:36px}`}</style>
     <aside><WorkspaceBrowser sources={sources} selected={selected} onOpenSession={(id, sessionId) => controller.navigate(id, { kind: 'session', id: sessionId })} onOpenWorkspace={(id, workspaceId) => controller.navigate(id, { kind: 'workspace', id: workspaceId })}
-      onAddWorkspace={() => setOpen(true)} onReconnect={id => controller.reconnect(id)}
+      onNewSession={(id, workspaceId) => controller.navigate(id, { kind: 'newSession', id: workspaceId })}
+      onAddWorkspace={() => setOpen(true)} onReconnect={id => controller.retry(id)}
       onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
       onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
       onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}

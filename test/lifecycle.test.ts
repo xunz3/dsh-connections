@@ -34,8 +34,8 @@ test('accepts a validated native result without persisting its credential', asyn
   await assert.rejects(prepareHost({ target: 'dev', signal: AbortSignal.abort() }, { workspacePlugin: false, executor: async () => { throw new Error('must not execute') } }), { name: 'AbortError' })
 })
 
-async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffer) {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-lifecycle-test-'))
+async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffer, directoryPrefix = 'dsh-lifecycle-test-') {
+  const directory = await mkdtemp(join(tmpdir(), directoryPrefix))
   const bin = join(directory, 'bin')
   await mkdir(bin)
   await mkdir(join(directory, 'units'))
@@ -74,6 +74,7 @@ async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffe
   }
   return {
     directory, options,
+    setEnvironment(value: NodeJS.ProcessEnv) { Object.assign(env, value) },
     setWorkspacePlugin(value: Buffer) { workspacePlugin = value },
     state: async () => JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')) as { pid: number },
     dispose: async () => {
@@ -103,22 +104,25 @@ async function workspaceArchive(): Promise<Buffer> {
 
 test('transfers the private workspace bundle through a request file and installs with the native CLI', { timeout: 40_000 }, async () => {
   const archive = await workspaceArchive()
-  const f = await fixture({}, archive)
+  const f = await fixture({ UNRELATED_API_KEY: 'must-not-copy' }, archive)
   try {
     const first = await prepareHost({ target: 'dev' }, f.options)
     const root = f.options.remoteRoot!
     const digest = createHash('sha256').update(archive).digest('hex')
-    assert.deepEqual(JSON.parse(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8')), { schema: 2, digest, activation: 'startup' })
+    const receipt = JSON.parse(await readFile(join(root, 'home/connections-workspace-plugin.json'), 'utf8'))
+    assert.deepEqual({ ...receipt, contents: undefined }, { schema: 3, digest, activation: 'applied', contents: undefined })
+    assert.match(receipt.contents, /^[a-f0-9]{64}$/)
     assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), digest)
     assert.deepEqual(await readFile(join(root, 'plugins', `${digest}.tgz`)), archive)
     assert.equal((await stat(join(root, 'plugins', `${digest}.tgz`))).mode & 0o777, 0o600)
-    const installs = (await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; digest: string; home: string; agents: string; path: string })
+    const installs = (await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; digest: string; home: string; agents: string; path: string; inheritedUnrelatedKey: boolean })
     assert.equal(installs.length, 1)
     assert.deepEqual(installs[0]!.args, ['plugin', '--profile', 'web', 'add', '--save-exact', join(root, 'plugins', `${digest}.tgz`)])
     assert.equal(installs[0]!.digest, digest)
     assert.equal(installs[0]!.home, join(root, 'home'))
     assert.equal(installs[0]!.agents, join(root, 'agents'))
     assert.ok(installs[0]!.path.startsWith(`${join(root, 'installer/node_modules/.bin')}:`))
+    assert.equal(installs[0]!.inheritedUnrelatedKey, false)
     const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[]; requestFileMode?: number; requestBytes?: number })
     const worker = commands.find(row => row.command === 'systemd-run' && row.args.includes('--worker'))!
     assert.equal(worker.requestFileMode, 0o600)
@@ -212,13 +216,107 @@ test('migrates install-only receipts and retries failed native activation withou
     }
     await rm(join(f.directory, 'plugin-application'))
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
-    assert.deepEqual(JSON.parse(await readFile(receipt, 'utf8')), { schema: 2, digest, activation: 'applied' })
+    const repaired = JSON.parse(await readFile(receipt, 'utf8'))
+    assert.deepEqual({ ...repaired, contents: undefined }, { schema: 3, digest, activation: 'applied', contents: undefined })
+    assert.match(repaired.contents, /^[a-f0-9]{64}$/)
     assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), digest)
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
-    assert.equal((await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').length, 1)
+    // An old receipt cannot attest to the package's bytes. Failed attempts
+    // leave that receipt unchanged, so each retry must verify a fresh install.
+    assert.equal((await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').length, 5)
     assert.equal((await readFile(join(f.directory, 'plugin-activations.jsonl'), 'utf8')).trim().split('\n').length, 3)
     const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
     assert.equal(commands.filter(row => row.command === 'systemctl' && row.args.includes('stop')).length, 0)
+  } finally { await f.dispose() }
+})
+
+test('new installations honor XDG_CONFIG_HOME and existing owners retain their recorded unit', { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  try {
+    const config = join(f.directory, 'custom config')
+    const units = join(config, 'systemd/user')
+    delete f.options.unitDirectory
+    f.setEnvironment({ XDG_CONFIG_HOME: config, DSH_FIXTURE_UNIT_DIRECTORY: units })
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    assert.equal(JSON.parse(await readFile(join(f.options.remoteRoot!, 'owner.json'), 'utf8')).unitPath, join(units, f.options.unit!))
+    f.setEnvironment({ XDG_CONFIG_HOME: join(f.directory, 'changed') })
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    await assert.rejects(stat(join(f.directory, 'changed/systemd/user', f.options.unit!)), { code: 'ENOENT' })
+  } finally { await f.dispose() }
+})
+
+test('npm runs with the owned Node and only absolute remote PATH entries reach the service', { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  try {
+    f.setEnvironment({ PATH: `${join(f.directory, 'bin')}:.:relative::${dirname(process.execPath)}:/custom/toolchain/bin:/usr/bin:/bin` })
+    await prepareHost({ target: 'dev' }, f.options)
+    const lines = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; node: string; path: string })
+    for (const command of lines.filter(row => row.command === 'npm')) {
+      assert.equal(command.node, process.execPath)
+      assert.ok(command.path.startsWith(dirname(process.execPath) + ':'))
+      assert.ok(command.path.split(':').every(path => path.startsWith('/')))
+    }
+    const environment = await readFile(join(f.options.remoteRoot!, 'environment'), 'utf8')
+    const path = JSON.parse(environment.match(/^PATH=(.*)$/m)![1]!) as string
+    assert.ok(path.includes('/custom/toolchain/bin'))
+    assert.ok(path.split(':').every(part => part.startsWith('/')))
+  } finally { await f.dispose() }
+})
+
+test('runtime path and ABI drift produce actionable diagnostics without stopping the Host', { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const release = join(f.options.remoteRoot!, 'releases', first.version, 'release.json')
+    const metadata = JSON.parse(await readFile(release, 'utf8'))
+    metadata.runtime.modules = 'different-abi'
+    await writeFile(release, JSON.stringify(metadata))
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'runtime' })
+    assert.equal((await f.state()).pid, first.pid)
+    metadata.runtime.modules = process.versions.modules
+    await writeFile(release, JSON.stringify(metadata))
+    const markerPath = join(f.options.remoteRoot!, 'owner.json')
+    const marker = JSON.parse(await readFile(markerPath, 'utf8'))
+    const unitPath = marker.unitPath as string
+    const unit = await readFile(unitPath, 'utf8')
+    marker.node = join(f.directory, 'removed-node/bin/node')
+    await writeFile(markerPath, JSON.stringify(marker))
+    await writeFile(unitPath, unit.replaceAll(process.execPath, marker.node).replaceAll(dirname(process.execPath), dirname(marker.node)))
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'runtime' })
+    assert.equal((await f.state()).pid, first.pid)
+  } finally { await f.dispose() }
+})
+
+test('matching receipts repair removed or changed installed package bytes without restarting', { timeout: 30_000 }, async () => {
+  const f = await fixture({}, await workspaceArchive())
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const entry = join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz/dsh-connections/index.js')
+    const original = await readFile(entry, 'utf8')
+    await rm(entry)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.equal(await readFile(entry, 'utf8'), original)
+    await writeFile(entry, '// corrupted package')
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    assert.equal(await readFile(entry, 'utf8'), original)
+    const installs = (await readFile(join(f.directory, 'plugin-installs.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[] })
+    assert.equal(installs.length, 3)
+    assert.equal(new Set(installs.map(row => row.args.at(-1))).size, 3)
+    for (const install of installs.slice(1)) {
+      assert.match(install.args.at(-1)!, /-repair-[a-f0-9-]{36}\.tgz$/)
+      assert.deepEqual(await readFile(install.args.at(-1)!), await readFile(installs[0]!.args.at(-1)!))
+    }
+  } finally { await f.dispose() }
+})
+
+test('readiness refuses release metadata that disagrees with the installed native manifest', { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const manifest = join(f.options.remoteRoot!, 'releases', first.version, 'node_modules/@deepseek-ai/dsh/package.json')
+    await writeFile(manifest, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-rc.3', type: 'module' }))
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'startup' })
+    assert.equal((await f.state()).pid, first.pid)
   } finally { await f.dispose() }
 })
 
@@ -228,6 +326,69 @@ test('missing native service prerequisites leave no installation behind', async 
     try {
       await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code })
       await assert.rejects(stat(f.options.remoteRoot!), { code: 'ENOENT' })
+    } finally { await f.dispose() }
+  }
+})
+
+test('startup activation is verified and reconnect repairs disabled and missing entries', { timeout: 40_000 }, async () => {
+  const archive = await workspaceArchive()
+  const f = await fixture({}, archive)
+  try {
+    const root = f.options.remoteRoot!
+    const receipt = join(root, 'home/connections-workspace-plugin.json')
+    await writeFile(join(f.directory, 'plugin-disabled'), '')
+    await writeFile(join(f.directory, 'plugin-ignore-enable'), '')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-activation' })
+    await assert.rejects(stat(receipt), { code: 'ENOENT' }, 'an applied result is insufficient while the entry remains disabled')
+    const pid = (await f.state()).pid
+    await rm(join(f.directory, 'plugin-ignore-enable'))
+    const repaired = await prepareHost({ target: 'dev' }, f.options)
+    assert.equal(repaired.pid, pid)
+    assert.equal(JSON.parse(await readFile(receipt, 'utf8')).activation, 'applied')
+    await writeFile(join(f.directory, 'plugin-disabled'), '')
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), repaired)
+    await assert.rejects(stat(join(f.directory, 'plugin-disabled')), { code: 'ENOENT' })
+    await writeFile(join(f.directory, 'plugin-runtime'), '')
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), repaired)
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), createHash('sha256').update(archive).digest('hex'))
+    const currentReceipt = JSON.parse(await readFile(receipt, 'utf8'))
+    await writeFile(receipt, JSON.stringify({ ...currentReceipt, activation: 'startup' }))
+    await writeFile(join(f.directory, 'plugin-runtime'), 'legacy-unverified-content')
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), repaired)
+    assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), currentReceipt.digest)
+    assert.equal(JSON.parse(await readFile(receipt, 'utf8')).activation, 'applied')
+  } finally { await f.dispose() }
+})
+
+test('reconnect needs no npm or linger while explicit installation retains prerequisites', { timeout: 30_000 }, async () => {
+  const f = await fixture({}, await workspaceArchive())
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    await writeFile(join(f.directory, 'npm-unavailable'), '')
+    f.setEnvironment({ DSH_FIXTURE_NO_LINGER: '1' })
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    await assert.rejects(updateHost({ target: 'dev', version: '0.2.99' }, f.options), { code: 'install-tools' })
+    assert.equal((await f.state()).pid, first.pid)
+    await rm(join(f.directory, 'npm-unavailable'))
+    await assert.rejects(updateHost({ target: 'dev', version: '0.2.99' }, f.options), { code: 'linger' })
+    assert.equal((await f.state()).pid, first.pid)
+  } finally { await f.dispose() }
+})
+
+test('maintenance launcher failures are distinct from lock contention and retain private diagnostics', { timeout: 20_000 }, async () => {
+  for (const [exit, code] of [['1', 'maintenance'], ['75', 'busy']] as const) {
+    const f = await fixture({ DSH_FIXTURE_MAINTENANCE_FAIL: exit })
+    try {
+      await assert.rejects(prepareHost({ target: 'dev' }, f.options), (error: unknown) => {
+        assert.ok(error instanceof RemoteHostError)
+        assert.equal(error.code, code)
+        assert.ok(!error.message.includes('Private maintenance failure detail'))
+        return true
+      })
+      const log = join(f.options.remoteRoot!, 'maintenance.log')
+      assert.match(await readFile(log, 'utf8'), /Private maintenance failure detail/)
+      assert.equal((await stat(log)).mode & 0o777, 0o600)
+      assert.equal((await readdir(f.options.remoteRoot!)).some(name => /^(request|result)-/.test(name)), false)
     } finally { await f.dispose() }
   }
 })
@@ -245,6 +406,12 @@ test('installs one owned service and reconnects without restarting or implicitly
     assert.ok(environment.includes('HTTP_PROXY="http://test-user:test-password@proxy.invalid:1234"'))
     assert.ok(!environment.includes('UNRELATED_API_KEY'))
     assert.equal(await readFile(join(f.directory, 'installing'), 'utf8'), '0.2.1-rc.2')
+    const release = join(f.options.remoteRoot!, 'releases', first.version)
+    const receipt = JSON.parse(await readFile(join(release, 'release.json'), 'utf8'))
+    assert.match(receipt.integrity, /^sha512-/)
+    assert.equal(receipt.lockDigest, createHash('sha256').update(await readFile(join(release, 'package-lock.json'))).digest('hex'))
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; inheritedUnrelatedKey: boolean })
+    assert.ok(commands.filter(row => row.command === 'npm').every(row => !row.inheritedUnrelatedKey))
     const unit = await readFile(join(f.directory, 'units/dsh-connections-fixture.service'), 'utf8')
     assert.match(unit, /KillMode=control-group/)
     assert.match(unit, /Restart=on-failure/)
@@ -331,8 +498,16 @@ test('a reconnect recovers an interrupted snapshot and removes its partial archi
   } finally { await f.dispose() }
 })
 
-test('native systemd accepts the generated user unit without ignored directives', { skip: process.env.DSH_CONNECTIONS_TEST_SYSTEMD !== '1', timeout: 30_000 }, async () => {
-  const f = await fixture()
+test('managed paths containing spaces survive install and reconnect', { timeout: 30_000 }, async () => {
+  const f = await fixture({}, undefined, 'dsh lifecycle spaces ')
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+  } finally { await f.dispose() }
+})
+
+test('native systemd accepts paths with spaces without ignored directives', { skip: process.env.DSH_CONNECTIONS_TEST_SYSTEMD !== '1', timeout: 30_000 }, async () => {
+  const f = await fixture({}, undefined, 'dsh systemd spaces ')
   try {
     await prepareHost({ target: 'dev' }, f.options)
     const result = await promisify(execFile)('systemd-analyze', ['--user', '--man=no', 'verify', join(f.directory, 'units/dsh-connections-fixture.service')])

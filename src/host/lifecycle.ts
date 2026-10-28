@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { parseLaunchUrl, parseTarget, parseVersion } from '../shared/validation.js'
+import { parseLaunchUrl, parseSupportedVersion, parseTarget, parseVersion, SUPPORTED_REMOTE_VERSIONS } from '../shared/validation.js'
 import { REMOTE_SERVICE_SCRIPT } from './remote-service.js'
 
-export const DEFAULT_HARNESS_VERSION = '0.2.1-rc.2'
+export const DEFAULT_HARNESS_VERSION = SUPPORTED_REMOTE_VERSIONS[0]!
 
 export interface ManagedHost {
   remotePort: number
@@ -30,7 +30,10 @@ export interface RemoteHostOptions {
 }
 
 const messages = {
-  unavailable: 'The remote host needs Linux, Node 22.19+ or 24+, npm, and a running systemd user manager.',
+  unavailable: 'The remote host needs Linux, Node 22.19+ or 24+, flock, systemd-run, and a running systemd user manager.',
+  'install-tools': 'Remote installation needs npm; Harness updates and recovery also need tar. Restore the required tools, then retry.',
+  runtime: 'The managed Node runtime is missing, unsupported, or has a different native ABI. Restore the Node installation recorded in owner.json/release.json before reconnecting; do not change the owned service or reuse native dependencies with another Node ABI.',
+  version: `The existing remote Harness version is not supported by this Connections build. Explicitly update to one of: ${SUPPORTED_REMOTE_VERSIONS.join(', ')}.`,
   linger: 'Enable persistent user services on the remote host: loginctl enable-linger "$USER". Then reconnect.',
   ownership: 'The remote Connections directory or service belongs to another installation. Resolve that conflict before connecting.',
   install: 'The remote Harness installation failed. Check the remote npm registry, disk space, and private install.log, then reconnect.',
@@ -40,6 +43,7 @@ const messages = {
   rollback: 'The update failed; the previous Harness version and state were restored.',
   recovery: 'The update could not be rolled back automatically. The private recovery snapshot was preserved; inspect the remote installation before retrying.',
   busy: 'Remote Harness maintenance is still running. Reconnect to wait for its result.',
+  maintenance: 'Remote Harness maintenance did not complete. Check the private maintenance.log and the systemd user manager, then reconnect.',
   ssh: 'Could not manage the remote Harness over SSH. Check the host, SSH key, and known_hosts in your terminal.',
   protocol: 'The remote Harness returned an invalid management response.',
 } as const
@@ -60,7 +64,8 @@ async function execute(request: { target: string; script: string; signal?: Abort
     '-T', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no',
     '-o', 'ClearAllForwardings=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
     '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'Tunnel=no',
-    '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none', '-o', 'ForkAfterAuthentication=no',
+    '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none',
+    '-o', 'IgnoreUnknown=ForkAfterAuthentication', '-o', 'ForkAfterAuthentication=no',
     '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
     '--', request.target,
     // Only a fixed command crosses the remote shell. All configuration travels on stdin.
@@ -111,7 +116,8 @@ async function execute(request: { target: string; script: string; signal?: Abort
 
 async function manage(action: 'prepare' | 'update', input: { target: string; version?: string; signal?: AbortSignal }, options: RemoteHostOptions): Promise<ManagedHost> {
   const target = parseTarget(input.target)
-  const version = parseVersion(input.version ?? DEFAULT_HARNESS_VERSION)
+  // Isolated lifecycle fixtures deliberately exercise broken synthetic releases.
+  const version = (options.workspacePlugin === false ? parseVersion : parseSupportedVersion)(input.version ?? DEFAULT_HARNESS_VERSION)
   if (input.signal?.aborted) throw aborted()
   const timeoutMs = options.timeoutMs ?? 15 * 60_000
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError('Invalid remote management timeout.')
@@ -122,7 +128,7 @@ async function manage(action: 'prepare' | 'update', input: { target: string; ver
   const archive = options.workspacePlugin === false ? undefined : await readFile(new URL('../remote-plugin.tgz', import.meta.url))
   if (archive && archive.byteLength > 4 * 1024 * 1024) throw new RemoteHostError('install')
   const plugin = archive === undefined ? undefined : { data: archive.toString('base64'), digest: createHash('sha256').update(archive).digest('hex') }
-  const payload = Buffer.from(JSON.stringify({ action, version, plugin, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
+  const payload = Buffer.from(JSON.stringify({ action, version, plugin, supportedVersions: options.workspacePlugin === false ? undefined : SUPPORTED_REMOTE_VERSIONS, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
   const script = `${REMOTE_SERVICE_SCRIPT}\nawait main(${JSON.stringify(payload)});\n`
   const stdout = await (options.executor ?? (request => execute(request, options)))({ target, script, signal: input.signal, timeoutMs })
   if (input.signal?.aborted) throw aborted()

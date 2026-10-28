@@ -8,6 +8,8 @@ import { apply as applySidebar, inject as sidebarInject } from '@deepseek-ai/dsh
 export interface NativeSidebarRouting {
   /** Explicit user navigation, shared with the source-aware New Session command. */
   startSession: UiWorkspace['startSession']
+  /** True only while the successfully installed native sidebar owns its slot. */
+  onReady?(ready: boolean): void
 }
 
 /**
@@ -15,9 +17,12 @@ export interface NativeSidebarRouting {
  * Only this child scope sees routed session creation; all other UI keeps native navigation.
  * Native apply owns its original components, injected props, child slots, and disposal.
  */
-export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting): Fiber & PromiseLike<Fiber> {
+export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting): (Fiber & PromiseLike<Fiber>) | undefined {
+  routing.onReady?.(false)
   if (ctx.slots.entries('sidebar').length !== 0) {
-    throw new Error('Connections sidebar composition requires the separate ui-sidebar deployment to be disabled.')
+    // Another composition owns the shell. Preserve it and leave remote opening
+    // unavailable; its New Session action cannot safely target a remote source.
+    return undefined
   }
   const native = ctx.uiWorkspace
   const methods = new WeakMap<Function, Function>()
@@ -42,7 +47,23 @@ export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting
     name: 'connections-native-sidebar',
     apply(scope: Context) {
       scope.provide('uiWorkspace', navigation)
-      scope.plugin({ name: 'connections-native-sidebar-content', inject: sidebarInject, apply: applySidebar })
+      scope.plugin({ name: 'connections-native-sidebar-content', inject: sidebarInject, apply(content: Context) {
+        applySidebar(content)
+        // Returning a Fiber is not evidence that its native apply succeeded.
+        // The layout service already declares this slot; retain the installed
+        // entry identity so a later conflicting occupant also disables routing.
+        let installed = content.slots.entries('sidebar')[0]
+        const sync = () => {
+          const entries = content.slots.entries('sidebar')
+          if (!installed && entries.length === 1) installed = entries[0]
+          routing.onReady?.(installed !== undefined && entries.length === 1 && entries[0] === installed)
+        }
+        content.effect(() => {
+          const off = content.slots.subscribe('sidebar', sync)
+          sync()
+          return () => { off(); routing.onReady?.(false) }
+        })
+      } })
     },
   })
 }

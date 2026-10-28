@@ -3,6 +3,10 @@ export const WORKSPACE_ROUTE = '/connections/workspaces'
 export const WORKSPACE_ENDPOINT = `/api${WORKSPACE_ROUTE}`
 export const WORKSPACE_REQUEST_LIMIT = 16 * 1024
 export const WORKSPACE_RESPONSE_LIMIT = 4 * 1024 * 1024
+/** v2 requires presentation acknowledgements, renewable view leases and settings navigation. */
+export const WORKSPACE_PROTOCOL = 2
+/** Pages stay well below the transport limit, including deeply populated workspaces. */
+export const WORKSPACE_CATALOG_PAGE_LIMIT = 256 * 1024
 
 export interface WorkspaceCatalogWorkspace {
   id: string
@@ -26,16 +30,23 @@ export interface WorkspaceCatalog {
   archivedSessionIds: string[]
   pinnedSessionIds: string[]
 }
+export interface WorkspaceCatalogPage extends WorkspaceCatalog {
+  protocol: typeof WORKSPACE_PROTOCOL
+  revision: string
+  /** An unchanged catalog has empty arrays and no continuation. */
+  unchanged?: true
+  nextCursor?: string
+}
 export type WorkspaceNavigationTarget =
   | { kind: 'session' | 'workspace'; id: string }
   | { kind: 'newSession'; id?: string }
-  | { kind: 'pick' }
+  | { kind: 'pick' | 'settings' }
 export interface WorkspaceViewIntent {
   revision: number
   requestId: string
   target: WorkspaceNavigationTarget
 }
-export type WorkspaceNavigationError = 'NAVIGATION_FAILED' | 'PICK_CANCELLED'
+export type WorkspaceNavigationError = 'NAVIGATION_FAILED' | 'PICK_CANCELLED' | 'SETTINGS_CLOSED'
 export interface WorkspaceViewState {
   /** Increments only when a new navigation request is accepted. */
   revision: number
@@ -48,13 +59,13 @@ export interface WorkspaceViewState {
   error?: WorkspaceNavigationError
 }
 export type WorkspaceRequest =
-  | { op: 'catalog' }
+  | { op: 'catalog'; protocol: typeof WORKSPACE_PROTOCOL; ifRevision?: string; cursor?: string }
   | { op: 'renameWorkspace'; id: string; title: string }
   | { op: 'forgetWorkspace'; id: string }
   | { op: 'renameSession'; id: string; title: string }
   | { op: 'archiveSession'; id: string; archived: boolean }
   | { op: 'pinSession'; id: string; pinned: boolean }
-  | { op: 'openView' }
+  | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string }
   | { op: 'navigate'; channel: string; requestId: string; target: WorkspaceNavigationTarget }
   | { op: 'pollView'; channel: string; afterRevision: number }
   | { op: 'reportView'; channel: string; revision: number; presented?: true; sessionId?: string; error?: WorkspaceNavigationError }
@@ -62,13 +73,13 @@ export type WorkspaceRequest =
   | { op: 'closeView'; channel: string }
 
 export interface WorkspaceResultMap {
-  catalog: WorkspaceCatalog
-  renameWorkspace: { workspace: WorkspaceCatalogWorkspace }
+  catalog: WorkspaceCatalogPage
+  renameWorkspace: { done: true }
   forgetWorkspace: { done: true }
   renameSession: { done: true }
   archiveSession: { done: true }
   pinSession: { done: true }
-  openView: WorkspaceViewState & { channel: string }
+  openView: WorkspaceViewState & { channel: string; protocol: typeof WORKSPACE_PROTOCOL }
   navigate: WorkspaceViewState
   pollView: WorkspaceViewState
   reportView: WorkspaceViewState
@@ -93,10 +104,15 @@ export const WORKSPACE_ERRORS = {
   SESSION_ACTIVE: 'This session still has active work. Stop it before archiving.',
   UNAVAILABLE: 'The workspace service is unavailable.',
   NOT_EMBEDDED: 'This Host needs the Connections remote content bundle. Install it in the remote profile.',
+  INCOMPATIBLE_PROTOCOL: 'The Connections plugin versions are incompatible. Update Connections on both the local and remote Hosts.',
+  CATALOG_EXPIRED: 'The workspace catalog changed while loading. Refresh it and try again.',
   CANCELLED: 'The workspace request was cancelled.',
   FAILED: 'The workspace operation failed.',
 } as const
 export type WorkspaceErrorCode = keyof typeof WORKSPACE_ERRORS
+export class WorkspaceProtocolError extends Error {
+  constructor(readonly code: WorkspaceErrorCode) { super(WORKSPACE_ERRORS[code]) }
+}
 export type WorkspaceResponse<Op extends WorkspaceOperation = WorkspaceOperation> =
   | { ok: true; value: WorkspaceResultMap[Op] }
   | { ok: false; error: { code: WorkspaceErrorCode; message: string } }
@@ -107,6 +123,12 @@ function object(value: unknown): Record<string, unknown> {
 }
 function text(value: unknown, max: number, empty = false): string {
   if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  return value
+}
+/** Filesystem metadata is not a title: JSON safely preserves legal control characters.
+ * Deep cwd values can exceed PATH_MAX; the containing page supplies the wire-size bound. */
+function filesystemPath(value: unknown, empty = false): string {
+  if (typeof value !== 'string' || (!empty && !value.length) || value.length > WORKSPACE_CATALOG_PAGE_LIMIT || value.includes('\0')) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   return value
 }
 export function parseWorkspaceId(value: unknown): string {
@@ -123,6 +145,20 @@ function revision(value: unknown): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   return value
 }
+function catalogRevision(value: unknown): string {
+  const result = text(value, 43)
+  if (!/^[A-Za-z0-9_-]{43}$/.test(result)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  return result
+}
+function catalogCursor(value: unknown): string {
+  const result = text(value, 64)
+  if (!/^[A-Za-z0-9_-]{43}\.[1-9][0-9]{0,8}$/.test(result)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  return result
+}
+function protocol(value: unknown): typeof WORKSPACE_PROTOCOL {
+  if (value !== WORKSPACE_PROTOCOL) throw new WorkspaceProtocolError('INCOMPATIBLE_PROTOCOL')
+  return WORKSPACE_PROTOCOL
+}
 function boolean(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   return value
@@ -131,12 +167,12 @@ function keys(value: Record<string, unknown>, allowed: readonly string[]): void 
   if (Object.keys(value).some(key => !allowed.includes(key))) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
 }
 function navigationError(value: unknown): WorkspaceNavigationError {
-  if (value !== 'NAVIGATION_FAILED' && value !== 'PICK_CANCELLED') throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  if (value !== 'NAVIGATION_FAILED' && value !== 'PICK_CANCELLED' && value !== 'SETTINGS_CLOSED') throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   return value
 }
 export function parseWorkspaceTarget(value: unknown): WorkspaceNavigationTarget {
   const target = object(value)
-  if (target.kind === 'pick') { keys(target, ['kind']); return { kind: 'pick' } }
+  if (target.kind === 'pick' || target.kind === 'settings') { keys(target, ['kind']); return { kind: target.kind } }
   if (target.kind === 'newSession') {
     keys(target, ['kind', 'id'])
     return { kind: 'newSession', ...(target.id === undefined ? {} : { id: parseWorkspaceId(target.id) }) }
@@ -151,7 +187,16 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
   const input = object(value)
   const op = input.op
   switch (op) {
-    case 'catalog': case 'openView': keys(input, ['op']); return { op }
+    case 'catalog':
+      keys(input, ['op', 'protocol', 'ifRevision', 'cursor'])
+      if (input.ifRevision !== undefined && input.cursor !== undefined) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+      return { op, protocol: protocol(input.protocol),
+        ...(input.ifRevision === undefined ? {} : { ifRevision: catalogRevision(input.ifRevision) }),
+        ...(input.cursor === undefined ? {} : { cursor: catalogCursor(input.cursor) }),
+      }
+    case 'openView':
+      keys(input, ['op', 'protocol', 'clientId'])
+      return { op, protocol: protocol(input.protocol), clientId: parseWorkspaceId(input.clientId) }
     case 'renameWorkspace': case 'renameSession':
       keys(input, ['op', 'id', 'title'])
       return { op, id: parseWorkspaceId(input.id), title: text(input.title, 512).trim() }
@@ -187,7 +232,7 @@ function array<T>(value: unknown, parse: (value: unknown) => T, max = 20_000): T
 }
 function workspace(value: unknown): WorkspaceCatalogWorkspace {
   const row = object(value)
-  return { id: parseWorkspaceId(row.id), path: text(row.path, 4096), title: text(row.title, 512, true), sessionIds: array(row.sessionIds, parseWorkspaceId) }
+  return { id: parseWorkspaceId(row.id), path: filesystemPath(row.path), title: text(row.title, 512, true), sessionIds: array(row.sessionIds, parseWorkspaceId) }
 }
 export function parseWorkspaceCatalog(value: unknown): WorkspaceCatalog {
   const catalog = object(value)
@@ -199,7 +244,7 @@ export function parseWorkspaceCatalog(value: unknown): WorkspaceCatalog {
       return {
         id: parseWorkspaceId(row.id), title: text(row.title, 512, true), updatedAt: revision(row.updatedAt),
         running: boolean(row.running), blank: boolean(row.blank),
-        ...(row.cwd === undefined ? {} : { cwd: text(row.cwd, 4096) }),
+        ...(row.cwd === undefined ? {} : { cwd: filesystemPath(row.cwd, true) }),
         ...(row.origin === undefined ? {} : { origin: 'subagent' as const }),
         ...(row.parentSessionId === undefined ? {} : { parentSessionId: parseWorkspaceId(row.parentSessionId) }),
       }
@@ -208,14 +253,30 @@ export function parseWorkspaceCatalog(value: unknown): WorkspaceCatalog {
     pinnedSessionIds: array(catalog.pinnedSessionIds, parseWorkspaceId),
   }
 }
+export function parseWorkspaceCatalogPage(value: unknown): WorkspaceCatalogPage {
+  const page = object(value)
+  const version = protocol(page.protocol)
+  const result: WorkspaceCatalogPage = {
+    ...parseWorkspaceCatalog(page), protocol: version, revision: catalogRevision(page.revision),
+    ...(page.nextCursor === undefined ? {} : { nextCursor: catalogCursor(page.nextCursor) }),
+  }
+  if (result.nextCursor !== undefined && !result.nextCursor.startsWith(`${result.revision}.`)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+  if (page.unchanged !== undefined) {
+    if (page.unchanged !== true || result.nextCursor !== undefined || result.workspaces.length || result.sessions.length
+      || result.archivedSessionIds.length || result.pinnedSessionIds.length) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+    result.unchanged = true
+  }
+  return result
+}
 export function parseWorkspaceViewState(value: unknown): WorkspaceViewState {
   const state = object(value)
+  // v1 bundles could acknowledge selection without ever presenting native content.
+  // Reject them immediately instead of leaving the parent waiting for a timeout.
+  if (state.presentedRevision === undefined) throw new WorkspaceProtocolError('INCOMPATIBLE_PROTOCOL')
   const intent = state.intent === undefined ? undefined : object(state.intent)
   const result: WorkspaceViewState = {
     revision: revision(state.revision), reportedRevision: revision(state.reportedRevision),
-    // Older remote bundles have no presentation acknowledgement. Never infer
-    // visible content from their accepted or completed navigation alone.
-    presentedRevision: state.presentedRevision === undefined ? 0 : revision(state.presentedRevision),
+    presentedRevision: revision(state.presentedRevision),
     ...(intent === undefined ? {} : { intent: { revision: revision(intent.revision), requestId: parseWorkspaceId(intent.requestId), target: parseWorkspaceTarget(intent.target) } }),
     ...(state.sessionId === undefined ? {} : { sessionId: parseWorkspaceId(state.sessionId) }),
     ...(state.error === undefined ? {} : { error: navigationError(state.error) }),
@@ -238,12 +299,14 @@ export function parseWorkspaceResponse<Op extends WorkspaceOperation>(op: Op, va
   const result = object(envelope.value)
   let parsed: WorkspaceResult
   switch (op) {
-    case 'catalog': parsed = parseWorkspaceCatalog(result); break
-    case 'renameWorkspace': parsed = { workspace: workspace(result.workspace) }; break
-    case 'forgetWorkspace': case 'renameSession': case 'archiveSession': case 'pinSession':
+    case 'catalog': parsed = parseWorkspaceCatalogPage(result); break
+    case 'renameWorkspace': case 'forgetWorkspace': case 'renameSession': case 'archiveSession': case 'pinSession':
       if (result.done !== true) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
       parsed = { done: true }; break
-    case 'openView': parsed = { ...parseWorkspaceViewState(result), channel: parseWorkspaceChannel(result.channel) }; break
+    case 'openView': {
+      const version = protocol(result.protocol)
+      parsed = { ...parseWorkspaceViewState(result), channel: parseWorkspaceChannel(result.channel), protocol: version }; break
+    }
     case 'navigate': case 'pollView': case 'reportView': case 'viewState': parsed = parseWorkspaceViewState(result); break
     case 'closeView':
       if (result.closed !== true) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)

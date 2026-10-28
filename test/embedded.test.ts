@@ -1,10 +1,23 @@
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import test from 'node:test'
+import { runInThisContext } from 'node:vm'
+import { buildSync } from 'esbuild'
 import type { Context } from '@deepseek-ai/cordis'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { EmbeddedLayoutController } from '../src/client/embedded-layout.js'
-import { EmbeddedViewController, embeddedChannel, embeddedEndpoint, type EmbeddedEndpoint } from '../src/client/embedded.js'
+import type { EmbeddedEndpoint } from '../src/client/embedded.js'
+import type { EmbeddedSettingsAdapter } from '../src/client/embedded-settings.js'
 import type { WorkspaceRequest, WorkspaceViewState } from '../src/shared/workspace-protocol.js'
+
+// Exercise the controller without loading the native visual package's browser
+// CSS. Native browser tests render the real header and menu components.
+const nativeRequire = createRequire(import.meta.url)
+const module = { exports: {} as typeof import('../src/client/embedded.js') }
+const compiled = buildSync({ entryPoints: ['src/client/embedded.tsx'], bundle: true, packages: 'external', format: 'cjs', write: false }).outputFiles[0].text
+runInThisContext(`(function(module, exports, require) { ${compiled}\n})`)(module, module.exports,
+  (id: string) => id === '@deepseek-ai/dsh-client-ui-primitives' ? {} : nativeRequire(id))
+const { EmbeddedViewController, embeddedChannel, embeddedEndpoint } = module.exports
 
 const channel = 'a'.repeat(43)
 const intent = (revision: number, target: NonNullable<WorkspaceViewState['intent']>['target']): WorkspaceViewState => ({
@@ -20,7 +33,7 @@ async function until(predicate: () => boolean) {
   assert.equal(predicate(), true, 'expected the asynchronous state transition to settle')
 }
 
-function fixture(initial: WorkspaceViewState) {
+function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter) {
   const selection = createSnapshotStore<{ key: string | undefined }>({ key: 'previous' })
   const layout = new EmbeddedLayoutController(() => true)
   const opened: string[] = []
@@ -89,7 +102,7 @@ function fixture(initial: WorkspaceViewState) {
       if (signal.aborted) abort()
     })
   }
-  const controller = new EmbeddedViewController(context as unknown as Context, channel, endpoint)
+  const controller = new EmbeddedViewController(context as unknown as Context, channel, endpoint, undefined, settings)
   return {
     controller, context, selection, reports, opened, created, started, blockedWorkspaces,
     get finalReports() { return reports.filter(report => report.presented !== true) },
@@ -113,7 +126,7 @@ test('embedded endpoint uses same-origin owner authentication and validates the 
   const requests: Array<{ url: string; init: RequestInit }> = []
   const endpoint = embeddedEndpoint({ baseURI: 'http://127.0.0.1:1234/#connections-view=secret' }, async (url, init) => {
     requests.push({ url: String(url), init: init! })
-    return new Response(JSON.stringify({ ok: true, value: { revision: 1, reportedRevision: 0, intent: { revision: 1, requestId: 'request-1', target: { kind: 'session', id: 'valid' } } } }))
+    return new Response(JSON.stringify({ ok: true, value: { revision: 1, reportedRevision: 0, presentedRevision: 0, intent: { revision: 1, requestId: 'request-1', target: { kind: 'session', id: 'valid' } } } }))
   })
   const signal = new AbortController().signal
   assert.equal((await endpoint({ op: 'pollView', channel, afterRevision: 0 }, signal)).revision, 1)
@@ -327,4 +340,42 @@ test('disposal aborts polling and ignores native selection and unfinished worksp
   assert.equal(f.abortedPolls, 1)
   assert.deepEqual(f.opened, [])
   assert.equal(f.finalReports.length, 0)
+})
+
+test('a reused native blank session is acknowledged only after native navigation completes', async t => {
+  const f = fixture(intent(1, { kind: 'newSession', id: 'project' }))
+  t.after(() => f.controller.dispose())
+  const creation = deferred<string>()
+  f.setStart(() => creation.promise)
+  f.controller.start()
+  await until(() => f.started.length === 1)
+  f.context.layout.measure(1200)
+  f.context.layout.resize(400)
+  f.context.layout.showSettings(true)
+  assert.equal(f.finalReports.length, 0, 'geometry changes do not acknowledge a pending native command')
+  creation.resolve('previous')
+  await until(() => f.finalReports.length === 1)
+  assert.equal(f.finalReports[0].sessionId, 'previous')
+  assert.equal(f.finalReports[0].error, undefined)
+})
+
+test('settings report presentation without changing session and only report a native close on demand', async t => {
+  const commit = deferred<void>()
+  let opens = 0
+  const settings: EmbeddedSettingsAdapter = { open: async () => { opens++; await commit.promise }, close() {} }
+  const f = fixture(intent(1, { kind: 'settings' }), settings)
+  t.after(() => f.controller.dispose())
+  f.controller.start()
+  await until(() => opens === 1)
+  assert.equal(f.finalReports.length, 0)
+  commit.resolve()
+  await until(() => f.finalReports.length === 1)
+  assert.deepEqual(f.finalReports[0], { op: 'reportView', channel, revision: 1 })
+  f.selection.set({ key: 'native-onboarding-selection' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.finalReports.length, 1, 'settings cannot leak native onboarding selections to the parent conversation')
+  f.controller.settingsClosed()
+  await until(() => f.finalReports.length === 2)
+  assert.equal(f.finalReports[1].error, 'SETTINGS_CLOSED')
+  assert.equal(f.finalReports[1].sessionId, undefined)
 })

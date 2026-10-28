@@ -3,6 +3,31 @@ import { test, expect, type Page } from '@playwright/test'
 interface CatalogFixture { calls: unknown[][]; disconnect(): void; resolveReconnect(): void }
 const fixture = (page: Page) => page.evaluate(() => (window as unknown as { workspaceCatalogFixture: CatalogFixture }).workspaceCatalogFixture.calls)
 
+test('workspace New chat creates a session on the owning computer', async ({ page }) => {
+  await page.goto('/catalog')
+  await page.getByLabel('Actions: Remote project', { exact: true }).click()
+  await page.getByRole('menuitem', { name: 'New chat', exact: true }).click()
+  expect(await fixture(page)).toEqual([['newSession', 'remote', 'project']])
+})
+
+test('large catalogs page mounted rows and search beyond the visible page', async ({ page }) => {
+  await page.goto('/catalog?large&selected')
+  await expect(page.locator('.dcw-row')).toHaveCount(101)
+  await expect(page.getByRole('button', { name: 'Large discussion 19999 · devbox', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('button', { name: 'Large discussion 19876 · devbox', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: /^Show more/ }).click()
+  await expect(page.locator('.dcw-row')).toHaveCount(201)
+  await page.getByRole('button', { name: 'Search workspaces and chat titles' }).click()
+  await page.getByRole('searchbox').fill('Large discussion 19876')
+  await expect(page.getByRole('button', { name: 'Large discussion 19876 · devbox', exact: true })).toBeVisible()
+  await expect(page.locator('.dcw-row')).toHaveCount(2)
+  await expect(page.getByRole('button', { name: /^Show more/ })).toHaveCount(0)
+  await page.getByRole('searchbox').fill('')
+  await expect(page.locator('.dcw-row')).toHaveCount(101)
+  await page.getByRole('button', { name: 'Collapse: Remote project' }).click()
+  await expect(page.locator('[data-source-id="remote"] .dcw-session')).toHaveCount(0)
+})
+
 test('a single workspace list opens equal native IDs on their owning computers', async ({ page }) => {
   await page.goto('/catalog')
   await expect(page.getByRole('heading', { name: 'Workspaces' })).toHaveCount(1)
@@ -25,11 +50,11 @@ test('search and archive filters keep native ownership and restore archived sess
   await expect(page.getByRole('button', { name: 'Remote discussion · devbox', exact: true })).toBeVisible()
   await page.getByRole('searchbox').fill('')
   await page.getByRole('button', { name: 'Filter chats' }).click()
-  await page.getByRole('combobox', { name: 'Filter chats' }).selectOption('archived')
+  await page.getByRole('menuitem', { name: 'Archived', exact: true }).click()
   const remote = page.locator('[data-source-id="remote"]')
   await expect(remote.getByRole('button', { name: 'Archived discussion · devbox', exact: true })).toBeDisabled()
   await remote.getByLabel('Actions: Archived discussion', { exact: true }).click()
-  await remote.getByRole('button', { name: 'Restore', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Restore', exact: true }).click()
   expect(await fixture(page)).toEqual([['archiveSession', 'remote', 'archived', false]])
 })
 
@@ -48,14 +73,14 @@ test('rename errors remain visible and disconnected menus cannot mutate native r
   await page.goto('/catalog?failRename')
   const remote = page.locator('[data-source-id="remote"]')
   await remote.getByLabel('Actions: Remote discussion', { exact: true }).click()
-  await remote.getByRole('button', { name: 'Rename', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
   await remote.getByRole('textbox', { name: 'Rename', exact: true }).fill('Renamed chat')
   await remote.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByRole('alert')).toHaveText('The session is no longer available.')
   await remote.getByRole('button', { name: 'Cancel', exact: true }).click()
   await remote.getByLabel('Actions: Remote discussion', { exact: true }).click()
   await page.evaluate(() => (window as unknown as { workspaceCatalogFixture: CatalogFixture }).workspaceCatalogFixture.disconnect())
-  await expect(remote.getByRole('button', { name: 'Archive', exact: true })).toBeHidden()
+  await expect(page.getByRole('menuitem', { name: 'Archive', exact: true })).toBeHidden()
   expect(await fixture(page)).toEqual([['renameSession', 'remote', 'same', 'Renamed chat']])
 })
 
@@ -73,13 +98,27 @@ test('native collapsed sidebar keeps search and add available through its owner 
   expect(await fixture(page)).toEqual([['expandSidebar'], ['add']])
 })
 
-for (const colorScheme of ['light', 'dark'] as const) {
-  test(`narrow sidebar remains readable in ${colorScheme} mode`, async ({ page }, testInfo) => {
+test('narrow sidebar fits long Chinese titles in light and dark modes', async ({ page }) => {
+  await page.setViewportSize({ width: 720, height: 600 })
+  await page.goto('/catalog?long&zh')
+  await expect(page.getByRole('heading', { name: '工作区' })).toBeVisible()
+  for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme })
-    await page.setViewportSize({ width: 720, height: 600 })
-    await page.goto('/catalog?long&zh')
-    await expect(page.getByRole('heading', { name: '工作区' })).toBeVisible()
-    expect(await page.locator('.dcw-scroll').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
-    await page.locator('aside').screenshot({ path: testInfo.outputPath(`workspace-catalog-${colorScheme}.png`) })
-  })
-}
+    await expect.poll(() => page.locator('.dcw-scroll').evaluate(node => node.scrollWidth <= node.clientWidth), { message: colorScheme }).toBe(true)
+  }
+})
+
+test('native action menu portals outside the scroll pane and returns keyboard focus', async ({ page }) => {
+  await page.goto('/catalog')
+  const trigger = page.getByLabel('Actions: Remote discussion', { exact: true })
+  await trigger.focus()
+  await trigger.press('Enter')
+  const menu = page.getByRole('menu')
+  await expect(menu).toBeVisible()
+  expect(await menu.evaluate(node => !node.closest('.dcw-scroll'))).toBe(true)
+  await trigger.press('ArrowDown')
+  await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(menu).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+})

@@ -11,6 +11,8 @@ export interface ConnectionView {
   runtime?: { version: string; service: 'systemd'; pid: number }
   phase: ConnectionPhase
   localPort?: number
+  /** Public, opaque identity of this authenticated SSH transport; contains no credential. */
+  transportId?: string
   error?: string
 }
 
@@ -45,6 +47,7 @@ export interface ConnectionsApi {
   save(input: SaveConnection): Promise<ConnectionView>
   remove(id: string): Promise<void>
   connect(id: string): Promise<ConnectionView>
+  reconnect(id: string): Promise<ConnectionView>
   disconnect(id: string): Promise<ConnectionView>
   update(input: UpdateConnection): Promise<ConnectionView>
   open(id: string): Promise<{ url: string }>

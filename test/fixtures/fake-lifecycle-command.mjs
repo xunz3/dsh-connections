@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, open, access, appendFile, stat } from 'node
 import { basename, join, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
-const directory = process.env.DSH_LIFECYCLE_FIXTURE
+const directory = process.env.DSH_LIFECYCLE_FIXTURE ?? dirname(dirname(process.argv[1]))
 const root = join(directory, 'managed')
 const command = basename(process.argv[1])
 const args = process.argv.slice(2)
@@ -18,9 +18,12 @@ const live = async pid => {
 }
 const requestFile = command === 'systemd-run' && args.includes('--worker') ? await stat(args.at(-1)) : undefined
 await appendFile(join(directory, 'commands.jsonl'), JSON.stringify({ command, action: args[0], subcommand: args[1], args,
+  node: process.execPath, path: process.env.PATH,
+  inheritedUnrelatedKey: process.env.UNRELATED_API_KEY !== undefined,
   ...(requestFile ? { requestFileMode: requestFile.mode & 0o777, requestBytes: requestFile.size } : {}),
 }) + '\n')
 
+if (command === 'npm' && await exists(join(directory, 'npm-unavailable'))) process.exit(1)
 if (args.includes('--version')) { console.log('test command 1'); process.exit(0) }
 if (command === 'loginctl') { console.log(process.env.DSH_FIXTURE_NO_LINGER ? 'no' : 'yes'); process.exit(0) }
 
@@ -39,19 +42,29 @@ if (command === 'npm') {
   const module = join(prefix, 'node_modules/@deepseek-ai/dsh')
   await mkdir(join(module, 'lib'), { recursive: true })
   await writeFile(join(module, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version, type: 'module' }))
+  await writeFile(join(prefix, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
+    'node_modules/@deepseek-ai/dsh': { version, integrity: 'sha512-' + Buffer.alloc(64, 1).toString('base64') },
+  } }))
   const source = `
 import { createServer } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, rm } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
 const version = ${JSON.stringify(version)};
 if (process.argv.includes('--version')) { console.log(version); process.exit(0); }
+const fixtureDirectory = dirname(dirname(process.env.DSH_HOME));
 if (process.argv[2] === 'plugin') {
   const args = process.argv.slice(2);
   if (args.length !== 6 || args[1] !== '--profile' || args[2] !== 'web' || args[3] !== 'add' || args[4] !== '--save-exact') process.exit(2);
-  const digest = createHash('sha256').update(await readFile(args[5])).digest('hex');
-  await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-installs.jsonl', JSON.stringify({ args, digest, home: process.env.DSH_HOME, agents: process.env.DSH_AGENTS_HOME, path: process.env.PATH }) + '\\n');
-  try { await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-fail'); process.exit(1); } catch {}
+  const digest = createHash('sha256').update(await readFile(args.at(-1))).digest('hex');
+  await appendFile(fixtureDirectory + '/plugin-installs.jsonl', JSON.stringify({ args, digest, home: process.env.DSH_HOME, agents: process.env.DSH_AGENTS_HOME, path: process.env.PATH, inheritedUnrelatedKey: process.env.UNRELATED_API_KEY !== undefined }) + '\\n');
+  try { await readFile(fixtureDirectory + '/plugin-fail'); process.exit(1); } catch {}
   await writeFile(process.env.DSH_HOME + '/workspace-plugin-installed', digest);
+  const installed = process.env.DSH_HOME + '/profiles/web/node_modules/@xunz/dsh-connections';
+  await mkdir(installed, { recursive: true });
+  execFileSync('tar', ['-xzf', args.at(-1), '--strip-components=1', '-C', installed]);
   process.exit(0);
 }
 if (version === '0.2.98') { await writeFile(process.env.DSH_HOME + '/state.txt', 'new incompatible state'); process.exit(1); }
@@ -71,9 +84,10 @@ const server = createServer(async (req, res) => {
   const respond = value => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ result: { ok: true, value } }));
   if (input.method === 'pluginManager/listPlugins') {
     const loaded = await readFile(runtimePath, 'utf8');
+    const disabled = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-disabled', 'utf8').then(() => true, () => false);
     const duplicate = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-duplicate', 'utf8').then(() => true, () => false);
     respond([
-      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz/dsh-connections', patchId: 'connections', enabled: true }] : []),
+      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz/dsh-connections', patchId: 'connections', enabled: !disabled }] : []),
       ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz/dsh-connections', patchId: 'duplicate', enabled: true }] : []),
       { entryId: 'web:ui-layout', moduleName: '@deepseek/ui-layout', patchId: 'ui-layout', enabled: false },
     ]); return;
@@ -91,7 +105,11 @@ const server = createServer(async (req, res) => {
     if (args?.id !== 'web:connections' || args.enabled !== true || Object.keys(args).length !== 2) { res.writeHead(400).end(); return; }
     const application = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-application', 'utf8').catch(() => 'applied');
     await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-activations.jsonl', JSON.stringify({ args, application, previousDigest: await readFile(runtimePath, 'utf8') }) + '\\n');
-    if (application === 'applied') await writeFile(runtimePath, await readFile(installedPath, 'utf8'));
+    if (application === 'applied') {
+      await writeFile(runtimePath, await readFile(installedPath, 'utf8'));
+      const ignored = await readFile(fixtureDirectory + '/plugin-ignore-enable').then(() => true, () => false);
+      if (!ignored) await rm(fixtureDirectory + '/plugin-disabled', { force: true });
+    }
     respond({ application, changed: false, warnings: [], message: 'Private native error ' + token }); return;
   }
   res.writeHead(404).end();
@@ -104,6 +122,7 @@ process.on('SIGTERM', () => server.close(() => process.exit(0)));
 }
 
 if (command === 'systemd-run') {
+  if (process.env.DSH_FIXTURE_MAINTENANCE_FAIL) { console.error('Private maintenance failure detail'); process.exit(Number(process.env.DSH_FIXTURE_MAINTENANCE_FAIL)) }
   const at = args.indexOf('flock')
   const child = spawn('/usr/bin/flock', args.slice(at + 1), { detached: true, stdio: 'ignore', env: process.env })
   child.on('error', () => process.exit(1))
@@ -114,7 +133,7 @@ if (command === 'systemd-run') {
     if (process.env.DSH_FIXTURE_NO_MANAGER) process.exit(1)
     console.log('PATH=/fixture')
   } else if (action === 'show') {
-    const unitPath = join(directory, 'units', args[2])
+    const unitPath = join(process.env.DSH_FIXTURE_UNIT_DIRECTORY ?? join(directory, 'units'), args[2])
     const loaded = await exists(unitPath)
     const content = loaded ? await readFile(unitPath, 'utf8') : ''
     const exec = content.match(/^ExecStart=("(?:\\.|[^"\\])*") ("(?:\\.|[^"\\])*") (.*)$/m)

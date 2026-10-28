@@ -4,13 +4,13 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import test from 'node:test'
-import { authenticateHarness, requestWorkspace } from '../src/host/harness-http.js'
-import { WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_RESPONSE_LIMIT } from '../src/shared/workspace-protocol.js'
+import { authenticateHarness, HarnessAuthorizationError, HarnessConnectionError, requestWorkspace } from '../src/host/harness-http.js'
+import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL, WORKSPACE_ERRORS, WORKSPACE_RESPONSE_LIMIT, WorkspaceProtocolError } from '../src/shared/workspace-protocol.js'
 
 const token = 'private-launch-token-never-in-an-error'
 const privateMessage = 'server-private-detail-never-in-an-error'
 const signal = () => new AbortController().signal
-const catalog = { ok: true, value: { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] } }
+const catalog = { ok: true, value: { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [], protocol: WORKSPACE_PROTOCOL, revision: 'a'.repeat(43) } }
 
 function ownerCookie(authority: string, override: Record<string, unknown> = {}): string {
   const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
@@ -103,13 +103,13 @@ test('workspace transport sends only a validated request to its fixed route and 
   })
   const cookie = ownerCookie(`127.0.0.1:${listener.port}`)
   try {
-    assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'catalog' }, signal()), catalog)
-    assert.deepEqual(requests, [{ method: 'POST', path: WORKSPACE_ENDPOINT, host: `127.0.0.1:${listener.port}`, cookie, type: 'application/json', body: '{"op":"catalog"}' }])
-    for (const input of [{ op: 'prompt', token }, { op: 'catalog', url: `https://example.invalid/${token}` }, { op: 'createDirectory', path: '/', name: '../elsewhere' }]) {
+    assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), catalog)
+    assert.deepEqual(requests, [{ method: 'POST', path: WORKSPACE_ENDPOINT, host: `127.0.0.1:${listener.port}`, cookie, type: 'application/json', body: JSON.stringify({ op: 'catalog', protocol: WORKSPACE_PROTOCOL }) }])
+    for (const input of [{ op: 'prompt', token }, { op: 'catalog', protocol: WORKSPACE_PROTOCOL, url: `https://example.invalid/${token}` }, { op: 'createDirectory', path: '/', name: '../elsewhere' }]) {
       await assert.rejects(requestWorkspace(listener.port, cookie, input, signal()), safeFailure)
     }
-    await assert.rejects(requestWorkspace(listener.port, `${cookie}\r\nX-Token: ${token}`, { op: 'catalog' }, signal()), safeFailure)
-    await assert.rejects(requestWorkspace(listener.port, ownerCookie(`127.0.0.1:${listener.port + 1}`), { op: 'catalog' }, signal()), safeFailure)
+    await assert.rejects(requestWorkspace(listener.port, `${cookie}\r\nX-Token: ${token}`, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), safeFailure)
+    await assert.rejects(requestWorkspace(listener.port, ownerCookie(`127.0.0.1:${listener.port + 1}`), { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), safeFailure)
     const dangerous = { get op() { throw new Error(privateMessage) } }
     await assert.rejects(requestWorkspace(listener.port, cookie, dangerous, signal()), safeFailure)
     assert.equal(requests.length, 1)
@@ -139,14 +139,59 @@ test('HTTP failure envelopes preserve safe native errors while redirects and cre
   })
   const cookie = ownerCookie(`127.0.0.1:${listener.port}`)
   try {
-    assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'catalog' }, signal()), { ok: false, error: { code: 'SESSION_ACTIVE', message: WORKSPACE_ERRORS.SESSION_ACTIVE } })
+    assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), { ok: false, error: { code: 'SESSION_ACTIVE', message: WORKSPACE_ERRORS.SESSION_ACTIVE } })
     mode = 'not-found'
     assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'viewState', channel: 'a'.repeat(43) }, signal()), { ok: false, error: { code: 'NOT_FOUND', message: WORKSPACE_ERRORS.NOT_FOUND } })
     for (mode of ['redirect', 'unauthorized', 'forbidden', 'missing', 'invalid', 'wrong-type']) {
-      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog' }, signal()), safeFailure, mode)
+      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), safeFailure, mode)
     }
     assert.equal(destinationHits, 0)
   } finally { await listener.close(); await destination.close() }
+})
+
+test('authorization, transport, and protocol failures remain distinguishable', async () => {
+  let mode = 'old-plugin'
+  const listener = await server((_request, response) => {
+    if (mode === 'network') { response.destroy(); return }
+    if (mode === 'unauthorized') { response.writeHead(401); response.end(); return }
+    if (mode === 'missing-plugin') { response.writeHead(404); response.end(); return }
+    if (mode === 'unversioned-endpoint') {
+      response.writeHead(400, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: false, error: { code: 'BAD_REQUEST', message: privateMessage } }))
+      return
+    }
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ ...catalog, value: { ...catalog.value, protocol: mode === 'old-plugin' ? undefined : WORKSPACE_PROTOCOL + 1 } }))
+  })
+  const cookie = ownerCookie(`127.0.0.1:${listener.port}`)
+  try {
+    for (mode of ['old-plugin', 'new-plugin']) {
+      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), error => {
+        assert.ok(error instanceof WorkspaceProtocolError)
+        assert.equal(error.code, 'INCOMPATIBLE_PROTOCOL')
+        assert.equal(error instanceof HarnessConnectionError, false)
+        return safeFailure(error)
+      })
+    }
+    mode = 'unversioned-endpoint'
+    for (const op of ['catalog', 'openView']) {
+      assert.deepEqual(await requestWorkspace(listener.port, cookie, { op, protocol: WORKSPACE_PROTOCOL, ...(op === 'openView' ? { clientId: 'test-browser' } : {}) }, signal()), {
+        ok: false, error: { code: 'INCOMPATIBLE_PROTOCOL', message: WORKSPACE_ERRORS.INCOMPATIBLE_PROTOCOL },
+      })
+    }
+    mode = 'missing-plugin'
+    await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), error => {
+      assert.equal(error instanceof HarnessConnectionError, false)
+      return safeFailure(error)
+    })
+    for (mode of ['network', 'unauthorized']) {
+      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), error => {
+        assert.ok(error instanceof HarnessConnectionError)
+        assert.equal(error instanceof HarnessAuthorizationError, mode === 'unauthorized')
+        return safeFailure(error)
+      })
+    }
+  } finally { await listener.close() }
 })
 
 test('oversized and prematurely disconnected workspace responses are rejected promptly', async () => {
@@ -166,7 +211,7 @@ test('oversized and prematurely disconnected workspace responses are rejected pr
   try {
     for (mode of ['declared-large', 'chunked-large', 'partial-body', 'before-headers']) {
       const started = Date.now()
-      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog' }, signal()), safeFailure, mode)
+      await assert.rejects(requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal()), safeFailure, mode)
       assert.ok(Date.now() - started < 3000, `${mode} must reject before the transport timeout`)
     }
   } finally { await listener.close() }
@@ -183,7 +228,7 @@ test('aborting authentication or a workspace long poll closes the request withou
     })
     const cookie = ownerCookie(`127.0.0.1:${listener.port}`)
     const controller = new AbortController()
-    const run = () => kind === 'authentication' ? authenticateHarness(listener.port, token, controller.signal) : requestWorkspace(listener.port, cookie, { op: 'catalog' }, controller.signal)
+    const run = () => kind === 'authentication' ? authenticateHarness(listener.port, token, controller.signal) : requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, controller.signal)
     try {
       const pending = run()
       const rejected = assert.rejects(pending, safeFailure)

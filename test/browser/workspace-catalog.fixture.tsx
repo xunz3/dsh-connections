@@ -8,6 +8,10 @@ const calls: unknown[][] = []
 let disconnect: () => void
 let resolveReconnect: (() => void) | undefined
 function catalog(remote: boolean): WorkspaceCatalog {
+  if (query.has('large') && remote) {
+    const sessions = Array.from({ length: 20_000 }, (_, index) => ({ id: `large-${index}`, title: `Large discussion ${index}`, updatedAt: 0, blank: false, running: false }))
+    return { workspaces: [{ id: 'project', title: 'Remote project', path: '/project', sessionIds: sessions.map(row => row.id) }], sessions, pinnedSessionIds: [], archivedSessionIds: [] }
+  }
   return {
     workspaces: [{ id: 'project', title: remote ? 'Remote project' : 'Local project', path: '/project', sessionIds: ['same', 'pinned', 'archived'] }],
     sessions: [
@@ -19,7 +23,7 @@ function catalog(remote: boolean): WorkspaceCatalog {
   }
 }
 function App() {
-  const [selected, setSelected] = useState<WorkspaceSelection>()
+  const [selected, setSelected] = useState<WorkspaceSelection | undefined>(query.has('selected') ? { sourceId: 'remote', sessionId: 'large-19999' } : undefined)
   const [wide, setWide] = useState(!query.has('rail'))
   const [sources, setSources] = useState<WorkspaceSource[]>([
     { id: 'local', name: 'This computer', phase: 'connected', catalog: catalog(false) },
@@ -32,6 +36,7 @@ function App() {
     <aside style={{ width: wide ? 266 : 56 }}><WorkspaceBrowser sources={sources} selected={selected} wide={wide} expandSidebar={() => { record('expandSidebar'); setWide(true) }} locale={query.has('zh') ? 'zh-CN' : 'en'}
       onOpenSession={(sourceId, sessionId) => { record('openSession', sourceId, sessionId); setSelected({ sourceId, sessionId }) }}
       onOpenWorkspace={(sourceId, workspaceId) => { record('openWorkspace', sourceId, workspaceId); setSelected({ sourceId, workspaceId }) }}
+      onNewSession={(sourceId, workspaceId) => record('newSession', sourceId, workspaceId)}
       onAddWorkspace={() => record('add')}
       onReconnect={async id => { record('reconnect', id); await new Promise<void>(resolve => { resolveReconnect = resolve }); setSources(current => current.map(source => source.id === id ? { ...source, phase: 'connected' } : source)) }}
       onRenameWorkspace={(...args) => record('renameWorkspace', ...args)}

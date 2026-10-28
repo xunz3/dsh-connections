@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deriveWorkspaceRows, workspaceRowKey, type WorkspaceSource } from '../src/client/workspace-catalog.js'
+import { deriveWorkspaceRows, pageWorkspaceRows, workspaceRowKey, type WorkspaceSource } from '../src/client/workspace-catalog.js'
 import type { WorkspaceCatalog, WorkspaceCatalogSession } from '../src/shared/workspace-protocol.js'
 
 const session = (id: string, extra: Partial<WorkspaceCatalogSession> = {}): WorkspaceCatalogSession => ({ id, title: id, updatedAt: 0, blank: false, running: false, ...extra })
@@ -90,4 +90,36 @@ test('empty native workspaces remain visible only in the unfiltered active view'
   assert.equal(deriveWorkspaceRows(sources, { filter: 'archived' })[0].workspaces.length, 0)
   assert.equal(deriveWorkspaceRows(sources, { query: 'empty' })[0].workspaces.length, 1)
   assert.equal(deriveWorkspaceRows(sources, { query: 'elsewhere' })[0].workspaces.length, 0)
+})
+
+test('large catalogs mount one page plus the selection while search still examines every session', () => {
+  const sessions = Array.from({ length: 20_000 }, (_, index) => session(`chat-${index}`))
+  const sources = [source('local', { catalog: catalog({ sessions, workspaces: [{ id: 'large', title: 'Large', path: '/large', sessionIds: sessions.map(row => row.id) }] }) })]
+  const selected = { sourceId: 'local', sessionId: 'chat-19999' }
+  const rows = deriveWorkspaceRows(sources, { selected })
+  const first = pageWorkspaceRows(rows, { limit: 100, collapsed: new Set(), selected })
+  assert.equal(first.rows[0].workspaces[0].sessions.length, 100, '99 regular sessions plus the selection, after the workspace header')
+  assert.equal(first.rows[0].workspaces[0].sessions.at(-1)?.session.id, 'chat-19999')
+  assert.equal(first.hiddenCount, 19_900)
+  assert.equal(first.rows[0].workspaces[0].sessionCount, 20_000)
+  const second = pageWorkspaceRows(rows, { limit: 200, collapsed: new Set(), selected })
+  assert.equal(second.rows[0].workspaces[0].sessions.length, 200)
+  assert.equal(second.hiddenCount, 19_800)
+  const searched = pageWorkspaceRows(deriveWorkspaceRows(sources, { query: 'chat-19876' }), { limit: 100, collapsed: new Set() })
+  assert.deepEqual(searched.rows[0].workspaces[0].sessions.map(row => row.session.id), ['chat-19876'])
+  assert.equal(searched.hiddenCount, 0)
+  assert.equal(rows[0].workspaces[0].sessions.length, 20_000, 'paging never mutates the complete derived snapshot')
+})
+
+test('paging preserves later selected workspaces and loose sessions, and does not mount collapsed children', () => {
+  const sources = [source(), source('remote', { catalog: catalog({ sessions: [session('first'), session('second'), session('third'), session('loose')] }) })]
+  const rows = deriveWorkspaceRows(sources)
+  const page = pageWorkspaceRows(rows, { limit: 2, collapsed: new Set([rows[0].workspaces[0].key]), selected: { sourceId: 'remote', sessionId: 'third' } })
+  assert.equal(page.rows[0].workspaces[0].sessions.length, 0)
+  assert.equal(page.rows[0].workspaces[0].sessionCount, 3)
+  assert.deepEqual(page.rows[1].workspaces[0].sessions.map(row => row.session.id), ['third'])
+  assert.equal(page.hiddenCount, 3)
+  const loose = pageWorkspaceRows(rows, { limit: 1, collapsed: new Set(), selected: { sourceId: 'remote', sessionId: 'loose' } })
+  assert.equal(loose.rows[1].workspaces.length, 0)
+  assert.deepEqual(loose.rows[1].looseSessions.map(row => row.session.id), ['loose'])
 })

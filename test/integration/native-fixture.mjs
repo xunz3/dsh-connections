@@ -1,7 +1,8 @@
 /** Linux-only, disposable native Harness + real OpenSSH fixture. No user config is edited. */
 import { spawn, execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { chmod, mkdir, open, readFile, readlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, readlink, realpath, writeFile } from 'node:fs/promises'
 import { createConnection, createServer } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -19,6 +20,25 @@ if (!root.startsWith(`${resolve(tmpdir())}/`)) throw new Error('Fixture must liv
 const metadataPath = join(root, 'processes.json')
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+const digest = value => createHash('sha256').update(value).digest('hex')
+const buildFiles = ['dist/host/index.js', 'dist/client.js']
+
+async function verifyInstalled(metadata, remote = false) {
+  const installed = join(root, remote ? 'remote-home' : 'home', 'profiles/web/node_modules/@xunz/dsh-connections')
+  const files = {}
+  for (const file of buildFiles) {
+    const [expected, actual] = await Promise.all([
+      remote ? execute('tar', ['-xOzf', join(repository, 'dist/remote-plugin.tgz'), `package/${file}`], { encoding: 'buffer' }).then(result => result.stdout) : readFile(join(repository, file)),
+      readFile(join(installed, file)),
+    ])
+    const sha256 = digest(expected)
+    if (digest(actual) !== sha256) throw new Error(`The ${remote ? 'remote' : 'local'} fixture contains a stale ${file}. Rebuild and reinstall its Connections bundle before starting Harness.`)
+    files[file] = sha256
+  }
+  metadata.builds ??= {}
+  const side = remote ? 'remote' : 'local'
+  metadata.builds[side] = { ...metadata.builds[side], packageRoot: await realpath(installed), files }
+}
 
 async function identity(pid) {
   try {
@@ -76,10 +96,25 @@ function hostEnvironment(metadata, remote = false) {
   }
 }
 async function installRemote(metadata) {
-  const install = await execute(metadata.node, [metadata.cli, 'plugin', '--profile', 'web', 'add', '--save-exact', join(repository, 'dist/remote-plugin.tgz')], {
+  // A fixed file: URL can resolve to an old same-version package in pnpm's
+  // store. Keep each exact archive as immutable fixture evidence and give the
+  // package manager a new identity whenever its contents change.
+  const archive = await readFile(join(repository, 'dist/remote-plugin.tgz'))
+  const sha256 = digest(archive)
+  const artifacts = join(root, 'artifacts')
+  await mkdir(artifacts, { recursive: true, mode: 0o700 })
+  const archivePath = join(artifacts, `connections-${sha256}.tgz`)
+  try { await writeFile(archivePath, archive, { mode: 0o600, flag: 'wx' }) }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    if (digest(await readFile(archivePath)) !== sha256) throw new Error('The fixture archive does not match its content hash.')
+  }
+  const install = await execute(metadata.node, [metadata.cli, 'plugin', '--profile', 'web', 'add', '--save-exact', archivePath], {
     cwd: root, env: hostEnvironment(metadata, true),
   })
   await writeFile(join(root, 'remote-install.log'), install.stdout + install.stderr, { mode: 0o600 })
+  await verifyInstalled(metadata, true)
+  metadata.builds.remote = { ...metadata.builds.remote, archive: archivePath, archiveSha256: sha256 }
 }
 async function prepareMedia(metadata) {
   for (const [side, project] of Object.entries(metadata.projects ?? {})) {
@@ -88,6 +123,7 @@ async function prepareMedia(metadata) {
   }
 }
 async function startHost(metadata, remote = false) {
+  await verifyInstalled(metadata, remote)
   const port = remote ? metadata.remotePort : metadata.port
   const key = remote ? 'remote' : 'host'
   const logPath = join(root, remote ? 'remote.log' : 'host.log')
