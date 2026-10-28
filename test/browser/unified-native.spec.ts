@@ -16,12 +16,12 @@ async function launch(path: string): Promise<string> {
   return value
 }
 async function dismissWelcome(surface: Surface): Promise<void> {
-  const preview = surface.getByRole('button', { name: 'Continue', exact: true })
+  const preview = surface.getByRole('button', { name: /^(Continue|继续)$/ })
   if (await preview.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await preview.click()
-  const welcome = surface.getByRole('dialog', { name: 'Get started', exact: true })
-  if (await welcome.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await welcome.getByRole('button', { name: 'Close', exact: true }).click()
-  const apiSetup = surface.getByRole('dialog', { name: 'Add an API key to get started', exact: true })
-  if (await apiSetup.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await apiSetup.getByRole('button', { name: 'Configure later', exact: true }).click()
+  const welcome = surface.getByRole('dialog', { name: /^(Get started|开始使用)$/ })
+  if (await welcome.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await welcome.getByRole('button', { name: /^(Close|关闭)$/ }).click()
+  const apiSetup = surface.getByRole('dialog', { name: /^(Add an API key to get started|添加一个 API Key 开始使用)$/ })
+  if (await apiSetup.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await apiSetup.getByRole('button', { name: /^(Configure later|稍后配置)$/ }).click()
 }
 async function chooseDirectory(surface: Surface, path: string): Promise<void> {
   const picker = surface.getByRole('dialog', { name: 'Select Workspace Directory', exact: true })
@@ -150,6 +150,40 @@ async function catalogBeforeUi(startup: string): Promise<WorkspaceCatalog> {
     return result.value
   } finally { await request.dispose() }
 }
+/** Read accepted presentation values from the Host, independently of the embedded UI facade. */
+interface PresentationSetting { ns: string; value: unknown; user: unknown }
+async function presentationBeforeUi(startup: string): Promise<PresentationSetting[]> {
+  const request = await apiRequest.newContext()
+  try {
+    const authenticated = await request.get(startup).catch(() => { throw new Error('The isolated Host authentication failed.') })
+    if (!authenticated.ok()) throw new Error('The isolated Host authentication failed.')
+    const response = await request.post(new URL('/api/settings/describe', startup).href, { data: {
+      type: 'client-request', rpcId: 'connections-presentation-qa', method: 'settings/describe', payload: { args: {} },
+    } })
+    const result = (await response.json()).result as { ok: boolean; value?: { namespaces: PresentationSetting[] } }
+    if (!result.ok || !result.value) throw new Error('The isolated Host settings were unavailable.')
+    return result.value.namespaces.filter(row => ['locale', 'ui-theme', 'ui-chat', 'ui-conversation', 'ui-settings'].includes(row.ns))
+      .map(({ ns, value, user }) => ({ ns, value, user }))
+  } finally { await request.dispose() }
+}
+/** Restore only the isolated local preferences this test changes, including after an assertion fails. */
+async function restorePresentation(startup: string, previous: PresentationSetting[]): Promise<void> {
+  const current = await presentationBeforeUi(startup)
+  const changed = previous.filter(row => ['locale', 'ui-theme', 'ui-settings'].includes(row.ns)
+    && JSON.stringify(current.find(value => value.ns === row.ns)?.user) !== JSON.stringify(row.user))
+  if (!changed.length) return
+  const request = await apiRequest.newContext()
+  try {
+    const authenticated = await request.get(startup).catch(() => { throw new Error('The isolated Host authentication failed.') })
+    if (!authenticated.ok()) throw new Error('The isolated Host authentication failed.')
+    for (const { ns, user } of changed) {
+      const response = await request.post(new URL('/api/settings/replace', startup).href, { data: {
+        type: 'client-request', rpcId: `connections-restore-${ns}`, method: 'settings/replace', payload: { args: { ns, section: user } },
+      } })
+      if (!(await response.json()).result?.ok) throw new Error(`Could not restore the isolated ${ns} preference`)
+    }
+  } finally { await request.dispose() }
+}
 async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise<void> {
   const remote = page.frameLocator('iframe[title="Remote workspace"]')
   const surface = source === 'local' ? page : remote
@@ -270,7 +304,7 @@ async function verifyParentShortcutGuard(page: Page): Promise<void> {
       await focusTarget.focus()
       await page.keyboard.press(keys)
       const notice = page.locator('.dcw-command-note')
-      await expect(notice).toContainText('Use the selected remote chat’s actions or focus its conversation before using this shortcut.')
+      await expect(notice).toContainText('Use the selected remote chat’s menus and pane controls for this action.')
       await notice.getByRole('button', { name: 'Cancel', exact: true }).click()
     }
     expect(await archived()).toEqual(before)
@@ -459,7 +493,7 @@ test('one native sidebar switches local and SSH projects while remote content st
   await page.screenshot({ path: info.outputPath('unified-after-local-restart.png'), fullPage: true })
 })
 
-test('native settings switch Hosts and keep model, plugin and preference ownership on the selected Host', async ({ page }, info) => {
+test('native settings keep models and plugins remote while General and presentation belong to this computer', async ({ page }, info) => {
   test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
   test.setTimeout(120_000)
   page.setDefaultTimeout(15_000)
@@ -490,6 +524,9 @@ test('native settings switch Hosts and keep model, plugin and preference ownersh
   const beforeSessions = beforeCatalog.sessions.map(session => session.id).sort()
   const beforeWorkspaces = beforeCatalog.workspaces.map(workspace => workspace.id).sort()
   const beforeRemote = await catalogBeforeUi(remoteLaunch)
+  const beforeRemotePresentation = await presentationBeforeUi(remoteLaunch)
+  const localLaunch = await launch(join(fixturePath!, 'host.log'))
+  const beforeLocalPresentation = await presentationBeforeUi(localLaunch)
   // A fresh native profile may report that this test account has no configured
   // XDG Documents directory. Let its own transient toast finish before Settings.
   await expect(page.getByText('Unable to create default workspace. Use Choose workspace to select a folder.', { exact: true })).toHaveCount(0, { timeout: 15_000 })
@@ -527,7 +564,7 @@ test('native settings switch Hosts and keep model, plugin and preference ownersh
   await localHost.click()
   await localMenu.getByRole('menuitem', { name: new RegExp(connectionName) }).click()
   const settings = page.locator('.dcs-remote-settings')
-  const remote = page.frameLocator('iframe[title="Remote settings"]')
+  const remote = page.frameLocator('.dcs-remote-settings iframe')
   await expect(settings).toBeVisible()
   await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('.dcs-settings-status')).toHaveCount(0, { timeout: 30_000 })
@@ -545,59 +582,59 @@ test('native settings switch Hosts and keep model, plugin and preference ownersh
   const remoteCatalog = await catalog(remote)
   expect(remoteCatalog.workspaces.map(workspace => workspace.id).sort()).toEqual(beforeRemote.workspaces.map(workspace => workspace.id).sort())
   expect(remoteCatalog.sessions.map(session => session.id).sort()).toEqual(beforeRemote.sessions.map(session => session.id).sort())
-  await nativeSettings.getByRole('button', { name: 'Models', exact: true }).click()
   await expect(nativeSettings.getByRole('button', { name: 'Models', exact: true })).toHaveAttribute('aria-current', 'true')
   await page.screenshot({ path: info.outputPath('native-remote-models.png'), fullPage: true })
   await nativeSettings.getByRole('button', { name: 'Built-in plugins', exact: true }).click()
   await expect(nativeSettings.getByRole('searchbox', { name: 'Search plugins', exact: true })).toBeVisible({ timeout: 15_000 })
   await expect(nativeSettings.getByText('Global plugins', { exact: true })).toBeVisible()
-  await nativeSettings.getByRole('button', { name: 'General', exact: true }).click()
-  const remoteToggle = nativeSettings.getByRole('switch', { name: 'Show coding view', exact: true })
-  await expect(remoteToggle).toBeEnabled()
-  const remoteValue = await remoteToggle.getAttribute('aria-checked')
-  const remoteOrigin = new URL((await settings.locator('iframe').getAttribute('src'))!).origin
+  const localOrigin = new URL(page.url()).origin
   const writes: string[] = []
   const observe = (request: Request) => { const url = new URL(request.url()); if (url.pathname === '/api/settings/mutate') writes.push(url.origin) }
   page.context().on('request', observe)
   try {
-    await remoteToggle.click()
-    await expect(remoteToggle).toHaveAttribute('aria-checked', remoteValue === 'true' ? 'false' : 'true')
-    await expect(remoteToggle).toBeEnabled()
-    await expect.poll(() => writes.length).toBe(1)
-    expect(writes).toEqual([remoteOrigin])
-    await nativeSettings.getByRole('button', { name: `Host: ${connectionName}`, exact: true }).click()
-    await page.screenshot({ path: info.outputPath('native-settings-remote-host-menu.png'), fullPage: true })
-    await remote.getByRole('menu').getByRole('menuitem', { name: 'This computer', exact: true }).click()
+    // General is the existing local page. Merely selecting it from remote
+    // Settings must not expose a remote form or write to that Host.
+    await nativeSettings.getByRole('button', { name: 'General', exact: true }).click()
     await expect(settings).toHaveCount(0)
     await expect(localSettings).toBeVisible()
+    await expect(localSettings.getByRole('button', { name: 'General', exact: true })).toHaveAttribute('aria-current', 'true')
     await expect(localToggle).toHaveAttribute('aria-checked', localValue!)
+    expect(writes).toEqual([])
     expect(await selection()).toBe(beforeSelection)
     await expect(selectedLocal).toHaveAttribute('aria-label', selectedLabel!)
-    expect((await catalog(page)).sessions.map(session => session.id).sort()).toEqual(beforeSessions)
-    expect((await catalog(page)).workspaces.map(workspace => workspace.id).sort()).toEqual(beforeWorkspaces)
-    await localHost.click()
+
+    await localToggle.click()
+    await expect(localToggle).toHaveAttribute('aria-checked', localValue === 'true' ? 'false' : 'true')
+    await expect(localToggle).toBeEnabled()
+    await localSettings.getByRole('button', { name: 'Dark', exact: true }).click()
+    await expect(localSettings.getByRole('button', { name: 'Dark', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await localSettings.getByRole('button', { name: 'English', exact: true }).click()
+    await page.getByRole('menuitem', { name: '中文', exact: true }).click()
+    await expect(page.locator('html')).toHaveAttribute('lang', /^zh/)
+    await expect.poll(() => writes.length).toBe(3)
+    expect(writes).toEqual([localOrigin, localOrigin, localOrigin])
+
+    await localSettings.getByRole('button', { name: '主机: 本地电脑', exact: true }).click()
     await localMenu.getByRole('menuitem', { name: new RegExp(connectionName) }).click()
     await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
     await expect(page.locator('.dcs-settings-status')).toHaveCount(0, { timeout: 30_000 })
     await expect(settings.getByRole('alert')).toHaveCount(0)
+    await expect(nativeSettings.getByRole('button', { name: '模型', exact: true })).toHaveAttribute('aria-current', 'true')
     await dismissWelcome(remote)
-    if (!await nativeSettings.isVisible()) await remote.getByRole('button', { name: 'Open settings', exact: true }).click()
-    await nativeSettings.getByRole('button', { name: 'General', exact: true }).click()
-    await expect(remoteToggle).toHaveAttribute('aria-checked', remoteValue === 'true' ? 'false' : 'true')
-    await remoteToggle.click()
-    await expect(remoteToggle).toHaveAttribute('aria-checked', remoteValue!)
-    await expect.poll(() => writes.length).toBe(2)
-    expect(writes).toEqual([remoteOrigin, remoteOrigin])
-    await page.screenshot({ path: info.outputPath('native-remote-settings.png'), fullPage: true })
+    await expect(remote.locator('html')).toHaveAttribute('lang', /^zh/)
+    await expect(remote.locator('body')).toHaveAttribute('data-ds-dark-theme', '')
+    expect(await presentationBeforeUi(remoteLaunch)).toEqual(beforeRemotePresentation)
+    expect(writes).toEqual([localOrigin, localOrigin, localOrigin])
+    await page.screenshot({ path: info.outputPath('native-remote-local-presentation.png'), fullPage: true })
+
+    // Native Host selection and Escape retain the existing frame and form.
     const currentFrame = await settings.locator('iframe').elementHandle()
     const frameUrl = await settings.locator('iframe').getAttribute('src')
-    const remoteHost = nativeSettings.getByRole('button', { name: `Host: ${connectionName}`, exact: true })
+    const remoteHost = nativeSettings.getByRole('button', { name: `主机: ${connectionName}`, exact: true })
     await remoteHost.click()
     await remote.getByRole('menu').getByRole('menuitem', { name: new RegExp(connectionName) }).click()
     await expect(remote.getByRole('menu')).toHaveCount(0)
-    await page.emulateMedia({ colorScheme: 'dark' })
     await page.setViewportSize({ width: 640, height: 900 })
-    await expect(remote.locator('body')).toHaveAttribute('data-ds-dark-theme', '')
     await remoteHost.click()
     const menu = remote.getByRole('menu')
     await expect(menu).toBeVisible()
@@ -614,15 +651,61 @@ test('native settings switch Hosts and keep model, plugin and preference ownersh
     await expect(settings.locator('iframe')).toHaveAttribute('src', frameUrl!)
     expect(await settings.locator('iframe').evaluate((frame, previous) => frame === previous, currentFrame)).toBe(true)
     await currentFrame?.dispose()
-    await page.emulateMedia({ colorScheme: 'light' })
     await page.setViewportSize({ width: 1360, height: 940 })
-    await nativeSettings.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect(settings).toHaveCount(0, { timeout: 10_000 })
+
+    await nativeSettings.getByRole('button', { name: '通用设置', exact: true }).click()
+    await expect(settings).toHaveCount(0)
+    await expect(localSettings).toBeVisible()
+    await localSettings.getByRole('button', { name: '中文', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'English', exact: true }).click()
+    await expect(page.locator('html')).toHaveAttribute('lang', /^en/)
+    await localSettings.getByRole('button', { name: 'System', exact: true }).click()
+    await expect(localSettings.getByRole('button', { name: 'System', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await localToggle.click()
+    await expect(localToggle).toHaveAttribute('aria-checked', localValue!)
+    await expect(localToggle).toBeEnabled()
+    await expect.poll(() => writes.length).toBe(6)
+    expect(writes.every(origin => origin === localOrigin)).toBe(true)
+    await localSettings.getByRole('button', { name: 'Close', exact: true }).click()
     expect(await selection()).toBe(beforeSelection)
     await expect(selectedLocal).toHaveAttribute('aria-label', selectedLabel!)
+    expect((await catalog(page)).sessions.map(session => session.id).sort()).toEqual(beforeSessions)
+    expect((await catalog(page)).workspaces.map(workspace => workspace.id).sort()).toEqual(beforeWorkspaces)
+
+    await page.getByRole('button', { name: 'Account menu', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
+    await localSettings.getByRole('button', { name: 'Connections', exact: true }).click()
+    const connections = localSettings.getByRole('region', { name: 'Connections', exact: true })
+    await connections.getByLabel(`More actions: ${connectionName}`).click()
+    const inventory = page.context().waitForEvent('response', {
+      predicate: response => new URL(response.url()).pathname === '/api/pluginManager/listBundles'
+        && new URL(response.url()).origin !== localOrigin,
+    })
+    void inventory.catch(() => {})
+    await connections.getByRole('button', { name: 'Manage plugins', exact: true }).click()
+    const pluginFrame = page.locator('iframe[title="Remote workspace"]')
+    const plugins = page.frameLocator('iframe[title="Remote workspace"]')
+    await expect(plugins.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
+    await dismissWelcome(plugins)
+    await expect(plugins.getByRole('heading', { name: 'Plugins', exact: true })).toBeVisible()
+    await expect(plugins.getByRole('heading', { name: 'Installed plugins', exact: true })).toBeVisible()
+    await expect(plugins.getByRole('button', { name: /^View .*connections/i })).toBeVisible()
+    const listed = await inventory
+    expect(listed.ok()).toBe(true)
+    expect(new URL(listed.url()).origin).toBe(new URL((await pluginFrame.getAttribute('src'))!).origin)
+    await page.screenshot({ path: info.outputPath('native-remote-plugin-manager.png'), fullPage: true })
+    await localProject.click()
+    await expect(pluginFrame).toHaveCount(0)
+    expect(await selection()).toBe(beforeSelection)
+    await expect(selectedLocal).toHaveAttribute('aria-label', selectedLabel!)
+
     const afterRemote = await catalogBeforeUi(remoteLaunch)
     expect(afterRemote.workspaces.map(workspace => workspace.id).sort()).toEqual(beforeRemote.workspaces.map(workspace => workspace.id).sort())
     expect(afterRemote.sessions.map(session => session.id).sort()).toEqual(beforeRemote.sessions.map(session => session.id).sort())
+    expect(await presentationBeforeUi(remoteLaunch)).toEqual(beforeRemotePresentation)
     expect(errors).toEqual([])
-  } finally { page.context().off('request', observe) }
+  } finally {
+    page.context().off('request', observe)
+    await restorePresentation(localLaunch, beforeLocalPresentation)
+  }
 })

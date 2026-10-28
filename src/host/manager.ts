@@ -246,6 +246,7 @@ export class ConnectionsManager implements ConnectionsApi {
   private async establish(record: ConnectionRecord, runtime: Runtime, generation: number, controller: AbortController, version?: string): Promise<ConnectionView> {
     let tunnel: Tunnel | undefined
     let stage = 'ssh'
+    let transportFailure: { generation: number; message: string } | undefined
     const current = () => !this.disposed && runtime.generation === generation && !controller.signal.aborted
     try {
       if (record.mode === 'managed') {
@@ -265,11 +266,12 @@ export class ConnectionsManager implements ConnectionsApi {
       await this.store.rememberPort(record.id, record.target, tunnel.port)
       if (!current()) throw new Error('Connection cancelled.')
       runtime.tunnel = tunnel
-      runtime.unsubscribe = tunnel.onClose(() => {
+      runtime.unsubscribe = tunnel.onClose(error => {
         if (!current()) return
         ++runtime.generation
         runtime.phase = 'error'
-        runtime.error = 'The SSH connection closed. Connect again to resume access.'
+        runtime.error = error instanceof SshTunnelError ? sshFailure(error) : 'The SSH connection closed. Connect again to resume access.'
+        transportFailure = { generation: runtime.generation, message: runtime.error }
         delete runtime.tunnel
         runtime.unsubscribe?.()
         delete runtime.unsubscribe
@@ -296,7 +298,10 @@ export class ConnectionsManager implements ConnectionsApi {
         controller.abort()
       }
       await tunnel?.close().catch(() => {})
-      if (!active) throw new Error('Connection cancelled.')
+      // A stdio tunnel authenticates SSH on the first Harness request. Keep its
+      // classified failure when it closes during that request; a later manual
+      // disconnect or new attempt still wins over this old completion.
+      if (!active) throw new Error(transportFailure?.generation === runtime.generation ? transportFailure.message : 'Connection cancelled.')
       throw new Error(runtime.error)
     }
   }

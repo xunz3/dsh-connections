@@ -61,8 +61,11 @@ function runtimePath(node) {
   const paths = (process.env.PATH ?? '').split(':').filter(path => path.startsWith('/') && !/[\x00-\x1f\x7f]/.test(path));
   return [...new Set([dirname(node), ...paths, '/usr/local/bin', '/usr/bin', '/bin'])].join(':');
 }
-function networkEnvironment(node) {
-  return Object.entries({ ...environment(networkKeys), PATH: runtimePath(node) }).map(([key, value]) => key + '=' + JSON.stringify(value)).join('\n') + '\n';
+function networkEnvironment(node, root) {
+  // The native PluginManager also launches pnpm after the installer exits.
+  // Keep its owned package manager available without requiring a global install.
+  const path = [...new Set([dirname(node), join(root, 'installer/node_modules/.bin'), ...runtimePath(node).split(':')])].join(':');
+  return Object.entries({ ...environment(networkKeys), PATH: path }).map(([key, value]) => key + '=' + JSON.stringify(value)).join('\n') + '\n';
 }
 function installerEnvironment() {
   // Native dependency installers need PATH and the user's npm configuration,
@@ -298,14 +301,18 @@ async function pluginReceipt(root, digest) {
   if (!contents) fail('install');
   return JSON.stringify({ schema: 3, digest, contents, activation: 'applied' });
 }
+async function checkWorkspacePluginMigration(context, plugin) {
+  // Both bundles compose the same native slots. Resolve the package rename
+  // before staging an update or interrupting an otherwise healthy Host.
+  if (plugin !== undefined && await exists(join(context.root, 'home/profiles/web/node_modules', owner))) fail('plugin-migration');
+}
 async function installWorkspacePluginContents(context, plugin) {
   if (plugin === undefined) return; // isolated lifecycle fixtures
   if (!plugin || !/^[a-f0-9]{64}$/.test(plugin.digest) || typeof plugin.data !== 'string') fail('install');
   const archive = Buffer.from(plugin.data, 'base64');
   if (archive.length > 4 * 1024 * 1024 || createHash('sha256').update(archive).digest('hex') !== plugin.digest) fail('install');
   const { root, marker } = context;
-  // Never install two bundles that own the same native layout and settings slots.
-  if (await exists(join(root, 'home/profiles/web/node_modules', owner))) fail('plugin-migration');
+  await checkWorkspacePluginMigration(context, plugin);
   const directory = join(root, 'plugins');
   await privateDir(directory);
   const receipt = join(root, 'home/connections-workspace-plugin.json');
@@ -442,6 +449,7 @@ async function worker(input) {
   await verifyUnit(context);
   const runtime = await runtimeNode(context);
   await recover(context);
+  await checkWorkspacePluginMigration(context, input.plugin);
   // Only the lock owner reaches here; interrupted staging directories cannot
   // belong to another live maintenance operation or the selected installation.
   for (const name of await fs.readdir(join(root, 'releases'))) {
@@ -500,7 +508,7 @@ async function bootstrap(input, encoded) {
   await verifyUnit(context);
   // Preserve the remote SSH user's network configuration without exposing proxy
   // credentials in argv, logs, or client records. API keys are never copied.
-  await atomic(join(context.root, 'environment'), networkEnvironment(context.marker.node));
+  await atomic(join(context.root, 'environment'), networkEnvironment(context.marker.node, context.root));
   // Abandoned callers may leave private result credentials behind. Maintenance
   // can run for at most 30 minutes; only files older than a day are collected.
   for (const name of await fs.readdir(context.root)) {

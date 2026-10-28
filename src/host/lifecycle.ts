@@ -2,7 +2,9 @@ import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { parseLaunchUrl, parseSupportedVersion, parseTarget, parseVersion, SUPPORTED_REMOTE_VERSIONS } from '../shared/validation.js'
+import { REMOTE_BOOTSTRAP_COMMAND } from './remote-bootstrap.js'
 import { REMOTE_SERVICE_SCRIPT } from './remote-service.js'
+import { terminateSshProcess } from './ssh-process.js'
 
 export const DEFAULT_HARNESS_VERSION = SUPPORTED_REMOTE_VERSIONS[0]!
 
@@ -32,6 +34,7 @@ export interface RemoteHostOptions {
 const messages = {
   'plugin-migration': 'This Host still has the unpublished @xunz/dsh-connections bundle. Remove it from this service profile with the native CLI before installing @xunz03/dsh-connections; retain the service homes and credentials. See the release guide.',
   unavailable: 'The remote host needs Linux, Node 22.19+ or 24+, flock, systemd-run, and a running systemd user manager.',
+  node: 'Could not find a supported remote Node runtime. Ensure Node 22.19+ or 24+ is on PATH for noninteractive SSH, for example by checking ssh HOST node --version. Existing managed runtimes are not changed automatically.',
   'install-tools': 'Remote installation needs npm; Harness updates and recovery also need tar. Restore the required tools, then retry.',
   runtime: 'The managed Node runtime is missing, unsupported, or has a different native ABI. Restore the Node installation recorded in owner.json/release.json before reconnecting; do not change the owned service or reuse native dependencies with another Node ABI.',
   version: `The existing remote Harness version is not supported by this Connections build. Explicitly update to one of: ${SUPPORTED_REMOTE_VERSIONS.join(', ')}.`,
@@ -45,6 +48,10 @@ const messages = {
   recovery: 'The update could not be rolled back automatically. The private recovery snapshot was preserved; inspect the remote installation before retrying.',
   busy: 'Remote Harness maintenance is still running. Reconnect to wait for its result.',
   maintenance: 'Remote Harness maintenance did not complete. Check the private maintenance.log and the systemd user manager, then reconnect.',
+  'ssh-unavailable': 'OpenSSH is unavailable. Install the system SSH client and ensure ssh is on PATH.',
+  'ssh-auth': 'SSH authentication failed. Check your key or agent in a terminal; Connections uses noninteractive authentication.',
+  'ssh-host-key': 'SSH host identity is not trusted or has changed. Verify the host in your terminal before connecting.',
+  'ssh-timeout': 'SSH connection timed out. Check the host, network, and SSH config.',
   ssh: 'Could not manage the remote Harness over SSH. Check the host, SSH key, and known_hosts in your terminal.',
   protocol: 'The remote Harness returned an invalid management response.',
 } as const
@@ -58,6 +65,13 @@ export class RemoteHostError extends Error {
 
 function aborted(): Error { return new DOMException('Remote connection cancelled.', 'AbortError') }
 
+function sshFailure(stderr: string): RemoteHostError {
+  if (/host key verification failed|remote host identification has changed|no .* host key is known|host key .*mismatch/i.test(stderr)) return new RemoteHostError('ssh-host-key')
+  if (/permission denied|authentication failed|no supported authentication/i.test(stderr)) return new RemoteHostError('ssh-auth')
+  if (/connection timed out|operation timed out|connection timeout/i.test(stderr)) return new RemoteHostError('ssh-timeout')
+  return new RemoteHostError('ssh')
+}
+
 async function execute(request: { target: string; script: string; signal?: AbortSignal; timeoutMs: number }, options: RemoteHostOptions): Promise<string> {
   if (request.signal?.aborted) throw aborted()
   const args = [
@@ -66,11 +80,11 @@ async function execute(request: { target: string; script: string; signal?: Abort
     '-o', 'ClearAllForwardings=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
     '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'Tunnel=no',
     '-o', 'PermitLocalCommand=no', '-o', 'RemoteCommand=none',
-    '-o', 'IgnoreUnknown=ForkAfterAuthentication', '-o', 'ForkAfterAuthentication=no',
+    '-o', 'IgnoreUnknown=ForkAfterAuthentication,StdinNull', '-o', 'ForkAfterAuthentication=no', '-o', 'StdinNull=no',
     '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
     '--', request.target,
     // Only a fixed command crosses the remote shell. All configuration travels on stdin.
-    'node --input-type=module -',
+    REMOTE_BOOTSTRAP_COMMAND,
   ]
   return new Promise((resolve, reject) => {
     const child = spawn(options.sshPath ?? 'ssh', args, {
@@ -78,16 +92,26 @@ async function execute(request: { target: string; script: string; signal?: Abort
       stdio: ['pipe', 'pipe', 'pipe'], env: options.env ?? process.env,
     })
     let stdout = ''
+    let stderr = ''
     let failure: Error | undefined
-    let killTimer: ReturnType<typeof setTimeout> | undefined
-    const kill = (signal: NodeJS.Signals) => {
-      if (!child.pid) return
-      try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal) } catch { /* already exited */ }
+    let settled = false
+    let disposal: Promise<void> | undefined
+    let markClosed!: () => void
+    const done = new Promise<void>(resolve => { markClosed = resolve })
+    const dispose = () => disposal ??= terminateSshProcess(child, done)
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      request.signal?.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve(stdout)
     }
     const stop = (error: Error) => {
       failure ??= error
-      kill('SIGTERM')
-      killTimer ??= setTimeout(() => kill('SIGKILL'), 300)
+      // Cancellation must settle even if a ProxyCommand descendant keeps a
+      // pipe open after the SSH leader exits (especially on native Windows).
+      void dispose().then(() => finish(failure))
     }
     const onAbort = () => stop(aborted())
     const timer = setTimeout(() => stop(new RemoteHostError('busy')), request.timeoutMs)
@@ -97,19 +121,19 @@ async function execute(request: { target: string; script: string; signal?: Abort
       stdout += chunk.toString('utf8')
       if (stdout.length > 16_384) stop(new RemoteHostError('protocol'))
     })
-    // Management diagnostics can contain native startup URLs. Never expose them.
-    child.stderr.resume()
+    // Retain a bounded tail only to classify SSH failures into fixed messages.
+    // Diagnostics can contain native startup URLs and must never be exposed.
+    child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-8_192) })
     child.stdin.on('error', () => { /* close/error below determines the result */ })
-    child.on('error', () => { failure ??= new RemoteHostError('ssh') })
+    child.on('error', error => { failure ??= new RemoteHostError((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'ssh-unavailable' : 'ssh') })
     child.on('close', (code) => {
-      clearTimeout(timer)
-      clearTimeout(killTimer)
-      request.signal?.removeEventListener('abort', onAbort)
-      kill('SIGKILL') // also reap any ProxyCommand descendants
-      if (failure) reject(failure)
-      else if (code === 127) reject(new RemoteHostError('unavailable'))
-      else if (code !== 0) reject(new RemoteHostError('ssh'))
-      else resolve(stdout)
+      markClosed()
+      void dispose().then(() => {
+        if (failure) finish(failure)
+        else if (code === 127) finish(new RemoteHostError('unavailable'))
+        else if (code !== 0) finish(sshFailure(stderr))
+        else finish()
+      })
     })
     child.stdin.end(request.script)
   })

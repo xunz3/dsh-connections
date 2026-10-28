@@ -85,6 +85,21 @@ test('remote browser shows local tunnel boundary and disables connect', async ({
   await expect(page.getByText('Open Harness over HTTP at localhost or 127.0.0.1 on this computer to use SSH workspaces.', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Connect', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'View workspaces', exact: true })).toBeDisabled()
+  await page.getByLabel('More actions: Development').click()
+  await expect(page.getByRole('button', { name: 'Manage plugins', exact: true })).toBeDisabled()
+})
+
+test('connection menu opens remote plugin management only for its connected host', async ({ page }) => {
+  await page.goto('/?populated')
+  const connected = page.locator('li').filter({ hasText: 'Development' })
+  await connected.getByLabel('More actions: Development').click()
+  await connected.getByRole('button', { name: 'Manage plugins', exact: true }).click()
+  await expect(page.locator('body')).toHaveAttribute('data-plugins-opened', 'connection-11111111-1111-4111-a111-111111111111')
+  await expect(page.locator('body')).not.toHaveAttribute('data-workspace-opened')
+  await expect(connected.locator('details')).not.toHaveAttribute('open')
+  const disconnected = page.locator('li').filter({ hasText: 'Research workstation' })
+  await disconnected.getByLabel('More actions: Research workstation').click()
+  await expect(disconnected.getByRole('button', { name: 'Manage plugins', exact: true })).toBeDisabled()
 })
 
 test('Chinese mobile layout fits and keyboard can close an edit', async ({ page }) => {

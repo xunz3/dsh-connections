@@ -245,7 +245,7 @@ test('new installations honor XDG_CONFIG_HOME and existing owners retain their r
   } finally { await f.dispose() }
 })
 
-test('npm runs with the owned Node and only absolute remote PATH entries reach the service', { timeout: 30_000 }, async () => {
+test('service PATH pins Node, exposes owned pnpm and excludes relative remote entries', { timeout: 30_000 }, async () => {
   const f = await fixture()
   try {
     f.setEnvironment({ PATH: `${join(f.directory, 'bin')}:.:relative::${dirname(process.execPath)}:/custom/toolchain/bin:/usr/bin:/bin` })
@@ -260,6 +260,11 @@ test('npm runs with the owned Node and only absolute remote PATH entries reach t
     const path = JSON.parse(environment.match(/^PATH=(.*)$/m)![1]!) as string
     assert.ok(path.includes('/custom/toolchain/bin'))
     assert.ok(path.split(':').every(part => part.startsWith('/')))
+    const installerBin = join(f.options.remoteRoot!, 'installer/node_modules/.bin')
+    await mkdir(installerBin, { recursive: true })
+    await writeFile(join(installerBin, 'pnpm'), '#!/usr/bin/env node\nconsole.log(JSON.stringify({ executable: process.argv[1], node: process.execPath }))\n', { mode: 0o755 })
+    const child = await promisify(execFile)('pnpm', ['--version'], { env: { PATH: path } })
+    assert.deepEqual(JSON.parse(child.stdout), { executable: join(installerBin, 'pnpm'), node: process.execPath }, 'native plugin subprocesses find the private package manager and its pinned Node')
   } finally { await f.dispose() }
 })
 
@@ -321,6 +326,16 @@ test('public package rename retains service ownership and refuses duplicate lega
     assert.equal((await f.state()).pid, first.pid)
     assert.equal(JSON.parse(await readFile(join(legacy, 'package.json'), 'utf8')).name, '@xunz/dsh-connections')
     await assert.rejects(stat(join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz03/dsh-connections')), { code: 'ENOENT' })
+    const releases = await readdir(join(f.options.remoteRoot!, 'releases'))
+    const commandsBeforeUpdate = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').length
+    await assert.rejects(updateHost({ target: 'dev', version: '0.2.1-rc.3' }, f.options), { code: 'plugin-migration' })
+    assert.equal((await f.state()).pid, first.pid, 'a package rename conflict must not restart the healthy Host')
+    assert.deepEqual(await readdir(join(f.options.remoteRoot!, 'releases')), releases, 'reject before staging the requested release')
+    await assert.rejects(stat(join(f.options.remoteRoot!, 'transaction.json')), { code: 'ENOENT' })
+    const updateCommands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').slice(commandsBeforeUpdate)
+      .map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.ok(!updateCommands.some(row => row.command === 'npm' && row.args.includes('install')))
+    assert.ok(!updateCommands.some(row => row.command === 'systemctl' && row.args.includes('stop')))
     // Simulate the documented native CLI removal, without changing the service homes.
     await rm(legacy, { recursive: true })
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)

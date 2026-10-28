@@ -11,7 +11,7 @@ Use a runtime that permits temporary loopback TCP and Unix listeners. Browser te
 
 `pnpm test:browser` runs the web fixtures only. Both Playwright configurations append loopback addresses to `NO_PROXY` and `no_proxy` in the runner process, preserving existing exclusions and proxy settings. This also covers the runner's web-server readiness check; setting only `webServer.env` would not.
 
-The retained desktop guest adapter contracts are opt-in because production desktop opening is disabled:
+Desktop guest lease contracts can also run in Chromium (real Electron validation is separate):
 
 ```sh
 DSH_DESKTOP_CONTRACT=1 pnpm test:browser workspaces.desktop.spec.ts
@@ -28,11 +28,13 @@ These tests simulate the guest bridge in Chromium; they do not validate Electron
 
 The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.3 and checked against its sidebar package; remote compatibility explicitly enumerates tested rc.2 and rc.3 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
 
-The build includes only the installed native sidebar package's ModuleLoader factory through a generated adapter. Its dependencies stay external and are supplied through the main manifest. The adapter assigns the compiled CSS ownership and deduplication IDs to Connections, preserving the original CSS and class names. This avoids collisions with Desktop's separately compiled sidebar and lets Harness unload/reload the composed styles correctly. `dist/native-sidebar.LICENSE` preserves its upstream MIT license. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
+The build includes the installed native sidebar and shortcuts ModuleLoader factories through generated adapters. Its dependencies stay external and are supplied through the main manifest. The adapter assigns the compiled CSS ownership and deduplication IDs to Connections, preserving the original CSS and class names. This avoids collisions with Desktop's separately compiled sidebar and lets Harness unload/reload the composed styles correctly. `dist/native-sidebar.LICENSE` and `dist/native-shortcuts.LICENSE` preserve their upstream MIT licenses. The shortcut adapter wraps only the public command resolver; platform keyboard/menu dispatch, conflicts, revisions and repeat behavior stay native. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
 
 The adapter reuses the original module's `apply`, components and child declarations; it does not vendor a source fork or recreate the sidebar. At runtime a Cordis-isolated `uiWorkspace` facade changes only `startSession` routing, with other methods and accessors bound to their native receiver. Disabling the whole Connections bundle removes its patch and restores the native sidebar deployment.
 
 The remote bundle's profile patch disables `directory-picker` auto selection and registers the existing `dsh-host-directory-picker-browse` and `dsh-client-ui-directory-picker-browse` pair. Both packages are supplied by Harness's Web bundle; the ordinary client row makes its surface available to ModuleLoader. This avoids waiting for a system dialog on a remote graphical desktop without adding a picker implementation or runtime dependency. Package checks require both browse faces and leave local picker composition unchanged.
+
+The remote patch also replaces the `ui-settings` and `ui-settings-account` deployments with their version-checked native factories inside Connections. Bootstrap waits for the view's local presentation snapshot before installing ConfigForms; original locale/theme providers then activate normally. Only the native form accessor for local UI preferences and the account browser capabilities are adapted. Factory CSS is inventoried under Connections, and the remote archive includes `native-settings.LICENSE` and `native-account.LICENSE`. Focused tests execute both supported releases' actual ConfigForms, locale and theme services to verify live local presentation, refused UI writes, retained remote model/permission/privacy writes, and service disposal. These tests do not establish live account authentication or Electron acceptance.
 
 CI also installs the checked release tarball into two disposable native Hosts
 on the declared local Harness version and runs the native browser suite. No
@@ -99,20 +101,24 @@ reboot remain untested.
 
 The subsequent workspace MVVM refactor passed 240 Node cases (including SSH and systemd checks), all 26 web fixture cases, and all four installed two-Host cases. An isolated Windows Desktop rc.3 run additionally checked owner-backed rename, temporary search expansion with collapse restoration, row New Session with blank-session/draft reuse, and menu keyboard focus. Its screenshot was manually compared with the native sidebar for icons, spacing and indentation; no pixel-baseline assertions were added. The Controller now publishes immutable source records, with a regression proving earlier loading, partial and error snapshots remain unchanged.
 
-Remote desktop workspace opening is disabled pending source-aware native menu routing. A default Node test checks that the production installer rejects remote desktop views and releases their lease; the opt-in guest bridge fixtures cover allocation, cleanup, failures and popup delegation. Upstream partitions are transient. No model task or account credential migration is exercised.
+Desktop workspace opening uses the native guest bridge and composed native command resolver. Default Node tests verify native input routing, stale guest/revision rejection, local fallback, provider disposal, and controller-scoped command ownership without a mounted sidebar. The guest bridge fixtures cover allocation, cleanup, failures and popup delegation. Desktop Settings relay tests cover metadata projection, navigation revisions, readiness and selection replay. Upstream partitions are transient. No model task or account credential migration is exercised.
 
 ## Recent native verification
 
-The 2026-10-28 rc.3 two-Host run passed all three native cases against installed,
-hash-verified release archives, including native More menu rows and blank-session
-draft preservation on both Hosts. An initial direct-entry assertion intermittently
-failed with an empty page; three isolated repetitions and the complete suite then
-passed without assertion timeout changes or retries. Its cause remains unconfirmed;
-the same case remains a required CI check in a fresh environment. It covered native composition, files/media, reload and
-local-only Host restart. Settings checks included Models and plugin inventory,
-remote-only preference writes and restoration, unchanged local settings and
-workspace/session identities, slow-load cancellation, repeated Host selection,
-and menu keyboard behavior. Light and dark/narrow screenshots were inspected.
+The 2026-10-28/29 rc.3 two-Host run passed all four native cases against installed,
+hash-verified release archives. Coverage includes native composition, files/media,
+blank-session draft preservation, reload and local-only Host restart. Settings
+checks verify remote Models, General returning to the local application, local
+language/theme/display preferences projected without remote configuration writes,
+slow-load cancellation, repeated Host selection and menu keyboard behavior. A
+final run against the current build also opened the remote native Plugin Manager,
+verified its package requests target the remote Host, and returned to the original
+local session without changing plugin inventory or workspace/session identities.
+
+Native rc.2/rc.3 account-factory tests cover login-link opening, clipboard request
+acknowledgement, cancellation and the ordinary browser fallback. Desktop bridge
+fixtures exercise the capability boundary; these checks do not establish a
+completed account login in the user's running Windows Desktop.
 
 Separate rc.2 and rc.3 installations accepted the remote content bundle and
 passed authenticated catalog, workspace/session navigation and native Settings

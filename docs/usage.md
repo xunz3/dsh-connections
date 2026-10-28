@@ -2,19 +2,23 @@
 
 ## Requirements
 
-Install into the local Harness Web profile and restart it. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux is the verified controller platform; macOS OpenSSH follows the same path but is unverified. Windows ControlMaster is not supported.
+Install into the local Harness profile. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux uses OpenSSH ControlMaster; macOS follows the same path but is unverified. Windows uses an owned loopback listener with native OpenSSH stdio forwarding, verified against a real remote Harness from Desktop. Remote content uses the native Desktop guest bridge or a local HTTP browser.
 
-The local bundle reuses Harness's native sidebar with navigation routed to the selected computer. Disable the whole Connections bundle to remove its composition patch and restore the original sidebar deployment; disabling only its individual plugin entry leaves the bundle's sidebar patch in place.
+The local bundle reuses Harness's native sidebar and shortcut service, routing workspace commands to the selected computer. Disable the whole Connections bundle to remove its composition patch and restore the original deployments; disabling only its individual plugin entry leaves those patches in place. User keybindings remain in native storage. If you previously configured the Host's `shortcuts.stopSequenceMs`, move that configuration to the Connections entry's `shortcuts: { stopSequenceMs: ... }`; the native schema and default remain unchanged.
 
 Configure SSH normally and verify `ssh devbox` in a terminal first. Connections uses noninteractive key/agent authentication and existing `known_hosts`. Password prompts and first-use host trust are handled in the terminal. Ports, IPv6 targets, jump hosts and other settings belong in SSH config.
 
 For **Run in the background**, the remote computer needs:
 
 - Linux and a running systemd user manager, with `loginctl show-user "$USER" -p Linger` reporting `yes`.
-- Node.js 22.19+ or >=24 and npm available to the SSH shell; `flock` and `tar`.
+- Node.js 22.19+ or >=24 and npm; `flock` and `tar`.
 - Access to the npm registry and space for Harness, managed data and an update snapshot.
 
 These installation/update requirements are separate from reconnect: an already installed service can be reused without npm or linger, but still needs Node, its systemd user manager, the maintenance lock and systemd-run. If linger is disabled, logout/boot persistence is no longer assured. For installation, configure it using your host's normal policy (`loginctl enable-linger "$USER"`) before connecting. Connections does not enable it for you. Remote service availability still depends on the operating system and machine; powered-off machines cannot run tasks.
+
+Connections uses the Node on the remote noninteractive SSH PATH. Verify it with `ssh HOST node --version`; an interactive terminal may use a different runtime. Configure your account’s noninteractive environment when using a version manager such as nvm. Connections does not run login or interactive shell startup to discover a runtime. Existing managed services retain their recorded runtime and native-module ABI.
+
+On Windows, each local TCP connection uses a separate system `ssh -W` process; HTTP keepalive and WebSockets retain their stream. The listener is owned before use, and the native Harness authentication exchange must succeed before the connection is shown as connected. Idle listeners have no SSH process; the next stream authenticates again. Both transports preserve native SSH configuration and disable inherited port forwarding, agent forwarding and local commands.
 
 ## Add and open
 
@@ -26,15 +30,17 @@ These installation/update requirements are separate from reconnect: an already i
 
 Selecting a remote computer shows connection and loading feedback in the main area. Loading ends when the native directory picker is mounted or the requested session has become current. If that content-loading stage receives no readiness acknowledgement within 30 seconds, it shows an error: use **Reconnect** to refresh the managed Host address and authentication, rebuild its SSH tunnel and retry the operation, or **Cancel** to return to this computer. SSH setup and first-time installation have their own connection progress; the 30-second limit applies to presenting remote content.
 
-Click the **Host** button beside the native **Settings** title to choose **This computer** or a remote connection. Its menu shows connection status and marks the selected Host. The selected Host supplies the entire native settings page, including Models and its plugin sections, in one native dialog. Models, accounts, API keys and plugin installations are independent; local values are not copied. See [Settings and plugin ownership](host-settings.md), including how to install additional plugins into the managed remote profile. Opening a remote directory does not create a workspace with that path on the local Host.
+Click the **Host** button beside the native **Settings** title to choose **This computer** or a remote connection. Its menu shows connection status and marks the selected Host. Remote Settings starts in that Host's native **Models** page; its accounts, API keys, plugins and execution permissions remain independent. **General** opens the local application's native preferences, including language, theme and fonts. Switching Hosts keeps the application's presentation consistent without changing saved remote preferences. See [Settings and plugin ownership](host-settings.md). Opening a remote directory does not create a workspace with that path on the local Host.
+
+To install or manage remote plugins, connect the computer in **Settings → Connections**, then choose its **More actions → Manage plugins**. The remote native Plugin Manager opens in the main area and applies changes to that Host. Select a local workspace/chat to return; local plugin installations are unchanged.
 
 The dropdown reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** rereads it without changing the draft. Already saved targets are marked; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
 
 Discovery lists concrete aliases only; wildcard and negated patterns are not choices. Conditional includes contribute candidates without evaluating `Match` or running commands. Host-dependent include paths cannot be discovered statically. Connection settings are resolved by OpenSSH when connecting; discovery does not copy keys, resolve hosts or contact servers.
 
-Use the browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS, IPv6 loopback browser URLs and other browser origins are not supported; settings and content use the same eligibility check. The native desktop content path is currently disabled: its menu accelerators bypass document-local command routing and could target a local session. Its guest bridge adapter remains covered by contract tests, pending a native source-aware command interface.
+Use native Desktop or a browser on the same computer running the local Harness, through `http://127.0.0.1` or `http://localhost`, to open remote content. HTTPS, IPv6 loopback browser URLs and other browser origins are not supported. Desktop uses the native isolated guest lease API for both content and Settings; native shortcut dispatch retains its platform, binding and menu behavior.
 
-The native brand/New Session controls and New Session keyboard command share the same source-aware action. Search/add commands use the unified list. With focus in the parent sidebar, archive/fork shortcuts show guidance instead of touching the previous local session. Focus the remote conversation to use its native shortcuts, or use its source-labelled row actions.
+The native brand/New Session controls and New Session keyboard command share the same source-aware action. Search/add commands use the unified list. Close dismisses the selected remote view or Settings without closing the Desktop window. Remote session, terminal, browser and pane commands that cannot yet be delegated safely show guidance; use the remote native menus and pane controls, or the source-labelled row actions. These commands never operate on the retained local session. In a web browser, keyboard input inside the remote iframe continues to use that document’s native shortcuts.
 
 ## Closing and restoring
 
@@ -72,7 +78,7 @@ The owned installation is under `~/.local/share/dsh-connections`:
 - `service.log`, `install.log` and `maintenance.log`: private diagnostics; the former contains the native launch credential. Do not share them unredacted.
 - Each release retains its npm `package-lock.json` and `release.json` with the main package SRI and lock digest for auditing. npm verifies fetched tarballs against their registry integrity. This is not publisher signature verification or an offline release format.
 - Installer subprocesses receive only required execution variables plus an allowlist of proxy, CA and npm networking configuration. Native package lifecycle scripts remain enabled because Harness and its native dependencies require them.
-- `environment`: private remote proxy, CA, npm networking configuration and a filtered PATH of absolute directories, taken from the remote SSH environment. The recorded Node runtime is placed first. Refreshing this file does not restart a running Host; an updated PATH takes effect on its next normal or explicit start. No local settings or model keys are copied.
+- `environment`: private remote proxy, CA, npm networking configuration and a filtered PATH of absolute directories, taken from the remote SSH environment. The recorded Node runtime is placed first, followed by the owned pnpm installer directory so native plugin management can resolve it. Refreshing this file does not restart a running Host; an updated PATH takes effect on its next normal or explicit start. No local settings or model keys are copied.
 
 New installations use `$XDG_CONFIG_HOME/systemd/user/dsh-connections.service` when an absolute `XDG_CONFIG_HOME` is set, otherwise `~/.config/systemd/user/dsh-connections.service`. Existing owned installations retain their recorded unit location. The service pins its installed Node runtime so native dependency ABI stays consistent. Keep that runtime available; a removed runtime or incompatible Node/npm combination produces an explicit repair diagnostic instead of silently switching executables. Inspect or explicitly stop it on the remote computer:
 

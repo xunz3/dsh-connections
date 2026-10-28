@@ -5,7 +5,7 @@ import type { StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
 export interface NativeSettingsShell {
   getSnapshot(): { open: boolean; activeId?: string }
   subscribe(listener: () => void): () => void
-  actions: { open(): void; close(): void }
+  actions: { open(): void; close(): void; openSection(id: string): void }
 }
 
 /** Versioned adapter: never discover Settings by DOM text or rebind local forms to a remote. */
@@ -16,7 +16,8 @@ export function nativeSettingsShell(entry: StoredEntry | undefined): NativeSetti
   const instance = handle.create() as unknown as Partial<NativeSettingsShell>
   if ((handle.create() as unknown) !== instance) return
   if (typeof instance.getSnapshot !== 'function' || typeof instance.subscribe !== 'function'
-    || typeof instance.actions?.open !== 'function' || typeof instance.actions.close !== 'function') return
+    || typeof instance.actions?.open !== 'function' || typeof instance.actions.close !== 'function'
+    || typeof instance.actions.openSection !== 'function') return
   if (typeof instance.getSnapshot()?.open !== 'boolean') return
   return instance as NativeSettingsShell
 }

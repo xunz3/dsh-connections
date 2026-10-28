@@ -11,6 +11,7 @@ import {
 } from '../src/shared/workspace-protocol.js'
 import type { WorkspaceOperation, WorkspaceRequest, WorkspaceResponse, WorkspaceResultMap } from '../src/shared/workspace-protocol.js'
 import { readWorkspaceCatalog, type WorkspaceApi } from '../src/shared/workspace-rpc.js'
+import type { SettingsHostSnapshot } from '../src/shared/settings-host-protocol.js'
 
 const secret = 'private-auth-token-must-not-escape'
 function nativeServices() {
@@ -50,6 +51,40 @@ async function call<Op extends WorkspaceOperation>(endpoint: WorkspaceEndpointHa
 function failure(response: WorkspaceResponse, code: keyof typeof WORKSPACE_ERRORS): void {
   assert.deepEqual(response, { ok: false, error: { code, message: WORKSPACE_ERRORS[code] } })
 }
+
+test('settings host metadata stays on its settings lease and consumes one validated selection', async () => {
+  const endpoint = new WorkspaceEndpoint(nativeServices().services)
+  const remote = 'connection-11111111-1111-4111-8111-111111111111'
+  const other = 'connection-22222222-2222-4222-8222-222222222222'
+  const snapshot: SettingsHostSnapshot = { choices: [
+    { id: 'local', name: 'This computer', phase: 'connected' },
+    { id: remote, name: 'Remote', phase: 'connected' },
+    { id: other, name: 'Other', phase: 'disconnected' },
+  ], selectedId: remote }
+  const signal = new AbortController().signal
+  try {
+    const { channel } = await call(endpoint, { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: 'settings-tab' })
+    failure(await endpoint.handle({ op: 'pollSettingsHosts', channel, revision: 0 }, signal), 'CONFLICT')
+    const { revision } = await call(endpoint, { op: 'navigate', channel, requestId: 'settings-one', target: { kind: 'settings' } })
+    assert.deepEqual(await call(endpoint, { op: 'pollSettingsHosts', channel, revision }), { revision })
+    const metadata = { ...snapshot, token: secret, choices: snapshot.choices.map(row => ({ ...row, target: secret })) }
+    assert.deepEqual(await call(endpoint, { op: 'publishSettingsHosts', channel, revision, snapshot: metadata }), { revision, snapshot })
+    failure(await endpoint.handle({ op: 'selectSettingsHost', channel, revision, id: 'local' }, signal), 'BAD_REQUEST')
+    assert.deepEqual(await call(endpoint, { op: 'pollSettingsHosts', channel, revision }), { revision, snapshot, ready: true })
+    failure(await endpoint.handle({ op: 'selectSettingsHost', channel, revision, id: remote }, signal), 'BAD_REQUEST')
+    const selected = { revision, snapshot, ready: true, selection: 'local' }
+    assert.deepEqual(await call(endpoint, { op: 'selectSettingsHost', channel, revision, id: 'local' }), selected)
+    assert.deepEqual(await call(endpoint, { op: 'selectSettingsHost', channel, revision, id: 'local' }), selected, 'retry is idempotent')
+    failure(await endpoint.handle({ op: 'selectSettingsHost', channel, revision, id: other }, signal), 'CONFLICT')
+    const next = await call(endpoint, { op: 'navigate', channel, requestId: 'settings-two', target: { kind: 'settings' } })
+    failure(await endpoint.handle({ op: 'selectSettingsHost', channel, revision, id: 'local' }, signal), 'CONFLICT')
+    assert.deepEqual(await call(endpoint, { op: 'pollSettingsHosts', channel, revision: next.revision }), { revision: next.revision }, 'navigation revokes old metadata and readiness')
+    await call(endpoint, { op: 'navigate', channel, requestId: 'session', target: { kind: 'session', id: 'session-1' } })
+    failure(await endpoint.handle({ op: 'publishSettingsHosts', channel, revision: next.revision + 1, snapshot }, signal), 'CONFLICT')
+    await call(endpoint, { op: 'closeView', channel })
+    failure(await endpoint.handle({ op: 'pollSettingsHosts', channel, revision: next.revision }, signal), 'NOT_FOUND')
+  } finally { endpoint.dispose() }
+})
 
 test('registration uses native exact-route owner authorization and withdraws on unload', async () => {
   const ctx = new Context()
@@ -219,10 +254,14 @@ test('presentation protocol rejects older bundles immediately and validates navi
   assert.deepEqual(parseWorkspaceRequest({ op: 'navigate', channel, requestId: 'settings', target: { kind: 'settings' } }), {
     op: 'navigate', channel, requestId: 'settings', target: { kind: 'settings' },
   })
+  assert.deepEqual(parseWorkspaceRequest({ op: 'navigate', channel, requestId: 'plugins', target: { kind: 'plugins' } }), {
+    op: 'navigate', channel, requestId: 'plugins', target: { kind: 'plugins' },
+  })
   for (const target of [
     { kind: 'newSession', id: '../workspace' }, { kind: 'newSession', id: '' },
     { kind: 'newSession', workspaceId: 'workspace-1' }, { kind: 'newSession', prompt: secret },
     { kind: 'settings', url: 'http://example.com' }, { kind: 'settings', id: 'plugin' },
+    { kind: 'plugins', id: 'arbitrary-panel' }, { kind: 'plugins', method: 'installBundle' }, { kind: 'plugins', package: '@scope/plugin' },
   ]) assert.throws(() => parseWorkspaceRequest({ op: 'navigate', channel, requestId: 'new', target }))
   for (const extra of [
     { presented: false }, { presented: 'true' },
@@ -473,7 +512,7 @@ test('catalog history evicts idle revisions before a reader that keeps renewing 
 test('protocol versions and catalog cursors fail explicitly instead of accepting incompatible results', async () => {
   const empty = { workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
   const incompatible = (error: unknown) => error instanceof WorkspaceProtocolError && error.code === 'INCOMPATIBLE_PROTOCOL'
-  for (const protocol of [undefined, 0, 1, 3]) {
+  for (const protocol of [undefined, 0, 1, WORKSPACE_PROTOCOL - 1, WORKSPACE_PROTOCOL + 1]) {
     for (const op of ['catalog', 'openView']) assert.throws(() => parseWorkspaceRequest({ op, protocol }), incompatible)
     assert.throws(() => parseWorkspaceResponse('catalog', { ok: true, value: { ...empty, protocol, revision: 'a'.repeat(43) } }), incompatible)
     assert.throws(() => parseWorkspaceResponse('openView', { ok: true, value: { protocol, channel: 'a'.repeat(43), revision: 0, reportedRevision: 0 } }), incompatible)

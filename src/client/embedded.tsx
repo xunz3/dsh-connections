@@ -15,6 +15,8 @@ import {
 import { applyEmbeddedLayout } from './embedded-layout.js'
 import { applyEmbeddedSettings, createEmbeddedSettingsHosts, type EmbeddedSettingsAdapter } from './embedded-settings.js'
 import { installSettingsHostHeader } from './settings-host-menu.js'
+import { createSettingsHostClient } from './settings-host-bridge.js'
+import { createSettingsHostRelayClient, type SettingsHostEndpoint } from './settings-host-relay.js'
 
 const en = {
   missing: 'Open this remote workspace from Connections on your computer.',
@@ -26,6 +28,7 @@ const en = {
   cancel: 'Cancel', resize: 'Resize files panel',
   openSettings: 'Open settings',
   settingsUnavailable: 'Settings are unavailable on this Host. Enable its native Settings plugin to continue.',
+  pluginsUnavailable: 'Plugin management is unavailable on this Host. Enable its native Plugin Manager to continue.',
 } as const
 const zh: Record<keyof typeof en, string> = {
   missing: '请从这台电脑的「连接」中打开远端工作区。', waiting: '正在打开远端工作区…',
@@ -34,6 +37,7 @@ const zh: Record<keyof typeof en, string> = {
   cancel: '取消', resize: '调整文件栏宽度',
   openSettings: '打开设置',
   settingsUnavailable: '此 Host 的设置暂不可用，请启用其原生设置插件后继续。',
+  pluginsUnavailable: '此 Host 的插件管理暂不可用，请启用其原生插件管理器后继续。',
 }
 type Message = keyof typeof en
 type Translate = (key: Message) => string
@@ -57,16 +61,16 @@ export function embeddedChannel(hash: string): string | undefined {
   } catch { return undefined }
 }
 
-export function embeddedEndpoint(document: Pick<Document, 'baseURI'>, request: typeof fetch = fetch): EmbeddedEndpoint {
+export function embeddedEndpoint(document: Pick<Document, 'baseURI'>, request: typeof fetch = fetch): SettingsHostEndpoint {
   const endpoint = new URL(WORKSPACE_ENDPOINT, document.baseURI)
-  return async (body, signal) => {
+  return async <R extends WorkspaceRequest>(body: R, signal: AbortSignal) => {
     const response = await request(endpoint, {
       method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal,
       headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     })
     const text = await response.text()
     if (text.length > WORKSPACE_RESPONSE_LIMIT) throw new Error('Invalid workspace response')
-    const result = parseWorkspaceResponse(body.op, JSON.parse(text))
+    const result = parseWorkspaceResponse<R['op']>(body.op, JSON.parse(text))
     if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code })
     if (!response.ok) throw new Error('Workspace request failed')
     return result.value
@@ -74,7 +78,7 @@ export function embeddedEndpoint(document: Pick<Document, 'baseURI'>, request: t
 }
 
 interface EmbeddedState {
-  readonly message?: 'waiting' | 'disconnected' | 'expired' | 'failed'
+  readonly message?: 'waiting' | 'disconnected' | 'expired' | 'failed' | 'pluginsUnavailable'
   readonly picker?: { readonly generation: number; readonly busy: boolean; readonly newSession?: true }
   readonly settings?: { readonly generation: number }
 }
@@ -131,9 +135,14 @@ export class EmbeddedViewController {
 
   start(): void {
     if (this.unsubscribe || this.lifetime.signal.aborted) return
-    this.unsubscribe = this.ctx.uiSession.adapter.current.subscribe(() => {
+    const changed = () => {
       if (this.received && !this.applying && !this.state.getSnapshot().picker && !this.state.getSnapshot().settings) this.report()
-    })
+    }
+    const offSession = this.ctx.uiSession.adapter.current.subscribe(changed)
+    // Native Plugin Manager can open a conversation itself. Its panel transition
+    // commits after session selection and makes that destination reportable.
+    const offPanel = this.ctx.layout.panelInfo.subscribe(changed)
+    this.unsubscribe = () => { offSession(); offPanel() }
     void this.poll()
   }
 
@@ -204,6 +213,10 @@ export class EmbeddedViewController {
         if ((initial || changed) && state.intent && state.intent.revision > state.reportedRevision) {
           const generation = this.begin()
           void this.navigate(state.intent, generation)
+        } else if (initial && state.intent?.target.kind === 'plugins' && !state.error) {
+          // This fixed panel is safe to restore; no install operation is replayed.
+          const generation = this.begin()
+          void this.navigate(state.intent, generation)
         } else if (initial && state.sessionId) {
           // Restore the acknowledged selection, never replay an acknowledged directory picker.
           const generation = this.begin()
@@ -261,6 +274,9 @@ export class EmbeddedViewController {
         await this.startSession(intent.target.id)
       } else if (intent.target.kind === 'workspace') {
         await this.openWorkspace(intent.target.id, generation)
+      } else if (intent.target.kind === 'plugins') {
+        this.ctx.layout.selectPanel('plugins' as MainPanelId)
+        await waitFor(this.ctx.layout.panelInfo, value => value.activePanelId === 'plugins', this.operation.signal)
       } else {
         throw new Error('Native navigation target is unavailable')
       }
@@ -268,7 +284,7 @@ export class EmbeddedViewController {
       this.applying = false
       this.state.set({})
       this.report()
-    } catch { this.failed(generation) }
+    } catch { this.failed(generation, intent.target.kind === 'plugins' ? 'pluginsUnavailable' : 'failed') }
   }
 
   private async openWorkspace(id: string, generation: number): Promise<void> {
@@ -313,16 +329,17 @@ export class EmbeddedViewController {
     } catch { this.failed(generation) }
   }
 
-  private failed(generation: number): void {
+  private failed(generation: number, message: 'failed' | 'pluginsUnavailable' = 'failed'): void {
     if (!this.active(generation)) return
     this.applying = false
-    this.state.set({ message: 'failed' })
+    this.state.set({ message })
     this.report('NAVIGATION_FAILED')
   }
 
   private report(error?: WorkspaceNavigationError): void {
     if (this.lifetime.signal.aborted || this.revision === 0) return
-    const sessionId = this.state.getSnapshot().settings ? undefined : this.ctx.uiSession.adapter.current.getSnapshot().key
+    const sessionId = this.state.getSnapshot().settings || this.ctx.layout.panelInfo.getSnapshot().activePanelId === 'plugins'
+      ? undefined : this.ctx.uiSession.adapter.current.getSnapshot().key
     this.queuedReport = {
       op: 'reportView', channel: this.channel, revision: this.revision,
       ...(sessionId === undefined ? {} : { sessionId }), ...(error === undefined ? {} : { error }),
@@ -366,12 +383,15 @@ export function applyEmbedded(ctx: Context): void {
 
   ctx.inject(['uiWorkspace', 'uiSession', 'sessions', 'workspaces'], ctx => {
     const settings = applyEmbeddedSettings(ctx, layout, {
-      onClosed: () => view.settingsClosed(), label: t('openSettings'), unavailableLabel: t('settingsUnavailable'),
+      onClosed: () => view.settingsClosed(), onLocalGeneral: () => hosts.select('local'),
+      label: t('openSettings'), unavailableLabel: t('settingsUnavailable'),
     })
-    const hosts = createEmbeddedSettingsHosts(settings.state, channel)
+    const endpoint = embeddedEndpoint(document)
+    const hosts = createEmbeddedSettingsHosts(settings.state, channel, channel => window.parent === window
+      ? createSettingsHostRelayClient(channel, endpoint) : createSettingsHostClient(channel))
     ctx.effect(() => () => hosts.dispose())
     installSettingsHostHeader(ctx, hosts)
-    const view = new EmbeddedViewController(ctx, channel, embeddedEndpoint(document), initial, settings)
+    const view = new EmbeddedViewController(ctx, channel, endpoint, initial, settings)
     const Overlay = ({ renderSlot }: PropsRenderSlots<PickerSlot>) => {
       const state = useSyncExternalStore(view.state.subscribe, view.state.getSnapshot)
       const picker = state.picker

@@ -1,3 +1,4 @@
+import { bindViewSurfaceParent, type LocalSurface } from './view-surface.js'
 import type { ConnectionsApi, ConnectionView } from '../shared/types.js'
 import { readWorkspaceCatalog, type WorkspaceCatalogSnapshot, type WorkspaceApi } from '../shared/workspace-rpc.js'
 import { WORKSPACE_PROTOCOL, parseWorkspaceId, type WorkspaceNavigationTarget, type WorkspaceRequest } from '../shared/workspace-protocol.js'
@@ -22,6 +23,7 @@ export interface WorkspaceOptions {
   /** A stable per-tab lease owner; settings uses a separate owner from workspaces. */
   clientId?: string
   catalogs?: boolean
+  surface?: LocalSurface
 }
 // Persisted identifiers remain stable across the public npm scope rename.
 const STORAGE_KEY = '@xunz/dsh-connections/selection'
@@ -60,6 +62,8 @@ export class WorkspaceController {
   private readonly clientId: string
   private checkFailures = 0
   private target?: WorkspaceNavigationTarget
+  private surfaceChannel?: string
+  private stopSurface?: () => void
   private readonly listeners = new Set<() => void>()
   readonly getSnapshot = () => this.state
   readonly getCatalogs = () => this.catalogs
@@ -68,7 +72,18 @@ export class WorkspaceController {
     this.clientId = options.clientId ?? crypto.randomUUID()
   }
   private emit() { if (!this.disposed) for (const listener of this.listeners) listener() }
-  private publish(state: WorkspaceState | undefined) { this.state = state; this.emit() }
+  private publish(state: WorkspaceState | undefined) {
+    this.state = state
+    const channel = state?.phase === 'ready' ? state.channel : undefined
+    if (channel !== this.surfaceChannel) {
+      this.stopSurface?.(); this.stopSurface = undefined; this.surfaceChannel = channel
+      if (channel && state && this.options.surface) this.stopSurface = bindViewSurfaceParent({
+        ...this.options.surface, channel, getRevision: () => this.navigating === this.version ? undefined : this.state?.revision,
+        endpoint: async (request, signal) => { signal.throwIfAborted(); return this.api.workspace(state.id, request) },
+      })
+    }
+    this.emit()
+  }
   private select(selected: WorkspaceSelection, persist = true) {
     const current = this.catalogs.selected
     if (current.sourceId === selected.sourceId && current.sessionId === selected.sessionId && current.workspaceId === selected.workspaceId) return
@@ -249,9 +264,9 @@ export class WorkspaceController {
     let acquired = false
     try {
       if (!reuse) { this.release(previous); this.destination = undefined; this.publish({ id, name: this.rows.find(row => row.id === id)?.name ?? '', phase: 'connecting' }) }
-      // Native New Session may return to this same blank and its unsent draft.
-      // Keep its row selected until the Host acknowledges the actual destination.
-      if (!(reuse && target?.kind === 'newSession' && target.id === undefined)) {
+      // Plugins retains the native conversation and draft. New Session may also
+      // reuse the current blank; neither should clear its selected sidebar row.
+      if (!(reuse && (target?.kind === 'plugins' || target?.kind === 'newSession' && target.id === undefined))) {
         this.select({ sourceId: id, ...(target?.kind === 'session' ? { sessionId: target.id } : target?.kind === 'workspace' || target?.kind === 'newSession' && target.id !== undefined ? { workspaceId: target.id } : {}) })
       }
       const row = (await this.api.list()).find(row => row.id === id)
@@ -276,7 +291,7 @@ export class WorkspaceController {
         // A stale allocation must not rotate the channel of a newer navigation.
         const allocation = (this.allocating.get(id) ?? Promise.resolve()).then(() => {
           if (!current()) throw new Error('navigation-cancelled')
-          return this.api.workspace(id, { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: `${this.clientId}.${id}` })
+          return this.api.workspace(id, { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: `${this.clientId}.${id}`, ...(this.options.surface ? { presentation: this.options.surface.getPresentation() } : {}) })
         })
         const settled = allocation.catch(() => {})
         this.allocating.set(id, settled)
@@ -336,7 +351,17 @@ export class WorkspaceController {
     void poll()
   }
   /** Closing the view never stops a connection, native session or running task. */
-  close(): void { this.version++; this.stopPresentationWatch(); this.release(this.state); this.state = undefined; this.destination = undefined; this.target = undefined; this.pickFallback = undefined; this.select({ sourceId: 'local' }); this.remember({ sourceId: 'local' }); this.emit() }
+  close(): void {
+    this.version++; this.stopPresentationWatch()
+    const previous = this.state, stopSurface = this.stopSurface
+    this.state = undefined; this.destination = undefined; this.target = undefined; this.pickFallback = undefined
+    this.stopSurface = undefined; this.surfaceChannel = undefined
+    // Publish only after both view and selection describe the closed state.
+    // Selection listeners may synchronously request another close/navigation.
+    this.catalogs = { ...this.catalogs, selected: { sourceId: 'local' } }
+    stopSurface?.(); this.release(previous)
+    this.remember({ sourceId: 'local' }); this.emit()
+  }
   async check(): Promise<void> {
     const state = this.state
     if (!state || state.phase !== 'ready' || this.navigating === this.version) return
@@ -350,7 +375,16 @@ export class WorkspaceController {
       if (!current()) return
       this.checkFailures = 0
       if (view.reportedRevision >= (state.revision ?? 0)) {
-        if (view.error === 'NAVIGATION_FAILED') throw new Error('navigation-failed')
+        if (view.error === 'NAVIGATION_FAILED') {
+          if (this.target?.kind === 'plugins') {
+            // The embedded document shows the missing native capability. Keep
+            // its conversation state alive so another sidebar selection recovers.
+            this.stopPresentationWatch()
+            if (!state.presented) this.publish({ ...state, presented: true })
+            return
+          }
+          throw new Error('navigation-failed')
+        }
         if (view.error === 'SETTINGS_CLOSED') { this.close(); return }
         if (view.error === 'PICK_CANCELLED') {
           if (this.pickFallback && selectionTarget(this.pickFallback)) {
@@ -381,7 +415,7 @@ export class WorkspaceController {
       this.publish({ id: state.id, name: state.name, phase: 'error', error: code === 'INCOMPATIBLE_PROTOCOL' ? 'protocolMismatch' : error instanceof Error && error.message === 'navigation-failed' ? 'failed' : 'disconnected' })
     }
   }
-  dispose(): void { this.stopPresentationWatch(); this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
+  dispose(): void { this.stopSurface?.(); this.stopPresentationWatch(); this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
 }
 
 /** Reload replaces the old lease; a duplicated tab forks the active owner's ID. */

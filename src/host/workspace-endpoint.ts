@@ -1,5 +1,7 @@
+import type { LocalPresentation, SurfaceRequest, SurfaceActionResult } from '../shared/view-surface-protocol.js'
 import { createHash, randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import type { SettingsHostExchange } from '../shared/settings-host-protocol.js'
 import {
   WORKSPACE_CATALOG_PAGE_LIMIT, WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_PROTOCOL, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
   parseWorkspaceCatalogPage, parseWorkspaceRequest, parseWorkspaceResponse, WorkspaceProtocolError,
@@ -61,6 +63,7 @@ interface EndpointOptions {
   ttlMs?: number
   pollMs?: number
   maxChannels?: number
+  nativeVersion?: string
 }
 export interface WorkspaceEndpointHandle {
   handle(input: WorkspaceRequest, signal: AbortSignal): Promise<WorkspaceResponse>
@@ -71,6 +74,10 @@ interface ViewChannel {
   state: WorkspaceViewState
   requests: Map<string, string>
   waiters: Set<{ resolve(): void; reject(error: EndpointError): void }>
+  settingsHosts?: SettingsHostExchange
+  presentation?: LocalPresentation
+  cancelledSurfaceActions: Set<string>
+  surfaceActions: Map<string, { request: SurfaceRequest; status: SurfaceActionResult['status']; expires: number }>
 }
 interface CatalogSnapshot { expires: number; pages: WorkspaceCatalogPage[]; bytes: number }
 const CATALOG_TTL_MS = 2 * 60_000
@@ -151,6 +158,7 @@ export class WorkspaceEndpoint {
   private readonly pollMs: number
   private readonly maxChannels: number
   private readonly embedded: boolean
+  private readonly nativeVersion: string
   private readonly sweeper: ReturnType<typeof setInterval>
 
   constructor(private readonly services: WorkspaceEndpointServices, options: EndpointOptions = {}) {
@@ -159,6 +167,7 @@ export class WorkspaceEndpoint {
     this.pollMs = Math.max(1, Math.min(options.pollMs ?? 20_000, 20_000))
     this.maxChannels = Math.max(1, Math.min(options.maxChannels ?? 32, 32))
     this.embedded = options.embedded ?? true
+    this.nativeVersion = options.nativeVersion ?? 'unknown'
     this.sweeper = setInterval(() => this.expire(), Math.min(this.ttlMs, 60_000))
     this.sweeper.unref()
   }
@@ -214,7 +223,7 @@ export class WorkspaceEndpoint {
   }
 
   private async execute(input: WorkspaceRequest, signal: AbortSignal): Promise<WorkspaceResult> {
-    if (!this.embedded && ['openView', 'navigate', 'pollView', 'reportView', 'viewState', 'closeView'].includes(input.op)) throw new EndpointError('NOT_EMBEDDED')
+    if (!this.embedded && ['openView', 'navigate', 'pollView', 'reportView', 'viewState', 'closeView', 'publishSettingsHosts', 'pollSettingsHosts', 'selectSettingsHost', 'surfaceSnapshot', 'syncSurface', 'requestSurface', 'cancelSurface'].includes(input.op)) throw new EndpointError('NOT_EMBEDDED')
     const { workspaceRegistry, workspaceController, sessionController } = this.services
     switch (input.op) {
       case 'catalog': {
@@ -272,7 +281,7 @@ export class WorkspaceEndpoint {
         }
         if (this.channels.size >= this.maxChannels) throw new EndpointError('CONFLICT')
         const channel = randomBytes(32).toString('base64url')
-        const view: ViewChannel = { clientId: input.clientId, expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set() }
+        const view: ViewChannel = { clientId: input.clientId, expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set(), surfaceActions: new Map(), cancelledSurfaceActions: new Set(), ...(input.presentation ? { presentation: input.presentation } : {}) }
         this.channels.set(channel, view)
         return { channel, ...view.state, protocol: WORKSPACE_PROTOCOL }
       }
@@ -293,6 +302,8 @@ export class WorkspaceEndpoint {
         if (view.requests.size >= 4096) throw new EndpointError('CONFLICT')
         view.requests.set(input.requestId, target)
         const revision = view.state.revision + 1
+        view.settingsHosts = undefined
+        for (const action of view.surfaceActions.values()) if (action.status === 'pending') action.status = 'failed'
         view.state = {
           revision, reportedRevision: view.state.reportedRevision, presentedRevision: view.state.presentedRevision,
           intent: { revision, requestId: input.requestId, target: input.target },
@@ -324,6 +335,65 @@ export class WorkspaceEndpoint {
         return view.state
       }
       case 'viewState': return this.get(input.channel).state
+      case 'surfaceSnapshot': {
+        const view = this.get(input.channel)
+        return { nativeVersion: this.nativeVersion, ...(view.presentation ? { presentation: view.presentation } : {}) }
+      }
+      case 'syncSurface': {
+        const view = this.get(input.channel)
+        view.presentation = input.presentation
+        for (const ack of input.acknowledgements) {
+          const action = view.surfaceActions.get(ack.id)
+          if (action?.status === 'pending') action.status = ack.ok && action.expires > this.now() ? 'done' : 'failed'
+        }
+        const requests: SurfaceRequest[] = []
+        for (const action of view.surfaceActions.values()) {
+          if (action.status !== 'pending') continue
+          if (action.expires <= this.now() || action.request.revision !== view.state.revision) action.status = 'failed'
+          else requests.push(action.request)
+        }
+        return { requests }
+      }
+      case 'requestSurface': {
+        const view = this.get(input.channel)
+        if (input.revision !== view.state.revision || !input.revision) throw new EndpointError('CONFLICT')
+        if (view.cancelledSurfaceActions.has(input.id)) return { status: 'failed' }
+        let action = view.surfaceActions.get(input.id)
+        if (action) {
+          if (JSON.stringify(action.request.action) !== JSON.stringify(input.action) || action.request.revision !== input.revision) throw new EndpointError('CONFLICT')
+          if (action.expires <= this.now() && action.status === 'pending') action.status = 'failed'
+        } else {
+          if (view.surfaceActions.size >= 512 || [...view.surfaceActions.values()].filter(row => row.status === 'pending' && row.expires > this.now()).length >= 8) throw new EndpointError('CONFLICT')
+          action = { request: { id: input.id, revision: input.revision, action: input.action }, status: 'pending', expires: this.now() + 30_000 }
+          view.surfaceActions.set(input.id, action)
+        }
+        return { status: action.status }
+      }
+      case 'cancelSurface': {
+        const view = this.get(input.channel)
+        const action = view.surfaceActions.get(input.id)
+        if (action) action.status = 'failed'
+        else {
+          if (view.cancelledSurfaceActions.size >= 512) throw new EndpointError('CONFLICT')
+          view.cancelledSurfaceActions.add(input.id)
+        }
+        return { done: true }
+      }
+      case 'publishSettingsHosts': case 'pollSettingsHosts': case 'selectSettingsHost': {
+        const view = this.get(input.channel)
+        if (input.revision !== view.state.revision || view.state.intent?.target.kind !== 'settings' || view.state.error !== undefined) throw new EndpointError('CONFLICT')
+        const exchange = view.settingsHosts ?? { revision: input.revision }
+        if (input.op === 'publishSettingsHosts' && exchange.selection === undefined) exchange.snapshot = input.snapshot
+        if (input.op === 'pollSettingsHosts' && exchange.snapshot) exchange.ready = true
+        if (input.op === 'selectSettingsHost') {
+          if (!exchange.ready || !exchange.snapshot?.choices.some(row => row.id === input.id) || input.id === exchange.snapshot.selectedId) throw new EndpointError('BAD_REQUEST')
+          if (exchange.selection !== undefined && exchange.selection !== input.id) throw new EndpointError('CONFLICT')
+          // One host switch consumes the operation. Retries return the same selection.
+          exchange.selection = input.id
+        }
+        view.settingsHosts = exchange
+        return exchange
+      }
     }
   }
 
@@ -406,11 +476,11 @@ function json(body: string, status: number): Response {
 }
 
 /** Native exact Fetch routes admit only owner Peers, on Web and Desktop carriers. */
-export function installWorkspaceEndpoint(ctx: Context, options: { embedded?: boolean } = {}): WorkspaceEndpointHandle {
+export function installWorkspaceEndpoint(ctx: Context, options: { embedded?: boolean; nativeVersion?: string } = {}): WorkspaceEndpointHandle {
   let active: WorkspaceEndpoint | undefined
   ctx.inject(['connection', 'workspaceRegistry', 'workspaceController', 'sessionController'], child => {
     const services = child as unknown as EndpointContext
-    const endpoint = new WorkspaceEndpoint(services, { embedded: options.embedded === true })
+    const endpoint = new WorkspaceEndpoint(services, { embedded: options.embedded === true, nativeVersion: options.nativeVersion })
     child.effect(() => {
       const unregister = services.connection.fetch.register({ path: WORKSPACE_ENDPOINT, methods: ['POST'], requestBody: 'buffered', fetch: endpoint.fetch })
       active = endpoint

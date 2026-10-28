@@ -1,10 +1,14 @@
+import { parseLocalPresentation, parseLoginAction, parseSurfaceSnapshot, parseSurfaceActionResult, type LocalPresentation, type LoginAction, type SurfaceSnapshot, type SurfaceActionResult, type SurfaceRequest, type SurfaceAck } from './view-surface-protocol.js'
+import { parseSettingsHostExchange, parseSettingsHostId, parseSettingsHostSnapshot, type SettingsHostExchange, type SettingsHostSnapshot } from './settings-host-protocol.js'
+
 /** Small owner-only catalog and navigation seam; conversation data stays in Harness. */
 export const WORKSPACE_ROUTE = '/connections/workspaces'
 export const WORKSPACE_ENDPOINT = `/api${WORKSPACE_ROUTE}`
-export const WORKSPACE_REQUEST_LIMIT = 16 * 1024
+/** Includes at most 101 settings menu entries; other request shapes retain their field limits. */
+export const WORKSPACE_REQUEST_LIMIT = 128 * 1024
 export const WORKSPACE_RESPONSE_LIMIT = 4 * 1024 * 1024
-/** v2 requires presentation acknowledgements, renewable view leases and settings navigation. */
-export const WORKSPACE_PROTOCOL = 2
+/** v3 adds parent-owned presentation and acknowledged login browser capabilities. */
+export const WORKSPACE_PROTOCOL = 3
 /** Pages stay well below the transport limit, including deeply populated workspaces. */
 export const WORKSPACE_CATALOG_PAGE_LIMIT = 256 * 1024
 
@@ -40,7 +44,7 @@ export interface WorkspaceCatalogPage extends WorkspaceCatalog {
 export type WorkspaceNavigationTarget =
   | { kind: 'session' | 'workspace'; id: string }
   | { kind: 'newSession'; id?: string }
-  | { kind: 'pick' | 'settings' }
+  | { kind: 'pick' | 'settings' | 'plugins' }
 export interface WorkspaceViewIntent {
   revision: number
   requestId: string
@@ -65,11 +69,18 @@ export type WorkspaceRequest =
   | { op: 'renameSession'; id: string; title: string }
   | { op: 'archiveSession'; id: string; archived: boolean }
   | { op: 'pinSession'; id: string; pinned: boolean }
-  | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string }
+  | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string; presentation?: LocalPresentation }
   | { op: 'navigate'; channel: string; requestId: string; target: WorkspaceNavigationTarget }
   | { op: 'pollView'; channel: string; afterRevision: number }
   | { op: 'reportView'; channel: string; revision: number; presented?: true; sessionId?: string; error?: WorkspaceNavigationError }
   | { op: 'viewState'; channel: string }
+  | { op: 'publishSettingsHosts'; channel: string; revision: number; snapshot: SettingsHostSnapshot }
+  | { op: 'pollSettingsHosts'; channel: string; revision: number }
+  | { op: 'selectSettingsHost'; channel: string; revision: number; id: string }
+  | { op: 'surfaceSnapshot'; channel: string }
+  | { op: 'syncSurface'; channel: string; presentation: LocalPresentation; acknowledgements: SurfaceAck[] }
+  | { op: 'requestSurface'; channel: string; revision: number; id: string; action: LoginAction }
+  | { op: 'cancelSurface'; channel: string; id: string }
   | { op: 'closeView'; channel: string }
 
 export interface WorkspaceResultMap {
@@ -84,6 +95,13 @@ export interface WorkspaceResultMap {
   pollView: WorkspaceViewState
   reportView: WorkspaceViewState
   viewState: WorkspaceViewState
+  publishSettingsHosts: SettingsHostExchange
+  pollSettingsHosts: SettingsHostExchange
+  selectSettingsHost: SettingsHostExchange
+  surfaceSnapshot: SurfaceSnapshot
+  syncSurface: { requests: SurfaceRequest[] }
+  requestSurface: SurfaceActionResult
+  cancelSurface: { done: true }
   closeView: { closed: true }
 }
 export type WorkspaceOperation = WorkspaceRequest['op']
@@ -91,6 +109,8 @@ export type WorkspaceResult = WorkspaceResultMap[WorkspaceOperation]
 const operations: readonly WorkspaceOperation[] = [
   'catalog', 'renameWorkspace', 'forgetWorkspace',
   'renameSession', 'archiveSession', 'pinSession', 'openView', 'navigate', 'pollView', 'reportView', 'viewState', 'closeView',
+  'publishSettingsHosts', 'pollSettingsHosts', 'selectSettingsHost',
+  'surfaceSnapshot', 'syncSurface', 'requestSurface', 'cancelSurface',
 ]
 export function parseWorkspaceOperation(value: unknown): WorkspaceOperation {
   if (typeof value !== 'string' || !operations.includes(value as WorkspaceOperation)) throw new TypeError('The workspace request is invalid.')
@@ -172,7 +192,7 @@ function navigationError(value: unknown): WorkspaceNavigationError {
 }
 export function parseWorkspaceTarget(value: unknown): WorkspaceNavigationTarget {
   const target = object(value)
-  if (target.kind === 'pick' || target.kind === 'settings') { keys(target, ['kind']); return { kind: target.kind } }
+  if (target.kind === 'pick' || target.kind === 'settings' || target.kind === 'plugins') { keys(target, ['kind']); return { kind: target.kind } }
   if (target.kind === 'newSession') {
     keys(target, ['kind', 'id'])
     return { kind: 'newSession', ...(target.id === undefined ? {} : { id: parseWorkspaceId(target.id) }) }
@@ -195,8 +215,8 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
         ...(input.cursor === undefined ? {} : { cursor: catalogCursor(input.cursor) }),
       }
     case 'openView':
-      keys(input, ['op', 'protocol', 'clientId'])
-      return { op, protocol: protocol(input.protocol), clientId: parseWorkspaceId(input.clientId) }
+      keys(input, ['op', 'protocol', 'clientId', 'presentation'])
+      return { op, protocol: protocol(input.protocol), clientId: parseWorkspaceId(input.clientId), ...(input.presentation === undefined ? {} : { presentation: parseLocalPresentation(input.presentation) }) }
     case 'renameWorkspace': case 'renameSession':
       keys(input, ['op', 'id', 'title'])
       return { op, id: parseWorkspaceId(input.id), title: text(input.title, 512).trim() }
@@ -221,7 +241,26 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
         ...(input.sessionId === undefined ? {} : { sessionId: parseWorkspaceId(input.sessionId) }),
         ...(input.error === undefined ? {} : { error: navigationError(input.error) }),
       }
-    case 'viewState': case 'closeView': keys(input, ['op', 'channel']); return { op, channel: parseWorkspaceChannel(input.channel) }
+    case 'syncSurface': {
+      keys(input, ['op', 'channel', 'presentation', 'acknowledgements'])
+      if (!Array.isArray(input.acknowledgements) || input.acknowledgements.length > 8) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+      return { op, channel: parseWorkspaceChannel(input.channel), presentation: parseLocalPresentation(input.presentation), acknowledgements: input.acknowledgements.map(value => { const ack = object(value); keys(ack, ['id', 'ok']); return { id: parseWorkspaceId(ack.id), ok: boolean(ack.ok) } }) }
+    }
+    case 'requestSurface':
+      keys(input, ['op', 'channel', 'revision', 'id', 'action'])
+      return { op, channel: parseWorkspaceChannel(input.channel), revision: revision(input.revision), id: parseWorkspaceId(input.id), action: parseLoginAction(input.action) }
+    case 'cancelSurface':
+      keys(input, ['op', 'channel', 'id']); return { op, channel: parseWorkspaceChannel(input.channel), id: parseWorkspaceId(input.id) }
+    case 'surfaceSnapshot': case 'viewState': case 'closeView': keys(input, ['op', 'channel']); return { op, channel: parseWorkspaceChannel(input.channel) }
+    case 'publishSettingsHosts':
+      keys(input, ['op', 'channel', 'revision', 'snapshot'])
+      return { op, channel: parseWorkspaceChannel(input.channel), revision: revision(input.revision), snapshot: parseSettingsHostSnapshot(input.snapshot) }
+    case 'pollSettingsHosts':
+      keys(input, ['op', 'channel', 'revision'])
+      return { op, channel: parseWorkspaceChannel(input.channel), revision: revision(input.revision) }
+    case 'selectSettingsHost':
+      keys(input, ['op', 'channel', 'revision', 'id'])
+      return { op, channel: parseWorkspaceChannel(input.channel), revision: revision(input.revision), id: parseSettingsHostId(input.id) }
     default: throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
   }
 }
@@ -300,7 +339,7 @@ export function parseWorkspaceResponse<Op extends WorkspaceOperation>(op: Op, va
   let parsed: WorkspaceResult
   switch (op) {
     case 'catalog': parsed = parseWorkspaceCatalogPage(result); break
-    case 'renameWorkspace': case 'forgetWorkspace': case 'renameSession': case 'archiveSession': case 'pinSession':
+    case 'cancelSurface': case 'renameWorkspace': case 'forgetWorkspace': case 'renameSession': case 'archiveSession': case 'pinSession':
       if (result.done !== true) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
       parsed = { done: true }; break
     case 'openView': {
@@ -308,6 +347,12 @@ export function parseWorkspaceResponse<Op extends WorkspaceOperation>(op: Op, va
       parsed = { ...parseWorkspaceViewState(result), channel: parseWorkspaceChannel(result.channel), protocol: version }; break
     }
     case 'navigate': case 'pollView': case 'reportView': case 'viewState': parsed = parseWorkspaceViewState(result); break
+    case 'publishSettingsHosts': case 'pollSettingsHosts': case 'selectSettingsHost': parsed = parseSettingsHostExchange(result); break
+    case 'surfaceSnapshot': parsed = parseSurfaceSnapshot(result); break
+    case 'requestSurface': parsed = parseSurfaceActionResult(result); break
+    case 'syncSurface':
+      if (!Array.isArray(result.requests) || result.requests.length > 8) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+      parsed = { requests: result.requests.map(value => { const request = object(value); return { id: parseWorkspaceId(request.id), revision: revision(request.revision), action: parseLoginAction(request.action) } }) }; break
     case 'closeView':
       if (result.closed !== true) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
       parsed = { closed: true }; break

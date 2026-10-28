@@ -10,6 +10,7 @@ import * as React from 'react'
 import * as jsx from 'react/jsx-runtime'
 import { renderToStaticMarkup } from 'react-dom/server'
 import * as connectionMessages from '../src/client/messages.js'
+import { settingsShell } from '../src/client/native-settings.js'
 import { transformSync } from 'esbuild'
 import type { SidebarRootInjected } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client'
@@ -100,6 +101,10 @@ function fixture(tracked = false) {
     subscribe: () => () => {},
   } as never)
   ctx.provide('shortcuts', { catalog: stores.createSnapshotStore([]) } as never)
+  ctx.provide('configForms', {
+    get: () => stores.createSnapshotStore({ value: undefined }),
+    developerTools: { enabled: stores.createSnapshotStore(false) },
+  } as never)
   return {
     ctx, core, native, dictionaries, slotService,
     async dispose() { await ctx.fiber.dispose(); removeRoot() },
@@ -325,6 +330,9 @@ test('root RPC setup failure preserves native navigation and a visible settings 
     './Panel.js': { Panel: () => null }, './messages.js': connectionMessages,
     './workspaces.js': { installWorkspaces() { workspaceInstalled = true; throw new Error('must not install after RPC failure') } },
     './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings() {} },
+    './native-shortcuts.js': { installNativeShortcuts() {} },
+    './workspace-shortcuts.js': { remoteSettingsCommand() {} },
+    './native-settings.js': { settingsShell },
   }
   runInNewContext(compiled, { module: root, exports: root.exports, setTimeout, clearTimeout, require(id: string) {
     assert.ok(id in imports, `unexpected root dependency ${id}`)
@@ -370,6 +378,9 @@ test('missing remote service leaves Settings loading only until the deadline and
     './Panel.js': { Panel: () => React.createElement('p', null, 'Ready connections') }, './messages.js': connectionMessages,
     './workspaces.js': { installWorkspaces: () => ({ newSession() {}, open() {} }) },
     './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings() {} },
+    './native-shortcuts.js': { installNativeShortcuts() {} },
+    './workspace-shortcuts.js': { remoteSettingsCommand() {} },
+    './native-settings.js': { settingsShell },
   }
   runInNewContext(compiled, {
     module: root, exports: root.exports,

@@ -241,7 +241,7 @@ test('an unexpected master exit notifies once and does not silently reconnect', 
   } finally { await f.dispose() }
 })
 
-test('real OpenSSH preserves remote HTTP and clears configured forwards', { skip: process.env.DSH_CONNECTIONS_TEST_SSHD !== '1', timeout: 15_000 }, async () => {
+for (const transport of ['control', 'stdio'] as const) test(`real OpenSSH ${transport} preserves remote HTTP and clears configured forwards`, { skip: process.env.DSH_CONNECTIONS_TEST_SSHD !== '1', timeout: 15_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-sshd-test-'))
   const server = createHttpServer((_, response) => response.end('native-harness-fixture'))
   const occupied = createServer((socket) => socket.end('must remain owned by this test'))
@@ -281,6 +281,8 @@ test('real OpenSSH preserves remote HTTP and clears configured forwards', { skip
       'Host fixture', ' HostName 127.0.0.1', ` Port ${sshPort}`, ` User ${userInfo().username}`,
       ` IdentityFile ${clientKey}`, ' IdentitiesOnly yes', ` UserKnownHostsFile ${knownHosts}`,
       ' GlobalKnownHostsFile /dev/null',
+      // Request-bearing stdio forwards must override this user preference.
+      ' StdinNull yes',
       // This bind would fail and abort the master if ClearAllForwardings did not work.
       ` LocalForward 127.0.0.1:${portOf(occupied)} 127.0.0.1:${portOf(server)}`,
     ].join('\n') + '\n', { mode: 0o600 })
@@ -297,8 +299,16 @@ test('real OpenSSH preserves remote HTTP and clears configured forwards', { skip
       if (ready) break
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
-    const options = { configFile: clientConfig, startupTimeoutMs: 3_000 }
-    await assert.rejects(connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options), { code: 'SSH_HOST_KEY' })
+    const options = { configFile: clientConfig, startupTimeoutMs: 3_000, transport }
+    if (transport === 'control') {
+      await assert.rejects(connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options), { code: 'SSH_HOST_KEY' })
+    } else {
+      const untrusted = await connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options)
+      const failure = new Promise<Error | undefined>(resolve => untrusted.onClose(resolve))
+      await assert.rejects(fetch(`http://127.0.0.1:${untrusted.port}`))
+      assert.equal((await failure as SshTunnelError).code, 'SSH_HOST_KEY')
+      await untrusted.close()
+    }
     const publicKey = (await readFile(`${hostKey}.pub`, 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ')
     await writeFile(knownHosts, `[127.0.0.1]:${sshPort} ${publicKey}\n`, { mode: 0o600 })
     tunnel = await connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options)

@@ -9,7 +9,7 @@ import { ConnectionForm } from './ConnectionForm.js'
 import { isWorkspaceSurface } from './workspace-surface.js'
 export const isLocalPage = isWorkspaceSurface
 
-export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen: (id: string) => Promise<void>; local?: boolean }) {
+export function Panel({ api, t, onOpen, onManagePlugins, local = isLocalPage(window.location) }: { api: ConnectionsApi; t: Translate; onOpen: (id: string) => Promise<void>; onManagePlugins?: (id: string) => Promise<void>; local?: boolean }) {
   const [rows, setRows] = useState<ConnectionView[]>()
   const [error, setError] = useState('')
   const [draft, setDraft] = useState<SaveConnection>()
@@ -58,7 +58,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     })
     if (alive.current) setSaving(false)
   }
-  const prepareOpen = async (row: ConnectionView) => {
+  const prepareOpen = async (row: ConnectionView, open = onOpen) => {
     const version = (openVersions.current.get(row.id) ?? 0) + 1
     openVersions.current.set(row.id, version)
     const current = () => {
@@ -67,7 +67,7 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
     }
     setOpening(row.id); setError('')
     try {
-      await onOpen(row.id)
+      await open(row.id)
     } catch (e) { if (current()) setError(e instanceof Error ? e.message : t('failed')) }
     finally { if (alive.current) setOpening(value => value === row.id ? undefined : value) }
   }
@@ -87,7 +87,10 @@ export function Panel({ api, t, onOpen, local = isLocalPage(window.location) }: 
             </> : row.phase === 'updating' ? <button disabled>{t('updating')}</button> : row.phase === 'connecting' ? <button onClick={() => { invalidateOpen(row.id); void run(() => api.disconnect(row.id)) }}>{t('cancel')}</button> : <button disabled={!local} onClick={() => { invalidateOpen(row.id); setRows(current => current?.map(item => item.id === row.id ? { ...item, phase: 'connecting', error: undefined } : item)); void run(() => api.connect(row.id)) }}>{t(row.phase === 'error' ? 'reconnect' : 'connect')}</button>}
             <details className="dc-menu" onKeyDown={e => { if (e.key === 'Escape') { e.currentTarget.open = false; e.currentTarget.querySelector('summary')?.focus() } }}>
               <summary aria-label={`${t('actions')}: ${row.name}`}>···</summary>
-              <div className="dc-menu-popover"><button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setDraft({ id: row.id, name: row.name, target: row.target, mode: row.mode, autoConnect: row.autoConnect }); setError('') }}>{t('edit')}</button>{row.mode === 'managed' && <button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setUpdating({ id: row.id, version: '' }); setError('') }}>{t('updateRemote')}</button>}<button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setRemoving(row.id) }}>{t('remove')}</button></div>
+              <div className="dc-menu-popover">
+                {onManagePlugins && <button disabled={!local || row.phase !== 'connected' || opening === row.id} onClick={e => { e.currentTarget.closest('details')!.open = false; void prepareOpen(row, onManagePlugins) }}>{t('managePlugins')}</button>}
+                <button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setDraft({ id: row.id, name: row.name, target: row.target, mode: row.mode, autoConnect: row.autoConnect }); setError('') }}>{t('edit')}</button>{row.mode === 'managed' && <button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setUpdating({ id: row.id, version: '' }); setError('') }}>{t('updateRemote')}</button>}<button disabled={row.phase === 'updating'} onClick={e => { e.currentTarget.closest('details')!.open = false; setRemoving(row.id) }}>{t('remove')}</button>
+              </div>
             </details>
           </div>
         </div>

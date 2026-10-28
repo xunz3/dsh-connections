@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { start, snapshot } from './workspaces-helpers.js'
 
-// This fixture exercises the guest adapter directly; production desktop opening is disabled.
+// Guest lifecycle contract; real Electron acceptance is run separately.
 test('desktop view delegates sign-in popups to the shell and releases its isolated guest', async ({ page }) => {
   await start(page, '?desktop')
   const guest = page.locator('webview')

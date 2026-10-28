@@ -11,14 +11,33 @@ import { installWorkspaces } from './workspaces.js'
 import { applyEmbedded } from './embedded.js'
 import { installHostSettings } from './host-settings.js'
 import { installNativeSidebar } from './native-shell-routing.js'
+import { installNativeShortcuts, type NativeCommandResolver } from './native-shortcuts.js'
+import { remoteSettingsCommand } from './workspace-shortcuts.js'
+import { settingsShell } from './native-settings.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' { interface LocaleNamespaceMap { connections: CopyKey } }
-export const inject = ['slots', 'locale', 'theme']
+export const inject = ['locale']
 export function apply(ctx: Context) {
   if ((globalThis as typeof globalThis & { __DSH_CONNECTIONS_EMBEDDED__?: boolean }).__DSH_CONNECTIONS_EMBEDDED__ === true) {
-    applyEmbedded(ctx)
+    installNativeShortcuts(ctx, () => undefined)
+    ctx.inject(['slots', 'theme'], scope => applyEmbedded(scope))
     return
   }
+  let commands: NativeCommandResolver | undefined
+  let remoteSettings: ReturnType<typeof installHostSettings> | undefined
+  installNativeShortcuts(ctx, (command, context) => remoteSettings?.getSnapshot()
+    ? remoteSettingsCommand(command, context, () => remoteSettings?.close())
+    : commands?.(command, context))
+  ctx.inject(['slots', 'theme', 'configForms'], scope => installShell(scope, {
+    setCommands: resolver => { commands = resolver; return () => { if (commands === resolver) commands = undefined } },
+    setSettings: value => { remoteSettings = value; return () => { if (remoteSettings === value) remoteSettings = undefined } },
+  }))
+}
+
+function installShell(ctx: Context, routing: {
+  setCommands(resolver: NativeCommandResolver): () => void
+  setSettings(value: ReturnType<typeof installHostSettings>): () => void
+}) {
   // Mount the native shell independently of the RPC/data plane. A failed
   // connection service must never remove navigation or access to Settings.
   let startRemote: ((id?: string) => void) | undefined
@@ -51,10 +70,14 @@ export function apply(ctx: Context) {
       await mountRpc(data)
       const connection = data.inject(['remote.connections'], connection => {
         const api = createApi(connection)
-        const workspaces = installWorkspaces(connection, api, t, () => routed)
-        installHostSettings(connection, api)
+        const workspaces = installWorkspaces(connection, api, t, () => routed, routing.setCommands)
+        const hostSettings = installHostSettings(connection, api)
+        connection.effect(() => routing.setSettings(hostSettings))
         const route = (id?: string) => { void workspaces.newSession(id) }
-        const ReadyPanel = () => <Panel api={api} t={t} onOpen={id => workspaces.open(id)} />
+        const ReadyPanel = () => <Panel api={api} t={t} onOpen={id => workspaces.open(id)} onManagePlugins={id => {
+          settingsShell(connection)?.actions.close()
+          return workspaces.open(id, { kind: 'plugins' })
+        }} />
         startRemote = route
         settings.set({ panel: ReadyPanel, failed: false })
         connection.effect(() => () => {

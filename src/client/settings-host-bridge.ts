@@ -1,15 +1,7 @@
-import { parseId } from '../shared/validation.js'
 import { parseWorkspaceChannel } from '../shared/workspace-protocol.js'
+import { parseSettingsHostSnapshot, type SettingsHostSnapshot } from '../shared/settings-host-protocol.js'
+export type { SettingsHostChoice, SettingsHostSnapshot } from '../shared/settings-host-protocol.js'
 
-export interface SettingsHostChoice {
-  id: string
-  name: string
-  phase: 'connected' | 'connecting' | 'disconnected' | 'error' | 'updating'
-}
-export interface SettingsHostSnapshot {
-  choices: readonly SettingsHostChoice[]
-  selectedId: string
-}
 export interface SettingsHostClient {
   getSnapshot(): SettingsHostSnapshot | undefined
   subscribe(listener: () => void): () => void
@@ -19,7 +11,6 @@ export interface SettingsHostClient {
 
 const BRIDGE = '@xunz/dsh-connections/settings-host'
 const VERSION = 1
-const phases = new Set(['connected', 'connecting', 'disconnected', 'error', 'updating'])
 type Hello = { bridge: typeof BRIDGE; version: typeof VERSION; channel: string; nonce: string; type: 'hello' | 'offer' | 'reset' }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -27,9 +18,6 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 function exact(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(value).every(key => keys.includes(key))
-}
-function hostId(value: unknown): string {
-  return value === 'local' ? 'local' : parseId(value)
 }
 function message(value: unknown, channel: string): Hello | undefined {
   const input = record(value)
@@ -40,23 +28,7 @@ function message(value: unknown, channel: string): Hello | undefined {
 }
 /** Project only menu metadata. Extra connection fields never cross the document boundary. */
 function snapshot(value: unknown): SettingsHostSnapshot | undefined {
-  try {
-    const input = record(value)
-    if (!input || !Array.isArray(input.choices) || input.choices.length > 101) return
-    const ids = new Set<string>()
-    const choices = input.choices.map(value => {
-      const row = record(value)
-      if (!row || typeof row.name !== 'string' || row.name.length > 200 || /[\x00-\x1f\x7f]/.test(row.name)
-        || !phases.has(String(row.phase))) throw new TypeError('Invalid settings host choice')
-      const id = hostId(row.id)
-      if (ids.has(id)) throw new TypeError('Duplicate settings host choice')
-      ids.add(id)
-      return { id, name: row.name, phase: row.phase as SettingsHostChoice['phase'] }
-    })
-    const selectedId = hostId(input.selectedId)
-    if (!ids.has('local') || !ids.has(selectedId)) return
-    return { choices, selectedId }
-  } catch { return }
+  try { return parseSettingsHostSnapshot(value) } catch { return }
 }
 function closeTransferred(event: MessageEvent): void { for (const port of event.ports) port.close() }
 function httpOrigin(value: string): boolean {

@@ -1,13 +1,59 @@
 # Harness compatibility
 
 Reviewed against the published rc.2 and rc.3 packages on 2026-10-28. Connections
-0.1.3 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+0.1.4 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
 
 Connections 0.1.3 separates workspace presentation and interaction state using
 MVVM, aligns its list with native icons and spacing, and fixes catalog snapshot
 and asynchronous action handling. It retains the 0.1.2 stylesheet ownership fix.
 See [workspace list responsibilities](unified-workspaces.md#workspace-list-responsibilities).
+
+## Desktop remote content and commands
+
+Connections 0.1.4 uses the native Desktop guest lease API for remote workspaces
+and Settings. The pinned native `ShortcutsService` is composed unchanged except
+for its public command resolver: source ownership is resolved before a retained
+local action can run. Native code continues to own keybindings, conflicts,
+revisions, repeat handling, keyboard/menu dispatch and disposal. The native Host
+configuration schema is reused too. The command guard lives with the view
+controller, independent of sidebar component mounting.
+
+New Session, search, add workspace and Close route to the selected surface.
+Commands without a safe remote delegation show guidance to use remote controls;
+they do not operate on the local session behind the remote view. A future public
+command-resolver hook would let Connections drop this service composition.
+
+The remote bundle additionally composes the released native settings and account
+factories. The settings adapter extends the public ConfigForms accessor for an
+explicit set of local UI preferences; native remote schemas and write queues
+remain intact. Account composition adapts browser opening/copying and stylesheet
+ownership while retaining native authorization logic. The build verifies the
+exact package versions and constructor/capability sites before composing them.
+The currently supported rc.2/rc.3 factory implementations are deduplicated only
+after a source comparison that permits the native account release label to
+differ. A changed implementation must be reviewed separately rather than
+silently inheriting this compatibility claim.
+
+### Updating an open rc.3 Desktop
+
+Hot replacement of the shortcut provider can leave an already open rc.3
+frontend blank. This was reproduced in Windows Desktop: the native module
+loader's `ClientEntries.replace` tears down the old provider before activating
+its replacement, temporarily removing the dependent layout's `root` slot.
+The native renderer's `RootOutlet` throws `SlotAssemblyError` for that gap; its
+error boundary rethrows assembly errors, so restored services do not remount the
+React tree. These behaviors are present in the published rc.3
+`@deepseek-ai/dsh-client-modules` and `@deepseek-ai/dsh-client-ui-renderer`
+client bundles. Fresh startup and remote navigation are unaffected by this
+specific replacement failure.
+
+Save any unsent drafts before updating the bundle in an open Desktop. If the
+frontend becomes blank, reload the Desktop frontend after installation finishes;
+the local and remote Hosts do not need restarting. Connections does not reload
+automatically or take ownership of the native React root. A lasting upstream fix
+needs a renderer boundary that survives service replacement, or the public
+command-resolver hook described above.
 
 ## Desktop sidebar stylesheet ownership
 

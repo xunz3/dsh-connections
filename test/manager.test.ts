@@ -28,7 +28,7 @@ function credentials() {
 function fakeTunnel(port = 41380) {
   const listeners = new Set<(error?: Error) => void>()
   let closed = false
-  const tunnel: Tunnel & { closes: number; drop(): void } = {
+  const tunnel: Tunnel & { closes: number; drop(error?: Error): void } = {
     port, closes: 0,
     async close() {
       if (closed) return
@@ -37,7 +37,7 @@ function fakeTunnel(port = 41380) {
       for (const listener of [...listeners]) listener()
     },
     onClose(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
-    drop() { closed = true; for (const listener of [...listeners]) listener(new Error('transport detail')) },
+    drop(error = new Error('transport detail')) { closed = true; for (const listener of [...listeners]) listener(error) },
   }
   return tunnel
 }
@@ -311,6 +311,25 @@ test('SSH failure codes retain useful guidance without forwarding raw process di
   await assert.rejects(manager.connect(saved.id), error => error instanceof Error && /host identity/.test(error.message) && !error.message.includes(TOKEN))
   assert.equal(JSON.stringify(await manager.list()).includes(TOKEN), false)
   await manager.dispose()
+})
+
+test('SSH authentication failure during the first HTTP request remains actionable', async () => {
+  const tunnel = fakeTunnel()
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    connectTunnel: async () => tunnel,
+    probe: async () => {
+      tunnel.drop(new SshTunnelError('SSH_AUTH', `private SSH diagnostic ${TOKEN}`))
+      throw new Error('HTTP stream closed')
+    },
+  })
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+    await assert.rejects(manager.connect(saved.id), /SSH authentication failed/)
+    const [row] = await manager.list()
+    assert.equal(row?.phase, 'error')
+    assert.match(row?.error ?? '', /SSH authentication failed/)
+    assert.equal(JSON.stringify(row).includes(TOKEN), false)
+  } finally { await manager.dispose() }
 })
 
 test('metadata edits preserve access while destination changes, deleting and unloading stop owned tunnels', async () => {

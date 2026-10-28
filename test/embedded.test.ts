@@ -33,9 +33,9 @@ async function until(predicate: () => boolean) {
   assert.equal(predicate(), true, 'expected the asynchronous state transition to settle')
 }
 
-function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter) {
+function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter, plugins = true) {
   const selection = createSnapshotStore<{ key: string | undefined }>({ key: 'previous' })
-  const layout = new EmbeddedLayoutController(() => true)
+  const layout = new EmbeddedLayoutController(id => id !== 'plugins' || plugins)
   const opened: string[] = []
   const created: string[] = []
   const started: Array<string | undefined> = []
@@ -378,4 +378,43 @@ test('settings report presentation without changing session and only report a na
   await until(() => f.finalReports.length === 2)
   assert.equal(f.finalReports[1].error, 'SETTINGS_CLOSED')
   assert.equal(f.finalReports[1].sessionId, undefined)
+})
+
+test('native plugins navigation preserves conversation selection and reports only genuine returns to chat', async t => {
+  for (const restoring of [false, true]) await t.test(restoring ? 'reload acknowledged panel' : 'new navigation', async t => {
+    const initial = intent(1, { kind: 'plugins' })
+    const f = fixture(restoring ? { ...initial, reportedRevision: 1, presentedRevision: 1 } : initial)
+    t.after(() => f.controller.dispose())
+    const selection = f.selection.getSnapshot()
+    f.controller.start()
+    await until(() => f.finalReports.length > 0)
+    assert.equal(f.context.layout.panelInfo.getSnapshot().activePanelId, 'plugins')
+    assert.equal(f.selection.getSnapshot(), selection)
+    assert.deepEqual(f.opened, [])
+    assert.deepEqual(f.started, [])
+    assert.deepEqual(f.created, [])
+    assert.deepEqual(f.finalReports[0], { op: 'reportView', channel, revision: 1 })
+    f.selection.set({ key: 'plugin-created-chat' })
+    await until(() => f.finalReports.length === 2)
+    assert.equal(f.finalReports[1].sessionId, undefined, 'the retained selection is not the Plugins destination')
+    f.context.layout.selectPanel(null)
+    await until(() => f.finalReports.at(-1)?.sessionId === 'plugin-created-chat')
+  })
+})
+
+test('missing native plugin manager is explicit and leaves conversation state available for navigation', async t => {
+  const f = fixture(intent(1, { kind: 'plugins' }), undefined, false)
+  t.after(() => f.controller.dispose())
+  const selection = f.selection.getSnapshot()
+  f.controller.start()
+  await until(() => f.finalReports.length === 1)
+  assert.equal(f.finalReports[0].error, 'NAVIGATION_FAILED')
+  assert.equal(f.controller.state.getSnapshot().message, 'pluginsUnavailable')
+  assert.equal(f.selection.getSnapshot(), selection)
+  assert.deepEqual(f.opened, [])
+  f.push(intent(2, { kind: 'session', id: 'previous' }))
+  await until(() => f.finalReports.at(-1)?.revision === 2)
+  assert.equal(f.finalReports.at(-1)?.error, undefined)
+  assert.equal(f.finalReports.at(-1)?.sessionId, 'previous')
+  assert.equal(f.controller.state.getSnapshot().message, undefined)
 })

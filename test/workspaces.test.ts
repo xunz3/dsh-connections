@@ -81,6 +81,33 @@ test('native navigation is scoped by connection and persists only IDs, never vie
   controller.dispose()
 })
 
+test('closing a view aborts its local surface even when remote lease cleanup fails', async t => {
+  const f = fixture(), respond = f.respond, entered = deferred<void>(), completing = deferred<void>()
+  let operationSignal: AbortSignal | undefined
+  f.respond = async (id, request) => {
+    if (request.op === 'syncSurface') return { requests: [{ id: 'login-request', revision: 1, action: { kind: 'copyLogin', url: 'https://example.com/login' } }] }
+    if (request.op === 'requestSurface') return { status: 'pending' }
+    if (request.op === 'closeView') throw new Error('Transport temporarily unavailable')
+    return respond(id, request)
+  }
+  const controller = new WorkspaceController(f.api, { catalogs: false, surface: {
+    getPresentation: () => ({ locale: 'en', tokens: {}, theme: {
+      preference: 'light', fontSize: 14, codeFontSize: 11, terminalFontSize: 13,
+      textFontFamily: '', codeFontFamily: '', terminalFontFamily: '',
+    }, general: { transcriptView: 'standard', collapseTiming: 'completion', performanceUsage: 'detailed', linkOpening: 'sidebar', busyEnter: 'queue', developerTools: false } }),
+    async perform(_action, signal) { operationSignal = signal; entered.resolve(); await completing.promise },
+  } })
+  t.after(() => { completing.resolve(); controller.dispose() })
+  await controller.open(first, { kind: 'settings' })
+  await entered.promise
+  assert.equal(operationSignal?.aborted, false)
+  controller.close()
+  assert.equal(operationSignal?.aborted, true, 'local capabilities are revoked synchronously without waiting for remote cleanup')
+  completing.resolve()
+  await nextTick()
+  assert.equal(f.calls.filter(call => call.request.op === 'syncSurface').length, 1, 'the closed lease is not kept alive by presentation polling')
+})
+
 test('same-host navigation reuses the content document while equal IDs on another host use a new view', async () => {
   const f = fixture(), controller = new WorkspaceController(f.api)
   f.rows.push({ ...f.rows[0], id: second, target: 'second' })
@@ -91,6 +118,47 @@ test('same-host navigation reuses the content document while equal IDs on anothe
   assert.equal(controller.getCatalogs().selected.sourceId, second); assert.equal(f.channels, 2); assert.equal(f.views.size, 1)
   assert.deepEqual(f.calls.filter(call => call.request.op === 'navigate').map(call => call.id), [first, first, second])
   controller.dispose()
+})
+
+test('native plugin management reuses its host document and preserves the selected conversation', async t => {
+  const f = fixture(), controller = new WorkspaceController(f.api, { catalogs: false })
+  t.after(() => controller.dispose())
+  await controller.open(first, { kind: 'session', id: 'chat' })
+  const { channel, url } = controller.getSnapshot()!
+  const selection = controller.getCatalogs().selected
+  await controller.open(first, { kind: 'plugins' })
+  assert.equal(controller.getSnapshot()!.channel, channel)
+  assert.equal(controller.getSnapshot()!.url, url)
+  assert.equal(controller.getCatalogs().selected, selection)
+  assert.equal(f.channels, 1)
+  assert.equal(f.opens, 1)
+  const pending = f.views.get(channel!)!
+  f.views.set(channel!, { ...pending, reportedRevision: pending.revision, presentedRevision: pending.revision })
+  await controller.check()
+  assert.equal(controller.getSnapshot()?.presented, true)
+  assert.equal(controller.getCatalogs().selected, selection)
+  await controller.reconnect(first)
+  const navigation = f.calls.filter(call => call.request.op === 'navigate').at(-1)?.request
+  assert.equal(navigation?.op, 'navigate')
+  assert.deepEqual(navigation?.target, { kind: 'plugins' })
+})
+
+test('missing native plugin management retains the guest and allows same-document recovery', async t => {
+  const f = fixture(), controller = new WorkspaceController(f.api, { catalogs: false })
+  t.after(() => controller.dispose())
+  await controller.open(first, { kind: 'session', id: 'chat' })
+  const { channel, url } = controller.getSnapshot()!
+  await controller.open(first, { kind: 'plugins' })
+  const pending = f.views.get(channel!)!
+  f.views.set(channel!, { ...pending, reportedRevision: pending.revision, presentedRevision: pending.revision, error: 'NAVIGATION_FAILED' })
+  await controller.check()
+  assert.equal(controller.getSnapshot()?.phase, 'ready', 'the remote notice must not destroy an unsent native draft')
+  assert.equal(controller.getSnapshot()?.presented, true)
+  assert.equal(controller.getSnapshot()?.url, url)
+  assert.equal(f.calls.some(call => call.request.op === 'closeView'), false)
+  await controller.open(first, { kind: 'session', id: 'chat' })
+  assert.equal(controller.getSnapshot()?.channel, channel)
+  assert.equal(f.channels, 1)
 })
 
 test('a late allocated view is released after returning local or switching computers', async () => {
@@ -596,7 +664,7 @@ function loadWorkspaces(globals: Record<string, unknown> = {}) {
   vm.runInNewContext(built.outputFiles[0].text, {
     module: exports, exports: exports.exports,
     require: (name: string) => name === '@deepseek-ai/dsh-client-ui-primitives' ? {} : require(name),
-    console, URL, URLSearchParams, crypto, setTimeout, clearTimeout,
+    console, URL, URLSearchParams, crypto, setTimeout, clearTimeout, AbortController, AbortSignal,
     get window() { return globalThis.window },
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
     ...globals,
@@ -604,7 +672,17 @@ function loadWorkspaces(globals: Record<string, unknown> = {}) {
   return exports.exports
 }
 
-test('production workspace installation refuses desktop remote views and releases their lease', async () => {
+function localPresentationServices() {
+  return {
+    locale: { register: () => () => {}, bind: () => () => '', getSnapshot: () => ({ active: 'en' }) },
+    theme: { getTheme: () => ({ active: { colorScheme: 'light', tokens: {} },
+      fontSizes: { text: 14, code: 11, terminal: 13 }, fontFamilies: { text: '', code: '', terminal: '' },
+    }) },
+    configForms: { get: () => ({ getSnapshot: () => ({ value: undefined }) }), developerTools: { enabled: { getSnapshot: () => false } } },
+  }
+}
+
+test('production workspace installation opens native desktop views through the validated loopback URL', async () => {
   const { installWorkspaces } = loadWorkspaces({
     dshDesktop: { protocolVersion: 1, browser: {} },
     window: { location: { protocol: 'dsh-app:', hostname: 'app' } },
@@ -613,15 +691,25 @@ test('production workspace installation refuses desktop remote views and release
   const context = {
     inject() {},
     effect: (factory: () => (() => void)) => { effects.push(factory()) },
-    locale: { register: () => () => {}, bind: () => () => '' },
+    ...localPresentationServices(),
   }
-  const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '')
+  let resolveCommand: import('../src/client/native-shortcuts.js').NativeCommandResolver | undefined
+  const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '', () => true, resolve => {
+    resolveCommand = resolve; return () => { resolveCommand = undefined }
+  })
   try {
     await controller.open(first, { kind: 'session', id: 'chat' })
-    assert.equal(controller.getSnapshot()?.error, 'unavailable')
-    assert.equal(controller.getSnapshot()?.url, undefined)
-    assert.equal(f.calls.some(call => call.request.op === 'navigate'), false)
-    assert.equal(f.views.size, 0)
+    assert.equal(controller.getSnapshot()?.phase, 'ready')
+    assert.equal(new URL(controller.getSnapshot()!.url!).hostname, '127.0.0.1')
+    assert.equal(f.calls.some(call => call.request.op === 'navigate'), true)
+    const allocation = f.calls.find(call => call.request.op === 'openView')?.request
+    assert.equal(allocation?.op, 'openView')
+    assert.equal(allocation.presentation?.locale, 'en', 'native presentation is available to the guest at allocation')
+    assert.equal(allocation.presentation?.general.busyEnter, 'queue')
+    assert.equal(f.views.size, 1)
+    assert.ok(resolveCommand, 'source routing must be installed without mounting a React sidebar')
+    const resolution = resolveCommand({ id: 'session.archive' } as never, { region: 'page', modal: null, target: null })
+    assert.equal(resolution?.status, 'handled', 'retained local action must not receive this command')
   } finally { for (const dispose of effects.reverse()) dispose() }
 })
 
@@ -666,7 +754,7 @@ test('native slot delegation preserves the original leaf and follows its registr
     get uiWorkspace(): never { throw new Error('uiWorkspace is not available outside its injection scope') },
     workspaces: {},
     effect: (factory: () => (() => void)) => { effects.push(factory()) },
-    locale: { register: () => () => {}, bind: () => () => '' },
+    ...localPresentationServices(),
     slots: {
       register: core.register.bind(core), entries: core.entries.bind(core), subscribe: core.subscribe.bind(core),
       inject: (_slot: string, install: () => () => void) => { injections.push(install()) },

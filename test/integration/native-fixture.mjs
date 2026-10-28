@@ -28,7 +28,7 @@ async function verifyInstalled(metadata, remote = false) {
   const files = {}
   for (const file of buildFiles) {
     const [expected, actual] = await Promise.all([
-      remote ? execute('tar', ['-xOzf', join(repository, 'dist/remote-plugin.tgz'), `package/${file}`], { encoding: 'buffer' }).then(result => result.stdout) : readFile(join(repository, file)),
+      remote ? execute('tar', ['-xOzf', join(repository, 'dist/remote-plugin.tgz'), `package/${file}`], { encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }).then(result => result.stdout) : readFile(join(repository, file)),
       readFile(join(installed, file)),
     ])
     const sha256 = digest(expected)

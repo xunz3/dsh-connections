@@ -5,12 +5,20 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Modal, useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConnectionsApi } from '../shared/types.js'
 import type { WorkspaceApi } from '../shared/workspace-rpc.js'
-import { WorkspaceController, viewClientId } from './workspace-controller.js'
+import { WorkspaceController, viewClientId, type WorkspaceState } from './workspace-controller.js'
 import { workspaceMessages } from './workspaces.js'
 import { workspaceUrl } from './workspace-surface.js'
 import { settingsShell } from './native-settings.js'
 import { bindSettingsHostParent, type SettingsHostSnapshot } from './settings-host-bridge.js'
 import { installSettingsHostHeader, SettingsHostMenu } from './settings-host-menu.js'
+import { desktopBrowser, DesktopGuest } from './desktop-guest.js'
+import { bindSettingsHostRelay } from './settings-host-relay.js'
+import { localSurface } from './local-surface.js'
+
+export interface HostSettingsHandle {
+  getSnapshot(): WorkspaceState | undefined
+  close(): void
+}
 
 const en = {
   settings: 'Settings', local: 'This computer', close: 'Close settings', remote: 'Remote settings',
@@ -26,12 +34,14 @@ const zh: typeof en = {
 }
 
 /** Host selection lives in the native title. Each document keeps its own native forms. */
-export function installHostSettings(ctx: Context, api: ConnectionsApi & WorkspaceApi): void {
+export function installHostSettings(ctx: Context, api: ConnectionsApi & WorkspaceApi): HostSettingsHandle {
+  const bridge = desktopBrowser()
   let storage: Storage | undefined
   try { storage = window.sessionStorage } catch { /* Optional per-tab view lease. */ }
   const controller = new WorkspaceController(api, {
     clientId: viewClientId(storage, 'settings'), catalogs: false,
-    prepareUrl: url => workspaceUrl(url, window.location, false),
+    prepareUrl: url => workspaceUrl(url, window.location, bridge !== undefined),
+    surface: localSurface(ctx),
   })
   const hosts = createSnapshotStore<SettingsHostSnapshot>({ choices: [{ id: 'local', name: en.local, phase: 'connected' }], selectedId: 'local' })
   let disposed = false
@@ -50,7 +60,7 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
     if (!hosts.getSnapshot().choices.some(row => row.id === id)) return
     if (id === hosts.getSnapshot().selectedId) return
     const native = settingsShell(ctx)
-    if (id === 'local') { controller.close(); native?.actions.open(); return }
+    if (id === 'local') { controller.close(); native?.actions.openSection('general'); return }
     if (!native) throw new Error(copy().unavailable)
     native.actions.close()
     await controller.open(id, { kind: 'settings' })
@@ -79,32 +89,49 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
     const remoteVisible = !!presented && !error
     // The native status Modal owns focus until the remote native dialog is ready.
     useModalLayer(layer, remoteVisible, close)
-    useEffect(() => { if (remoteVisible) frame.current?.focus() }, [remoteVisible])
     useEffect(() => {
-      if (!url || !channel || !frame.current) return
+      if (remoteVisible) (bridge ? layer.current?.querySelector('webview') as HTMLElement | undefined : frame.current)?.focus()
+    }, [remoteVisible])
+    useEffect(() => {
+      if (!url || !channel || !state?.revision || !bridge && !frame.current) return
       setReady(undefined); setFailed(undefined); setExpired(undefined); setSwitchError(undefined)
       let active = true
       let timer = setTimeout(() => setExpired(url), 30_000)
-      const dispose = bindSettingsHostParent({
-        frame: frame.current, channel, origin: new URL(url).origin,
-        getSnapshot: hosts.getSnapshot, subscribe: hosts.subscribe,
-        onSelect: id => { void choose(id).catch(() => setSwitchError(copy().unavailable)) },
-        onReady: value => {
-          if (!active) return
-          clearTimeout(timer); setExpired(undefined); setReady(value ? url : undefined)
-          if (!value) timer = setTimeout(() => setExpired(url), 30_000)
+      const onReady = (value: boolean) => {
+        if (!active) return
+        clearTimeout(timer); setExpired(undefined); setReady(value ? url : undefined)
+        if (!value) timer = setTimeout(() => setExpired(url), 30_000)
+      }
+      const onSelect = (id: string) => { void choose(id).catch(() => setSwitchError(copy().unavailable)) }
+      const dispose = bridge ? bindSettingsHostRelay({
+        channel, revision: state.revision, endpoint: (request, signal) => {
+          signal.throwIfAborted()
+          return api.workspace(state.id, request)
+        }, getSnapshot: hosts.getSnapshot, onSelect, onReady: () => onReady(true),
+        onError: error => {
+          if (active && error && typeof error === 'object' && 'code' in error && ['BAD_REQUEST', 'INCOMPATIBLE_PROTOCOL', 'NOT_EMBEDDED'].includes(String(error.code))) setExpired(url)
+          if (active && error && typeof error === 'object' && 'code' in error) {
+            if (error.code === 'CONFLICT' || error.code === 'NOT_FOUND') void controller.check()
+            if (error.code === 'SETTINGS_HOST_CHANGED') setSwitchError(copy().unavailable)
+          }
         },
+      }) : bindSettingsHostParent({
+        frame: frame.current!, channel, origin: new URL(url).origin,
+        getSnapshot: hosts.getSnapshot, subscribe: hosts.subscribe, onSelect, onReady,
       })
       return () => { active = false; clearTimeout(timer); dispose() }
-    }, [url, channel])
+    }, [url, channel, state?.revision])
     if (!state) return null
     return createPortal(<div ref={layer} role={remoteVisible ? 'dialog' : undefined} aria-modal={remoteVisible || undefined} aria-label={`${t.remote}: ${state.name}`} tabIndex={-1}
       className="dcs-remote-settings" data-shortcut-modal="settings" style={{ pointerEvents: remoteVisible ? 'auto' : 'none' }}>
       <style>{styles}</style>
-      {url && <iframe key={url} ref={frame} className="dcs-settings-frame" title={t.remote} src={url} tabIndex={0}
-        style={{ visibility: remoteVisible ? 'visible' : 'hidden' }} referrerPolicy="no-referrer"
+      {url && (bridge ? <div className="dcs-settings-frame" style={{ visibility: remoteVisible ? 'visible' : 'hidden' }}>
+        <DesktopGuest key={url} bridge={bridge} id={`settings/${state.id}`} url={url} title={t.remote}
+          className="dcs-settings-frame" failed={() => setFailed(url)} />
+      </div> : <iframe key={url} ref={frame} className="dcs-settings-frame" title={t.remote} src={url} tabIndex={0}
+        style={{ visibility: remoteVisible ? 'visible' : 'hidden' }} referrerPolicy="no-referrer" allow="clipboard-write"
         sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox"
-        onError={() => setFailed(url)} />}
+        onError={() => setFailed(url)} />)}
       {(!presented || error) && <Modal open title={t.settings} onClose={close} headless className="dcs-settings-status" shortcutModal="settings">
         <header><span className="dcs-host-header">{t.settings}<SettingsHostMenu snapshot={choices} locale={language} onSelect={choose} onOpen={refresh} /></span>
           <button type="button" aria-label={t.close} onClick={close}>×</button></header>
@@ -135,11 +162,13 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
     void tick()
     return () => { disposed = true; clearTimeout(timer); unsubscribe(); controller.dispose() }
   })
+  return { getSnapshot: controller.getSnapshot, close: () => controller.close() }
 }
 
 const styles = `
 .dcs-remote-settings{position:fixed;inset:0;z-index:1000;outline:none}
 .dcs-settings-frame{display:block;width:100%;height:100%;border:0;background:transparent}
+.dcs-settings-frame>webview{display:flex;width:100%;height:100%;border:0}
 .dcs-settings-status{width:min(420px,calc(100vw - 32px));padding:20px;color:var(--dsw-alias-label-primary)}
 .dcs-settings-status header{display:flex;align-items:center;justify-content:space-between;gap:24px;font-weight:500}.dcs-settings-status .dcs-host-header{width:auto;gap:12px}
 .dcs-settings-status p{margin:24px 0;color:var(--dsw-alias-label-secondary);font-size:14px;line-height:1.6}.dcs-settings-status footer{display:flex;justify-content:flex-end;gap:8px}
