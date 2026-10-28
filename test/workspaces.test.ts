@@ -410,6 +410,32 @@ test('local navigation delegates native IDs without creating remote placeholders
   assert.equal(f.calls.some(call => call.id === 'local' && call.request.op !== 'catalog'), false); controller.dispose()
 })
 
+test('New Session retains selection while native blank reuse or creation is pending', async () => {
+  for (const resolvedSession of ['chat', 'new-chat']) {
+    const f = fixture(), controller = new WorkspaceController(f.api, { storage: f.storage })
+    try {
+      await controller.open(first, { kind: 'session', id: 'chat' })
+      const url = controller.getSnapshot()!.url
+      const pending = deferred<WorkspaceResult>(), respond = f.respond
+      f.respond = async (id, request) => {
+        if (request.op === 'navigate' && request.target.kind === 'newSession') await pending.promise
+        return respond(id, request)
+      }
+      const navigation = controller.newSession()
+      await nextTick()
+      assert.deepEqual(controller.getCatalogs().selected, { sourceId: first, sessionId: 'chat' })
+      assert.deepEqual(JSON.parse(f.saved.get(savedKey)!), { sourceId: first, sessionId: 'chat' })
+      pending.resolve({ done: true }); await navigation
+      const state = controller.getSnapshot()!
+      assert.equal(state.url, url)
+      assert.equal(f.channels, 1, 'keep the native document and its draft resident')
+      f.views.set(state.channel!, { revision: state.revision!, presentedRevision: state.revision!, reportedRevision: state.revision!, sessionId: resolvedSession })
+      await controller.check()
+      assert.deepEqual(controller.getCatalogs().selected, { sourceId: first, sessionId: resolvedSession })
+    } finally { controller.dispose() }
+  }
+})
+
 test('New Session follows the selected source and explicit local creation supersedes restoration', async () => {
   const f = fixture(), local: unknown[] = [], controller = new WorkspaceController(f.api, { storage: f.storage, localNavigate: target => { local.push(target) } })
   await controller.newSession()

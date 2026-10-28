@@ -8,8 +8,8 @@ the remote content archive, declarations, license and usage documentation.
 
 1. Increase `version` in `package.json` using an exact semantic version.
 2. Commit the change and push to `main`.
-3. Watch the **Publish to npm** workflow. Node 22/24 checks and web browser tests
-   must pass before publication. The publish job downloads the exact archive
+3. Watch the **Publish to npm** workflow. Node 22/24 checks, web browser tests and actual installation/browser acceptance
+   on the declared local Harness version must pass before publication. The publish job downloads the exact archive
    checked on Node 24, verifies its hash and publishes it without running package
    lifecycle scripts again.
 

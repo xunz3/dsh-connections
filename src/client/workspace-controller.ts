@@ -247,7 +247,11 @@ export class WorkspaceController {
     let acquired = false
     try {
       if (!reuse) { this.release(previous); this.destination = undefined; this.publish({ id, name: this.rows.find(row => row.id === id)?.name ?? '', phase: 'connecting' }) }
-      this.select({ sourceId: id, ...(target?.kind === 'session' ? { sessionId: target.id } : target?.kind === 'workspace' || target?.kind === 'newSession' && target.id !== undefined ? { workspaceId: target.id } : {}) })
+      // Native New Session may return to this same blank and its unsent draft.
+      // Keep its row selected until the Host acknowledges the actual destination.
+      if (!(reuse && target?.kind === 'newSession' && target.id === undefined)) {
+        this.select({ sourceId: id, ...(target?.kind === 'session' ? { sessionId: target.id } : target?.kind === 'workspace' || target?.kind === 'newSession' && target.id !== undefined ? { workspaceId: target.id } : {}) })
+      }
       const row = (await this.api.list()).find(row => row.id === id)
       if (!current()) return
       if (!row) throw new Error('missing-connection')

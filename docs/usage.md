@@ -54,7 +54,7 @@ When Connections refreshes its own remote content bundle, it asks the native plu
 
 ## Explicit updates
 
-Open the connection's **More actions → Update remote Harness**. Choose an explicitly supported exact version: `0.2.1-rc.2` or `0.2.1-rc.3`. Other versions, tags such as `latest`, and ranges are rejected. Local sidebar compatibility remains exactly `rc.2`; the independently built remote content bundle advertises only the tested remote versions. Cancel leaves the version unchanged. Ordinary connect never upgrades the installed version.
+Open the connection's **More actions → Update remote Harness**. Choose an explicitly supported exact version: `0.2.1-rc.2` or `0.2.1-rc.3`. Other versions, tags such as `latest`, and ranges are rejected. Local sidebar compatibility is exactly `rc.3` in Connections 0.1.1; the independently built remote content bundle advertises only the tested remote versions. Cancel leaves the version unchanged. Ordinary connect never upgrades the installed version.
 
 Let running tasks finish before submitting: updating restarts the remote Host. The new package is installed and validated first. The updater then snapshots the managed Harness home and agents directory while stopped, switches release, and checks native authentication. Failed startup rolls back the previous release and managed state. It does not snapshot or revert project files outside those directories. A rollback failure preserves the recovery snapshot and reports the error.
 

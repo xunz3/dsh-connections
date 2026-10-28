@@ -1,6 +1,6 @@
 # Unified Workspaces
 
-Connections supplies one local navigation surface for workspaces owned by different Harness Hosts. It uses public plugin composition and UI slots on Harness `0.2.1-rc.2`; no Harness source fork is required.
+Connections supplies one local navigation surface for workspaces owned by different Harness Hosts. It uses public plugin composition and UI slots on Harness `0.2.1-rc.3`; no Harness source fork is required.
 
 ## Interaction
 
@@ -28,7 +28,7 @@ The local sidebar uses public workspace and session controllers through the Conn
 
 The source-aware list uses Harness's public `Menu` and icon primitives through its ModuleLoader baseline, with the native 32px rows, 14px text, spacing and theme tokens. Portal menus share native keyboard navigation, dismissal and focus return. The original workspace browser is not a portable renderer: its hooks and row actions bind the local session/workspace controllers, and its component is not exported by the runtime package. Feeding it remote IDs would misroute actions or require a second session mirror. The [upstream workspace contract](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/client/ui-workspace/README.md) documents those Host-bound contributions.
 
-The shell adapter targets exactly Harness `0.2.1-rc.2`; the build checks that its native package matches the declared compatibility version. Upgrades require adapter and real Host acceptance before widening compatibility. RPC failure leaves native navigation available. A conflicting sidebar owner remains mounted, with remote opening disabled and an actionable message rather than routing New Session to the wrong Host.
+The shell adapter targets exactly Harness `0.2.1-rc.3`; the build checks that its native package matches the declared compatibility version. Upgrades require adapter and real Host acceptance before widening compatibility. RPC failure leaves native navigation available. A conflicting sidebar owner remains mounted, with remote opening disabled and an actionable message rather than routing New Session to the wrong Host.
 
 ## Navigation transport
 

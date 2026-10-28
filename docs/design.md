@@ -1,6 +1,6 @@
 # Connections design
 
-Source review: 2026-10-28. Local sidebar baseline: exactly `0.2.1-rc.2`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
+Source review: 2026-10-28. Local sidebar baseline: exactly `0.2.1-rc.3`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
 
 The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
 
@@ -13,7 +13,7 @@ The client presents local and remote projects in one Workspaces list. See [Unifi
 | glob 13.0.6 | Expand Include file patterns with brace, extglob and recursive globstar expansion disabled |
 | Node >=22.12 locally | Child processes, sockets, native HTTP checks and validation |
 | Remote Linux, Node 22.19+ or >=24, npm, systemd, flock, tar | Native Harness installation, persistent user service, maintenance locking and rollback snapshot |
-| Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.2 | Plugin lifecycle, existing private records and authenticated owner RPC |
+| Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.3 | Plugin lifecycle, existing private records and authenticated owner RPC |
 | Harness api-remotes, settings, slots, renderer, locale, workspace, layout | Existing client services and extension points; build-time dependencies |
 | Harness sidebar-browser bridge types | Desktop guest lease and isolation; no Electron runtime dependency |
 | React 18, TypeScript 5.9, esbuild, tsx, Playwright | Compilation and transport, lifecycle and UI verification |

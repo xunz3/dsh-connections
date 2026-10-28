@@ -131,7 +131,7 @@ for (const prefix of installations) {
         return state.value?.sessionId
       }, { timeout: 30000 }).toBeTruthy()
       assert.equal((await post('/api/connections/workspaces', { op: 'navigate', channel: view.value.channel, requestId: randomUUID(), target: { kind: 'settings' } })).ok, true)
-      const settings = page.getByRole('dialog', { name: 'Settings', exact: true })
+      const settings = page.locator('[data-shortcut-modal="settings"]').filter({ has: page.locator('[data-slot="settings.header"]') })
       await expect(settings).toBeVisible({ timeout: 30000 })
       // Native onboarding belongs to the sidebar and can first mount when this
       // remote document exposes Settings. Complete that same first-use flow.

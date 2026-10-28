@@ -122,10 +122,31 @@ test('native sidebar and leading controls are reused with their original child r
       assert.deepEqual(actual.children, original.children)
     }
     const children = routed.core.entries('sidebar')[0].children!
-    assert.equal(Object.keys(children).length, 7)
+    assert.ok(children['sidebar.panellist.actions'], 'rc.3 native panel menu must remain available')
     for (const name of Object.keys(children)) assert.equal(routed.core.declarationEpoch(name), 1)
     assert.equal(routed.dictionaries.has('sidebar'), true)
   } finally { await routed.dispose(); await baseline.dispose() }
+})
+
+test('rc.3 panel menu contributions and pin state remain owned by the native sidebar', async () => {
+  const f = fixture()
+  try {
+    await installNativeSidebar(f.ctx, { startSession() {} }); await settled()
+    const face = f.face('sidebar')
+    assert.equal(face.hooks.entryActions.getSnapshot(), false)
+    const menu = () => null
+    const remove = f.core.register({ name: 'sidebar.panellist.actions', id: 'third-party' }, menu)
+    assert.equal(face.hooks.entryActions.getSnapshot(), true)
+    assert.equal(f.core.entries('sidebar.panellist.actions')[0].component, menu)
+    face.setPinned('custom-panel', false)
+    assert.deepEqual([...face.hooks.entryPins.getSnapshot()], ['custom-panel'])
+    face.setPinned('plugins', false)
+    assert.deepEqual([...face.hooks.entryPins.getSnapshot()], ['custom-panel'], 'native plugin-manager entry stays pinned')
+    face.setPinned('custom-panel', true)
+    assert.equal(face.hooks.entryPins.getSnapshot().length, 0)
+    remove()
+    assert.equal(face.hooks.entryActions.getSnapshot(), false)
+  } finally { await f.dispose() }
 })
 
 test('all native New Session controls route explicitly while other scopes stay native', async () => {

@@ -67,3 +67,50 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser --workers=2
+
+  native:
+    name: Native Harness (Node 24)
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DSH_UNIFIED_FIXTURE: /tmp/dsh-connections-ci-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 11.13.1
+          cache: true
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Install native runtime and SSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-server
+          sudo mkdir -p /run/sshd
+          version=$(node -p "require('./src/shared/harness-versions.json').local")
+          npm install --prefix "$RUNNER_TEMP/dsh-native" --no-audit --no-fund "@deepseek-ai/dsh@$version"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: .release
+      - name: Install the checked package in isolated native Hosts
+        run: |
+          node scripts/release.ts artifact
+          export DSH_QA_PACKAGE="$PWD/.release/$(node -p "require('./.release/release-package.json').tarball")"
+          tar -xzf "$DSH_QA_PACKAGE" --strip-components=1 package/dist
+          DSH_QA_UNIFIED=1 DSH_QA_CLI="$RUNNER_TEMP/dsh-native/node_modules/@deepseek-ai/dsh/lib/bin.js" \
+            node test/integration/native-fixture.mjs start "$DSH_UNIFIED_FIXTURE"
+      - run: pnpm exec playwright test test/browser/unified-native.spec.ts --config=playwright.native.config.ts
+      - name: Stop isolated Hosts
+        if: always()
+        run: |
+          if [ -f "$DSH_UNIFIED_FIXTURE/processes.json" ]; then
+            node test/integration/native-fixture.mjs stop "$DSH_UNIFIED_FIXTURE"
+          fi

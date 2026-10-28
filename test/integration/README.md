@@ -2,6 +2,9 @@ Native integration uses two real Harness processes and OpenSSH. It requires
 Linux, Node 22.19+ or 24+, `ssh`, `sshd`, `ssh-keygen`, an installed Harness CLI, and a built
 plugin. It does not call a model or modify user profiles.
 
+CI installs the checked release tarball by setting `DSH_QA_PACKAGE` to its absolute
+path. The default is the repository directory for local development.
+
 Build first so `dist/remote-plugin.tgz` exists, then start the isolated fixture:
 
 ```sh
@@ -36,8 +39,9 @@ The tests cover:
   settings page, without a duplicate native sidebar deployment.
 - Both the sidebar and conversation workspace picker offering local and remote
   computers, with native directory selection, cancellation and switching.
-- The global New Session action creating a fresh native session on the selected
-  computer, with requests reaching only that computer.
+- The global New Session action reusing the selected computer's native blank
+  session and preserving its unsent draft on rc.3, with requests reaching only
+  that computer. The native More menu remains available.
 - The loading overlay remaining until the remote native document acknowledges
   that its directory picker or content is presented.
 - Native file trees, text previews, file upload and relative Markdown images.

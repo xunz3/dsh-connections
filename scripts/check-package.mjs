@@ -23,6 +23,9 @@ try {
   assert.equal(manifest.publishConfig.registry, 'https://registry.npmjs.org/')
   assert(read('dist/host/index.js').includes(manifest.name), 'Host RPC identity must match the published package')
   assert.equal(manifest.engines.dsh, versions.local)
+  for (const [name, version] of Object.entries(manifest.peerDependencies)) {
+    if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, versions.local, `${name} must match the tested local Host`)
+  }
   for (const path of ['dist/host/index.js', 'dist/host/index.d.ts', 'dist/client.js', 'dist/remote-plugin.tgz', 'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/design.md', 'docs/usage.md']) assert(entries.includes(`package/${path}`), `Missing ${path}`)
   for (const entry of entries) assert(/^package\/(?:package\.json|README\.md|LICENSE|cordis\.patch\.yml|dist\/[\w./-]+|docs\/[\w.-]+\.md)$/.test(entry), `Unexpected packaged file ${entry}`)
   for (const target of [manifest.exports['.'].default, manifest.exports['.'].types, manifest.exports['./client']]) assert(entries.includes(`package/${target.replace(/^\.\//, '')}`))

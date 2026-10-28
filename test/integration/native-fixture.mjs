@@ -143,6 +143,8 @@ async function startHost(metadata, remote = false) {
 if (command === 'start') {
   const cli = process.env.DSH_QA_CLI
   if (!cli?.startsWith('/')) throw new Error('Set DSH_QA_CLI to the installed native Harness bin.js.')
+  const packageSource = process.env.DSH_QA_PACKAGE ?? repository
+  if (!packageSource.startsWith('/')) throw new Error('DSH_QA_PACKAGE must be an absolute package path.')
   await mkdir(root, { mode: 0o700 })
   const metadata = { node: process.execPath, cli, port: await freePort(), sshPort: await freePort(), alias: 'native-workspace-fixture' }
   if (process.env.DSH_QA_UNIFIED === '1') {
@@ -182,7 +184,7 @@ if (command === 'start') {
     // The plugin still executes real OpenSSH. Only this process's PATH supplies
     // an isolated config file instead of reading or modifying ~/.ssh/config.
     await writeFile(join(root, 'bin/ssh'), `#!/bin/sh\nexec /usr/bin/ssh -F ${shellQuote(join(root, 'ssh_config'))} "$@"\n`, { mode: 0o700 })
-    const install = await execute(metadata.node, [cli, 'plugin', '--profile', 'web', 'add', repository], {
+    const install = await execute(metadata.node, [cli, 'plugin', '--profile', 'web', 'add', packageSource], {
       cwd: root, env: { ...process.env, DSH_HOME: join(root, 'home'), DSH_AGENTS_HOME: join(root, 'agents'), PATH: `${dirname(metadata.node)}:${process.env.PATH}` },
     })
     await writeFile(join(root, 'install.log'), install.stdout + install.stderr, { mode: 0o600 })

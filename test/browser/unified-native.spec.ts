@@ -163,7 +163,14 @@ async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise
     expect(selectedSource).toBeTruthy()
     expect(selectedSource).not.toBe('local')
   }
-  const before = new Set((await catalog(surface)).sessions.map(session => session.id))
+  const before = (await catalog(surface)).sessions.map(session => session.id).sort()
+  const selection = () => surface.locator('body').evaluate(() =>
+    (JSON.parse(localStorage.getItem('dsh.sessions.current') ?? '{}') as { sessionId?: string }).sessionId)
+  await expect.poll(selection).toBeTruthy()
+  const selectedBefore = await selection()
+  const editor = surface.locator('[data-composer-input][contenteditable="true"]')
+  const draft = `Unsent ${source} rc.3 draft`
+  await editor.fill(draft)
   const origins: string[] = []
   const observe = (request: Request) => {
     const url = new URL(request.url())
@@ -178,17 +185,20 @@ async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise
     const response = await created
     expect(new URL(response.url()).origin).toBe(expectedOrigin)
     expect(response.ok()).toBe(true)
-    await expect.poll(async () => (await catalog(surface)).sessions.some(session => !before.has(session.id))).toBe(true)
+    // rc.3 returns to the workspace's reusable blank, including its unsent draft.
+    await expect.poll(selection).toBe(selectedBefore)
+    await expect(editor).toHaveText(draft)
+    expect((await catalog(surface)).sessions.map(session => session.id).sort()).toEqual(before)
     if (source === 'remote') {
       await expect(page.locator('.dc-remote-loading')).toHaveCount(0)
       await expect.poll(async () => {
         const selected = await selectedRemoteSession(remote)
-        return selected !== undefined && !before.has(selected)
-      }).toBe(true)
+        return selected
+      }).toBe(selectedBefore)
     } else await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
     expect(origins.length).toBeGreaterThan(0)
     expect(origins.every(origin => origin === expectedOrigin)).toBe(true)
-  } finally { page.context().off('request', observe) }
+  } finally { page.context().off('request', observe); await editor.fill('') }
 }
 async function verifyLoadingAcknowledgement(page: Page, open: () => Promise<void>): Promise<void> {
   let acknowledge!: () => void
@@ -295,6 +305,12 @@ test('one native sidebar switches local and SSH projects while remote content st
   await dismissWelcome(page)
   const workspaces = page.getByRole('region', { name: 'Workspaces', exact: true })
   await expect(workspaces).toHaveCount(1)
+  const more = page.getByRole('navigation', { name: 'Global panels', exact: true }).getByRole('button', { name: 'More', exact: true })
+  await more.click()
+  await expect(page.getByRole('menuitem', { name: 'Browse other plugins', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: 'Create your plugin', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(more).toBeFocused()
   const localProject = workspaces.getByRole('button', { name: 'local-project', exact: true })
   if (!await localProject.count()) {
     await workspaces.getByRole('button', { name: 'Add workspace', exact: true }).click()

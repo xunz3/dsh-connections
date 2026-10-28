@@ -11,7 +11,7 @@
 
 ## 安装
 
-本地需要 Harness `0.2.1-rc.2`、Node.js ≥22.12 和支持 ControlMaster 的 OpenSSH。后台托管目前要求远端 Linux、Node.js 22.19+ 或 ≥24、npm、systemd 用户服务和 linger。当前实机验证平台为 Linux。
+本地需要 Harness `0.2.1-rc.3`、Node.js ≥22.12 和支持 ControlMaster 的 OpenSSH。后台托管目前要求远端 Linux、Node.js 22.19+ 或 ≥24、npm、systemd 用户服务和 linger。当前实机验证平台为 Linux。仍使用本地 rc.2 的用户请安装 `@xunz03/dsh-connections@0.1.0`。
 
 ```sh
 dsh plugin --profile web add @xunz03/dsh-connections

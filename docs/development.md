@@ -26,13 +26,18 @@ These tests simulate the guest bridge in Chromium; they do not validate Electron
 - `src/shared`: browser-safe contracts and validation.
 - `test`: transport, cancellation, ownership, update recovery and browser integration.
 
-The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.2 and checked against its sidebar package; remote compatibility explicitly enumerates tested rc.2 and rc.3 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
+The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.3 and checked against its sidebar package; remote compatibility explicitly enumerates tested rc.2 and rc.3 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
 
 The build includes only the installed native sidebar package's ModuleLoader factory through a generated adapter. Its dependencies stay external and are supplied through the main manifest. `dist/native-sidebar.LICENSE` preserves its upstream MIT license. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
 
 The adapter reuses the original module's `apply`, components and child declarations; it does not vendor a source fork or recreate the sidebar. At runtime a Cordis-isolated `uiWorkspace` facade changes only `startSession` routing, with other methods and accessors bound to their native receiver. Disabling the whole Connections bundle removes its patch and restores the native sidebar deployment.
 
 The remote bundle's profile patch disables `directory-picker` auto selection and registers the existing `dsh-host-directory-picker-browse` and `dsh-client-ui-directory-picker-browse` pair. Both packages are supplied by Harness's Web bundle; the ordinary client row makes its surface available to ModuleLoader. This avoids waiting for a system dialog on a remote graphical desktop without adding a picker implementation or runtime dependency. Package checks require both browse faces and leave local picker composition unchanged.
+
+CI also installs the checked release tarball into two disposable native Hosts
+on the declared local Harness version and runs the native browser suite. No
+compatibility exemptions are granted. See [Harness compatibility](harness-compatibility.md)
+for the rc.3 review and integration boundaries.
 
 ## Transport and service tests
 
@@ -80,8 +85,12 @@ Actual Electron desktop rendering, macOS, Windows and machine reboot are not cov
 
 ## Recent native verification
 
-The 2026-10-28 two-Host run passed all three native cases against installed,
-hash-verified builds. It covered native composition, files/media, reload and
+The 2026-10-28 rc.3 two-Host run passed all three native cases against installed,
+hash-verified release archives, including native More menu rows and blank-session
+draft preservation on both Hosts. An initial direct-entry assertion intermittently
+failed with an empty page; three isolated repetitions and the complete suite then
+passed without assertion timeout changes or retries. Its cause remains unconfirmed;
+the same case remains a required CI check in a fresh environment. It covered native composition, files/media, reload and
 local-only Host restart. Settings checks included Models and plugin inventory,
 remote-only preference writes and restoration, unchanged local settings and
 workspace/session identities, slow-load cancellation, repeated Host selection,
