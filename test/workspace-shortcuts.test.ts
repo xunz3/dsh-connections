@@ -50,29 +50,20 @@ function harness(environment: Pick<Shortcuts, 'runtime' | 'platform'> = { runtim
   }
 }
 
-test('remote commands capture the selected computer and block local archive/fork', () => {
+test('commands follow the current local or remote owner and block remote archive/fork', () => {
   const h = harness()
-  assert.equal(h.key('KeyN'), 1)
-  h.select('server-b')
-  assert.equal(h.key('KeyA'), 1)
-  assert.equal(h.key('KeyF'), 1)
-  assert.deepEqual(h.calls, [['new', 'server-a'], ['blocked', 'session.archive', 'server-b'], ['blocked', 'session.fork', 'server-b']])
-  h.select(undefined)
-  assert.equal(h.key('KeyN'), 1)
-  assert.equal(h.key('KeyA'), 0)
-  assert.equal(h.key('KeyF'), 0)
-  assert.deepEqual(h.calls[3], ['new', 'local'])
-  assert.equal(h.calls.length, 4)
-})
-
-test('the unified search and add controls route for both local and remote selection', () => {
-  const h = harness()
-  for (const owner of [undefined, 'server-a']) {
+  for (const owner of ['server-a', 'server-b', undefined]) {
     h.select(owner)
-    assert.equal(h.key('KeyK'), 1)
-    assert.equal(h.key('KeyO'), 1)
+    for (const [code, call] of [
+      ['KeyN', ['new', owner ?? 'local']], ['KeyK', ['search']], ['KeyO', ['add']],
+      ['KeyA', owner && ['blocked', 'session.archive', owner]],
+      ['KeyF', owner && ['blocked', 'session.fork', owner]],
+    ] as const) {
+      const label = `${owner ?? 'local'}: ${code}`, before = h.calls.length
+      assert.equal(h.key(code), call ? 1 : 0, label)
+      assert.deepEqual(h.calls.slice(before), call ? [call] : [], label)
+    }
   }
-  assert.deepEqual(h.calls, [['search'], ['add'], ['search'], ['add']])
 })
 
 test('accepted custom bindings update immediately and require exact physical keys and modifiers', () => {
@@ -103,7 +94,7 @@ test('disabled, unbound, conflicting, and loading commands stay with native disp
   assert.deepEqual(h.calls, [['new', 'server-a']])
 })
 
-test('local controls, IME, modal dialogs, terminal input, and embedded input retain ownership', () => {
+test('native input contexts, unrelated commands and reset events retain ownership', () => {
   const h = harness()
   for (const code of ['KeyN', 'KeyK', 'KeyO', 'KeyA', 'KeyF']) {
     assert.equal(h.key(code, { defaultPrevented: true }), 0)
@@ -114,24 +105,11 @@ test('local controls, IME, modal dialogs, terminal input, and embedded input ret
     assert.equal(h.key(code, {}, { source: 'webview' }), 0)
     assert.equal(h.key(code, {}, { source: 'menu' }), 0)
   }
-  assert.deepEqual(h.calls, [])
-  assert.equal(h.key('KeyN', {}, { region: 'editable', source: 'keyboard' }), 1)
-})
-
-test('repeat events remain consumed without running actions again or falling onto local sessions', () => {
-  const h = harness()
-  for (const code of ['KeyN', 'KeyK', 'KeyO', 'KeyA', 'KeyF']) assert.equal(h.key(code, { repeat: true }), 1)
-  assert.deepEqual(h.calls, [])
-  h.select(undefined)
-  assert.equal(h.key('KeyA', { repeat: true }), 0)
-})
-
-test('unrelated native commands and reset events are untouched', () => {
-  const h = harness()
   assert.equal(h.key('KeyR'), 0)
   assert.equal(h.key('KeyQ'), 0)
   for (const listener of h.listeners) listener({ type: 'reset' })
   assert.deepEqual(h.calls, [])
+  assert.equal(h.key('KeyN', {}, { region: 'editable', source: 'keyboard' }), 1)
 })
 
 test('native pair precedence does not let a single-key command steal another binding', () => {
@@ -149,8 +127,12 @@ test('native pair precedence does not let a single-key command steal another bin
   assert.equal(h.key('KeyJ', { secondCode: 'KeyN' }), 1, 'pair order is immaterial')
 })
 
-test('consumption precedes business actions even when the owner callback fails', () => {
+test('consumption suppresses repeats and precedes even a failing owner callback', () => {
   const h = harness()
+  for (const code of ['KeyN', 'KeyK', 'KeyO', 'KeyA', 'KeyF']) assert.equal(h.key(code, { repeat: true }), 1)
+  assert.deepEqual(h.calls, [])
+  h.select(undefined)
+  assert.equal(h.key('KeyA', { repeat: true }), 0)
   let consumed = false
   h.callbacks.onNewSession = () => { assert.equal(consumed, true); throw new Error('operation-failed') }
   const listener = [...h.listeners][0]
