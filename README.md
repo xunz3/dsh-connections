@@ -14,9 +14,7 @@
 本地需要 Harness `0.2.1-rc.2`、Node.js ≥22.12 和支持 ControlMaster 的 OpenSSH。后台托管目前要求远端 Linux、Node.js 22.19+ 或 ≥24、npm、systemd 用户服务和 linger。当前实机验证平台为 Linux。
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm build
-dsh plugin --profile web add /absolute/path/to/dsh-connections
+dsh plugin --profile web add @xunz03/dsh-connections
 ```
 
 重启本地 Harness，在 **设置 → 连接** 添加 SSH 主机，选择 **在后台持续运行**，然后连接。SSH 沿用本地 Harness 主机的配置、密钥代理和 `known_hosts`；先在终端确认 `ssh <主机>` 可用。
@@ -25,4 +23,4 @@ dsh plugin --profile web add /absolute/path/to/dsh-connections
 
 远端内容加载阶段超过 30 秒未就绪时，可重试或取消返回本机。原生桌面应用的远端工作区入口暂未开放。插件通过公开组合接口复用 Harness 原生侧栏；停用整个 Connections 插件包会撤销其补丁并恢复原生侧栏。
 
-[使用与边界](docs/usage.md) · [依赖与设计](docs/design.md) · [后续路线](docs/roadmap.md) · [开发与验证](docs/development.md) · [评审核验与取舍](docs/review-findings.md)
+[使用与边界](docs/usage.md) · [依赖与设计](docs/design.md) · [后续路线](docs/roadmap.md) · [开发与验证](docs/development.md) · [评审核验与取舍](docs/review-findings.md) · [发布流程](docs/releasing.md)

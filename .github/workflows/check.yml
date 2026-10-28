@@ -2,8 +2,10 @@ name: Check
 
 on:
   push:
+    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -36,8 +38,15 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm build
-      - run: pnpm check:package
+      - run: pnpm check:package --output-dir .release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.node == '24'
+        with:
+          name: release-package
+          path: .release/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
 
   browser:
     name: Browser fixtures (Node 24)

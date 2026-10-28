@@ -1,0 +1,73 @@
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate without publishing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  check:
+    uses: ./.github/workflows/check.yml
+  publish:
+    needs: check
+    if: github.repository == 'xunz3/dsh-connections' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # npm provenance requires a public repository; OIDC works with either visibility.
+      NPM_CONFIG_PROVENANCE: ${{ !github.event.repository.private }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.17.0
+      - name: Check whether this version needs publishing
+        id: release
+        run: node scripts/release.ts plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: steps.release.outputs.publish == 'true'
+        with:
+          name: release-package
+          path: .release
+      - name: Verify the checked artifact
+        if: steps.release.outputs.publish == 'true'
+        id: package
+        run: node scripts/release.ts artifact
+      - name: Verify npm publish request
+        if: steps.release.outputs.publish == 'true'
+        env:
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          DIST_TAG: ${{ steps.release.outputs.tag }}
+        run: npm publish "./$TARBALL" --dry-run --ignore-scripts --access public --tag "$DIST_TAG"
+      - name: Publish with npm trusted publishing
+        if: steps.release.outputs.publish == 'true' && (github.event_name == 'push' || !inputs.dry_run)
+        env:
+          TARBALL: ${{ steps.package.outputs.tarball }}
+          DIST_TAG: ${{ steps.release.outputs.tag }}
+        run: npm publish "./$TARBALL" --ignore-scripts --access public --tag "$DIST_TAG"
+      - name: Verify registry version and integrity
+        if: steps.release.outputs.publish == 'true' && (github.event_name == 'push' || !inputs.dry_run)
+        env:
+          EXPECTED_INTEGRITY: ${{ steps.package.outputs.integrity }}
+          DIST_TAG: ${{ steps.release.outputs.tag }}
+        run: node scripts/release.ts verify

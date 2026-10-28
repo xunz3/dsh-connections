@@ -62,7 +62,7 @@ if (process.argv[2] === 'plugin') {
   await appendFile(fixtureDirectory + '/plugin-installs.jsonl', JSON.stringify({ args, digest, home: process.env.DSH_HOME, agents: process.env.DSH_AGENTS_HOME, path: process.env.PATH, inheritedUnrelatedKey: process.env.UNRELATED_API_KEY !== undefined }) + '\\n');
   try { await readFile(fixtureDirectory + '/plugin-fail'); process.exit(1); } catch {}
   await writeFile(process.env.DSH_HOME + '/workspace-plugin-installed', digest);
-  const installed = process.env.DSH_HOME + '/profiles/web/node_modules/@xunz/dsh-connections';
+  const installed = process.env.DSH_HOME + '/profiles/web/node_modules/@xunz03/dsh-connections';
   await mkdir(installed, { recursive: true });
   execFileSync('tar', ['-xzf', args.at(-1), '--strip-components=1', '-C', installed]);
   process.exit(0);
@@ -87,14 +87,14 @@ const server = createServer(async (req, res) => {
     const disabled = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-disabled', 'utf8').then(() => true, () => false);
     const duplicate = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-duplicate', 'utf8').then(() => true, () => false);
     respond([
-      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz/dsh-connections', patchId: 'connections', enabled: !disabled }] : []),
-      ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz/dsh-connections', patchId: 'duplicate', enabled: true }] : []),
+      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz03/dsh-connections', patchId: 'connections', enabled: !disabled }] : []),
+      ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz03/dsh-connections', patchId: 'duplicate', enabled: true }] : []),
       { entryId: 'web:ui-layout', moduleName: '@deepseek/ui-layout', patchId: 'ui-layout', enabled: false },
     ]); return;
   }
   if (input.method === 'pluginManager/setBundleEnabled') {
     const args = input.payload?.args;
-    if (args?.name !== '@xunz/dsh-connections' || args.enabled !== true || Object.keys(args).length !== 2) { res.writeHead(400).end(); return; }
+    if (args?.name !== '@xunz03/dsh-connections' || args.enabled !== true || Object.keys(args).length !== 2) { res.writeHead(400).end(); return; }
     const application = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/bundle-application', 'utf8').catch(() => 'applied');
     await appendFile(process.env.DSH_LIFECYCLE_FIXTURE + '/bundle-activations.jsonl', JSON.stringify({ args, application }) + '\\n');
     if (application === 'applied') await writeFile(runtimePath, await readFile(installedPath, 'utf8'));

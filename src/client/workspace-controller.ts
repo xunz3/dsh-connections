@@ -23,6 +23,7 @@ export interface WorkspaceOptions {
   clientId?: string
   catalogs?: boolean
 }
+// Persisted identifiers remain stable across the public npm scope rename.
 const STORAGE_KEY = '@xunz/dsh-connections/selection'
 const LEGACY_KEY = '@xunz/dsh-connections/selected'
 type Api = Pick<ConnectionsApi, 'list' | 'connect' | 'reconnect' | 'open'> & WorkspaceApi

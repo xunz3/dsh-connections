@@ -90,9 +90,9 @@ async function workspaceArchive(): Promise<Buffer> {
   try {
     const packageDir = join(temporary, 'package')
     await mkdir(packageDir)
-    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ name: '@xunz/dsh-connections', version: '0.1.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+    await writeFile(join(packageDir, 'package.json'), JSON.stringify({ name: '@xunz03/dsh-connections', version: '0.1.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
     await writeFile(join(packageDir, 'index.js'), 'export function apply() {}\n')
-    await writeFile(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: connections\n      name: \'@xunz/dsh-connections\'\n      config:\n        embedded: true\n')
+    await writeFile(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: connections\n      name: \'@xunz03/dsh-connections\'\n      config:\n        embedded: true\n')
     // Incompressible data makes the encoded transfer exceed common per-argument
     // OS limits, catching regressions that put the archive back into argv.
     await writeFile(join(packageDir, 'fixture-data'), randomBytes(192 * 1024))
@@ -175,8 +175,8 @@ test('adding and refreshing remote workspace support preserves the existing Host
     assert.deepEqual(activations.map(row => row.previousDigest), [JSON.parse(previousReceipt).digest, JSON.parse(previousReceipt).digest])
     const bundles = (await readFile(join(f.directory, 'bundle-activations.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: unknown; application: string })
     assert.deepEqual(bundles, [
-      { args: { name: '@xunz/dsh-connections', enabled: true }, application: 'restart-required' },
-      { args: { name: '@xunz/dsh-connections', enabled: true }, application: 'applied' },
+      { args: { name: '@xunz03/dsh-connections', enabled: true }, application: 'restart-required' },
+      { args: { name: '@xunz03/dsh-connections', enabled: true }, application: 'applied' },
     ])
     assert.equal(await readFile(state, 'utf8'), 'Existing native state must survive')
     const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
@@ -291,7 +291,7 @@ test('matching receipts repair removed or changed installed package bytes withou
   const f = await fixture({}, await workspaceArchive())
   try {
     const first = await prepareHost({ target: 'dev' }, f.options)
-    const entry = join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz/dsh-connections/index.js')
+    const entry = join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz03/dsh-connections/index.js')
     const original = await readFile(entry, 'utf8')
     await rm(entry)
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
@@ -306,6 +306,24 @@ test('matching receipts repair removed or changed installed package bytes withou
       assert.match(install.args.at(-1)!, /-repair-[a-f0-9-]{36}\.tgz$/)
       assert.deepEqual(await readFile(install.args.at(-1)!), await readFile(installs[0]!.args.at(-1)!))
     }
+  } finally { await f.dispose() }
+})
+
+test('public package rename retains service ownership and refuses duplicate legacy bundles', { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const legacy = join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz/dsh-connections')
+    await mkdir(legacy, { recursive: true })
+    await writeFile(join(legacy, 'package.json'), JSON.stringify({ name: '@xunz/dsh-connections' }))
+    f.setWorkspacePlugin(await workspaceArchive())
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-migration' })
+    assert.equal((await f.state()).pid, first.pid)
+    assert.equal(JSON.parse(await readFile(join(legacy, 'package.json'), 'utf8')).name, '@xunz/dsh-connections')
+    await assert.rejects(stat(join(f.options.remoteRoot!, 'home/profiles/web/node_modules/@xunz03/dsh-connections')), { code: 'ENOENT' })
+    // Simulate the documented native CLI removal, without changing the service homes.
+    await rm(legacy, { recursive: true })
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
   } finally { await f.dispose() }
 })
 

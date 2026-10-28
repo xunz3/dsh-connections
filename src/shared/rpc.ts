@@ -3,7 +3,7 @@ import { parseId, parseOpenResult, parseSave, parseSshHosts, parseUpdate, parseV
 import { parseWorkspaceCall, parseWorkspaceCallResult } from './workspace-rpc.js'
 
 export const RPC_NAMESPACE = 'connections'
-export const RPC_PACKAGE = '@xunz/dsh-connections'
+export const RPC_PACKAGE = '@xunz03/dsh-connections'
 
 function codec<T>(name: string, parse: (value: unknown) => T): TypertCodec<T> {
   return { mode: 'strict', typeSymbol: `${RPC_PACKAGE}#${name}`, create: () => ({ parse }) }

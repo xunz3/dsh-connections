@@ -3,4 +3,4 @@
   disabled: true
 - insert:
     - id: connections
-      name: '@xunz/dsh-connections'
+      name: '@xunz03/dsh-connections'

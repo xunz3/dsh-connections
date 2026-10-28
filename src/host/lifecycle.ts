@@ -30,6 +30,7 @@ export interface RemoteHostOptions {
 }
 
 const messages = {
+  'plugin-migration': 'This Host still has the unpublished @xunz/dsh-connections bundle. Remove it from this service profile with the native CLI before installing @xunz03/dsh-connections; retain the service homes and credentials. See the release guide.',
   unavailable: 'The remote host needs Linux, Node 22.19+ or 24+, flock, systemd-run, and a running systemd user manager.',
   'install-tools': 'Remote installation needs npm; Harness updates and recovery also need tar. Restore the required tools, then retry.',
   runtime: 'The managed Node runtime is missing, unsupported, or has a different native ABI. Restore the Node installation recorded in owner.json/release.json before reconnecting; do not change the owned service or reuse native dependencies with another Node ABI.',

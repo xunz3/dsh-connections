@@ -11,7 +11,9 @@ import { homedir } from 'node:os';
 import { basename, join, dirname, resolve } from 'node:path';
 import { request } from 'node:http';
 
+// Installation identity predates the public npm scope; retain ownership of existing homes.
 const owner = '@xunz/dsh-connections';
+const packageName = '@xunz03/dsh-connections';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function exists(path) { try { return await fs.lstat(path); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } }
@@ -248,11 +250,11 @@ async function activateWorkspacePlugin(context, reconcile = false) {
   if (!cookie) fail('plugin-activation');
   let plugins = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
   if (!Array.isArray(plugins)) fail('plugin-activation');
-  if (!plugins.some(plugin => plugin?.moduleName === owner)) {
+  if (!plugins.some(plugin => plugin?.moduleName === packageName)) {
     // A bundle added for the first time may not exist in the running Loader yet.
     // Publish only our bundle through the native lifecycle, then resolve its
     // actual entry before using the entry-level activation path below.
-    const result = await pluginManagerRequest(host.remotePort, cookie, 'setBundleEnabled', { name: owner, enabled: true });
+    const result = await pluginManagerRequest(host.remotePort, cookie, 'setBundleEnabled', { name: packageName, enabled: true });
     if (result?.application === 'restart-required') fail('plugin-restart');
     if (result?.application !== 'applied') fail('plugin-activation');
     plugins = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
@@ -260,7 +262,7 @@ async function activateWorkspacePlugin(context, reconcile = false) {
   }
   // Select only this bundle's actual Cordis entry. Other entries, including
   // native layout entries disabled by the remote bundle, are never mutated.
-  const entries = plugins.filter(plugin => plugin?.moduleName === owner);
+  const entries = plugins.filter(plugin => plugin?.moduleName === packageName);
   if (entries.length !== 1 || entries[0].patchId !== 'connections' || typeof entries[0].entryId !== 'string' || entries[0].entryId.length === 0 || entries[0].entryId.length > 1024 || entries[0].readOnlyReason) fail('plugin-activation');
   if (entries[0].enabled === true && !reconcile) return;
   const result = await pluginManagerRequest(host.remotePort, cookie, 'setPluginEnabled', { id: entries[0].entryId, enabled: true });
@@ -268,20 +270,20 @@ async function activateWorkspacePlugin(context, reconcile = false) {
   if (result?.application !== 'applied') fail('plugin-activation');
   const verified = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
   if (!Array.isArray(verified)) fail('plugin-activation');
-  const active = verified.filter(plugin => plugin?.moduleName === owner);
+  const active = verified.filter(plugin => plugin?.moduleName === packageName);
   if (active.length !== 1 || active[0].entryId !== entries[0].entryId || active[0].patchId !== 'connections' || active[0].enabled !== true) fail('plugin-activation');
 }
 async function installWorkspacePlugin(context, plugin) {
   try { return await installWorkspacePluginContents(context, plugin); }
-  catch (error) { if (['ownership', 'install-tools', 'plugin-activation', 'plugin-restart'].includes(error.code)) throw error; fail('install'); }
+  catch (error) { if (['ownership', 'install-tools', 'plugin-activation', 'plugin-restart', 'plugin-migration'].includes(error.code)) throw error; fail('install'); }
 }
 async function workspacePluginContents(root) {
   // A receipt proves a past reconciliation, not the continued presence of the
   // package. Verify precisely the declared runtime files before skipping CLI.
   try {
-    const directory = join(root, 'home/profiles/web/node_modules', owner);
+    const directory = join(root, 'home/profiles/web/node_modules', packageName);
     const manifest = JSON.parse(await fs.readFile(join(directory, 'package.json'), 'utf8'));
-    if (manifest.name !== owner) return undefined;
+    if (manifest.name !== packageName) return undefined;
     const main = manifest.exports?.['.'];
     const entry = typeof main === 'string' ? main : main?.default ?? manifest.main;
     const paths = ['package.json', entry, manifest.dsh?.bundle?.patch, ...(manifest.dsh?.client ? [manifest.exports?.['./client']] : [])];
@@ -302,6 +304,8 @@ async function installWorkspacePluginContents(context, plugin) {
   const archive = Buffer.from(plugin.data, 'base64');
   if (archive.length > 4 * 1024 * 1024 || createHash('sha256').update(archive).digest('hex') !== plugin.digest) fail('install');
   const { root, marker } = context;
+  // Never install two bundles that own the same native layout and settings slots.
+  if (await exists(join(root, 'home/profiles/web/node_modules', owner))) fail('plugin-migration');
   const directory = join(root, 'plugins');
   await privateDir(directory);
   const receipt = join(root, 'home/connections-workspace-plugin.json');
@@ -537,7 +541,7 @@ async function main(encoded) {
     if (!['prepare', 'update'].includes(input.action) || !/^0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) || !/^[0-9a-f-]{36}$/.test(input.operation)) fail('ownership');
     result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input, encoded);
   } catch (error) {
-    result = { error: ['unavailable', 'install-tools', 'linger', 'ownership', 'install', 'runtime', 'version', 'plugin-activation', 'plugin-restart', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
+    result = { error: ['unavailable', 'install-tools', 'linger', 'ownership', 'install', 'runtime', 'version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
   }
   if (process.argv[2] === '--worker') {
     const root = input.root ?? join(homedir(), '.local/share/dsh-connections');

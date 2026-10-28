@@ -1,6 +1,6 @@
 {
-  "name": "@xunz/dsh-connections",
-  "version": "0.1.0",
+  "name": "@xunz03/dsh-connections",
+  "version": "0.1.0-rc.0",
   "description": "SSH connections to remote DeepSeek Harness hosts",
   "type": "module",
   "license": "MIT",
@@ -116,10 +116,19 @@
     "zustand": "4.5.7"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "glob": "13.0.6",
     "ssh-config": "5.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xunz3/dsh-connections.git"
+  },
+  "homepage": "https://github.com/xunz3/dsh-connections#readme",
+  "bugs": {
+    "url": "https://github.com/xunz3/dsh-connections/issues"
   }
 }

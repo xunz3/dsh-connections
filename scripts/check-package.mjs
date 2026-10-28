@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { parseArgs } from 'node:util'
 
+const { values } = parseArgs({ options: { 'output-dir': { type: 'string' } } })
 const directory = await mkdtemp(join(tmpdir(), 'dsh-connections-package-'))
 const versions = JSON.parse(await readFile(new URL('../src/shared/harness-versions.json', import.meta.url), 'utf8'))
 try {
@@ -14,7 +17,11 @@ try {
   const entries = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }).trim().split('\n')
   const read = path => execFileSync('tar', ['-xOzf', archive, `package/${path}`], { encoding: 'utf8' })
   const manifest = JSON.parse(read('package.json'))
-  assert.equal(manifest.name, '@xunz/dsh-connections')
+  assert.equal(manifest.name, '@xunz03/dsh-connections')
+  assert.equal(manifest.repository.url, 'git+https://github.com/xunz3/dsh-connections.git')
+  assert.equal(manifest.publishConfig.access, 'public')
+  assert.equal(manifest.publishConfig.registry, 'https://registry.npmjs.org/')
+  assert(read('dist/host/index.js').includes(manifest.name), 'Host RPC identity must match the published package')
   assert.equal(manifest.engines.dsh, versions.local)
   for (const path of ['dist/host/index.js', 'dist/host/index.d.ts', 'dist/client.js', 'dist/remote-plugin.tgz', 'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/design.md', 'docs/usage.md']) assert(entries.includes(`package/${path}`), `Missing ${path}`)
   for (const entry of entries) assert(/^package\/(?:package\.json|README\.md|LICENSE|cordis\.patch\.yml|dist\/[\w./-]+|docs\/[\w.-]+\.md)$/.test(entry), `Unexpected packaged file ${entry}`)
@@ -63,4 +70,12 @@ try {
     }
   }
   console.log(`Package verified: ${entries.length} files; exports, ModuleLoader and documentation links valid.`)
+  if (values['output-dir']) {
+    const output = resolve(values['output-dir'])
+    await mkdir(output, { recursive: true })
+    const integrity = `sha512-${createHash('sha512').update(await readFile(archive)).digest('base64')}`
+    await copyFile(archive, join(output, archives[0]))
+    await writeFile(join(output, 'release-package.json'), JSON.stringify({ name: manifest.name, version: manifest.version, tarball: archives[0], integrity }, null, 2) + '\n')
+    console.log(`Checked release artifact: ${join(output, archives[0])}`)
+  }
 } finally { await rm(directory, { recursive: true, force: true }) }

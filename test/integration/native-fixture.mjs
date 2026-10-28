@@ -24,7 +24,7 @@ const digest = value => createHash('sha256').update(value).digest('hex')
 const buildFiles = ['dist/host/index.js', 'dist/client.js']
 
 async function verifyInstalled(metadata, remote = false) {
-  const installed = join(root, remote ? 'remote-home' : 'home', 'profiles/web/node_modules/@xunz/dsh-connections')
+  const installed = join(root, remote ? 'remote-home' : 'home', 'profiles/web/node_modules/@xunz03/dsh-connections')
   const files = {}
   for (const file of buildFiles) {
     const [expected, actual] = await Promise.all([

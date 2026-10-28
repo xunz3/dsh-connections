@@ -22,7 +22,7 @@ const response = await fetch(launch, { redirect: 'manual', signal: AbortSignal.t
 assert.equal(response.status, 303, 'Native owner authentication must succeed.')
 const cookie = response.headers.getSetCookie().map(value => value.split(';', 1)[0]).join('; ')
 assert.ok(cookie)
-const packageName = '@xunz/dsh-connections-native-reload-probe'
+const packageName = '@xunz03/dsh-connections-native-reload-probe'
 const routePath = '/api/connections/native-reload-probe'
 const work = join(directory, 'native-reload-probe')
 await mkdir(work, { recursive: true, mode: 0o700 })
