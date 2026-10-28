@@ -1,6 +1,6 @@
 {
   "name": "@xunz03/dsh-connections",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "SSH connections to remote DeepSeek Harness hosts",
   "type": "module",
   "license": "MIT",

@@ -1,8 +1,13 @@
 # Harness compatibility
 
 Reviewed against the published rc.2 and rc.3 packages on 2026-10-28. Connections
-0.1.2 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+0.1.3 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
+
+Connections 0.1.3 separates workspace presentation and interaction state using
+MVVM, aligns its list with native icons and spacing, and fixes catalog snapshot
+and asynchronous action handling. It retains the 0.1.2 stylesheet ownership fix.
+See [workspace list responsibilities](unified-workspaces.md#workspace-list-responsibilities).
 
 ## Desktop sidebar stylesheet ownership
 
