@@ -28,7 +28,7 @@ These tests simulate the guest bridge in Chromium; they do not validate Electron
 
 The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.3 and checked against its sidebar package; remote compatibility explicitly enumerates tested rc.2 and rc.3 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
 
-The build includes only the installed native sidebar package's ModuleLoader factory through a generated adapter. Its dependencies stay external and are supplied through the main manifest. `dist/native-sidebar.LICENSE` preserves its upstream MIT license. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
+The build includes only the installed native sidebar package's ModuleLoader factory through a generated adapter. Its dependencies stay external and are supplied through the main manifest. The adapter assigns the compiled CSS ownership and deduplication IDs to Connections, preserving the original CSS and class names. This avoids collisions with Desktop's separately compiled sidebar and lets Harness unload/reload the composed styles correctly. `dist/native-sidebar.LICENSE` preserves its upstream MIT license. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
 
 The adapter reuses the original module's `apply`, components and child declarations; it does not vendor a source fork or recreate the sidebar. At runtime a Cordis-isolated `uiWorkspace` facade changes only `startSession` routing, with other methods and accessors bound to their native receiver. Disabling the whole Connections bundle removes its patch and restores the native sidebar deployment.
 
@@ -79,9 +79,25 @@ Default browser fixtures cover settings, managed-mode creation and explicit upda
 
 Shell-routing tests execute the installed native sidebar factory with real Cordis and SlotCore. They verify original component and child-slot reuse, source-aware New Session callbacks, isolation from other consumers, correct native method receivers and cleanup. Presentation regressions cover waiting for the native picker or selected session, stale acknowledgements, timeout recovery and cancellation; a successful HTTP response or iframe load alone is not readiness evidence.
 
+Stylesheet lifecycle tests execute the actual Harness ModuleLoader and Cordis
+Loader through native-to-Connections replacement, reload and native restoration.
+The native browser suite also preloads conflicting original stylesheet IDs and
+checks computed button styles, vertical panel layout and menu interaction before
+and after the original styles are removed. Same-version Desktop/npm class-name
+differences were confirmed against the installed rc.3 Desktop application archive.
+
 SSH discovery tests cover Include resolution, literal patterns, permissions, traversal limits and command-free enumeration. Picker fixtures cover selection and naming, manual fallback, refresh failure/recovery, stale replies and targets removed from configuration. Set `DSH_EXPECT_SSH_HOSTS=1` with `DSH_WEB_LOG` for the native settings test to require a nonempty real configuration list; it saves and removes only a marked test entry without connecting.
 
-Actual Electron desktop rendering, macOS, Windows and machine reboot are not covered by these fixtures. Desktop opening is disabled pending source-aware native menu routing. A default Node test checks that the production installer rejects remote desktop views and releases their lease; the opt-in guest bridge fixtures cover allocation, cleanup, failures and popup delegation. Upstream partitions are transient. No model task, account credential migration or computer-input automation is exercised.
+CI browser fixtures do not run Electron. On 2026-10-28, the 0.1.2 build was also
+installed into a disposable Windows Desktop rc.3 profile, with a separate
+Electron user-data directory and Harness home. CDP checks on the actual installed
+application verified native button styles, vertical panel layout, More menu
+actions, blank-session draft preservation after the native response, Connections
+Settings and renderer reload. The test process was stopped after verification;
+the normal Desktop profile was not modified. macOS, Linux Electron and machine
+reboot remain untested.
+
+Remote desktop workspace opening is disabled pending source-aware native menu routing. A default Node test checks that the production installer rejects remote desktop views and releases their lease; the opt-in guest bridge fixtures cover allocation, cleanup, failures and popup delegation. Upstream partitions are transient. No model task or account credential migration is exercised.
 
 ## Recent native verification
 

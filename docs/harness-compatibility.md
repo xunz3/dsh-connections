@@ -1,8 +1,30 @@
 # Harness compatibility
 
 Reviewed against the published rc.2 and rc.3 packages on 2026-10-28. Connections
-0.1.1 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+0.1.2 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
+
+## Desktop sidebar stylesheet ownership
+
+Connections 0.1.2 fixes missing native sidebar styling on Desktop. The rc.3
+Desktop and npm sidebar builds use different generated CSS class names but the
+same stylesheet IDs. Reusing the npm factory with those IDs could skip its CSS
+when Desktop had already loaded its own copy. The native loader could also remove
+the copied styles when retiring the disabled original sidebar.
+
+The build adapter now assigns both the stylesheet owner and deduplication IDs to
+Connections. Native CSS, class names and components remain unchanged. Harness
+therefore inventories, reloads and removes these styles with Connections, while
+the original sidebar can be restored independently. A changed upstream ownership
+format fails the build instead of silently producing an unstyled shell.
+
+Regression coverage includes the actual Harness module-loader replacement and
+reload lifecycle, plus computed native button styles and panel layout with a
+preloaded Desktop-style collision. This browser coverage does not run Electron.
+The fixed build was additionally checked in the installed Windows Desktop rc.3
+application with isolated Harness and Electron data directories: native styling,
+More menu, New Session draft preservation, Connections Settings and renderer
+reload passed. See [development acceptance boundaries](development.md).
 
 ## What rc.3 changes
 

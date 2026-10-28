@@ -294,6 +294,63 @@ test('dedicated remote profile boots its public embedded layout without a second
   await page.screenshot({ path: info.outputPath('embedded-direct-visit.png'), fullPage: true })
 })
 
+test('composed native sidebar keeps its styles when the shell preloads and unloads its own sidebar CSS', async ({ page }, info) => {
+  test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
+  page.setDefaultTimeout(15_000)
+  const nativeSource = await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar/client')), 'utf8')
+  const originalStyleIds = [...new Set([...nativeSource.matchAll(/"(@deepseek-ai\/dsh-client-ui-sidebar\/[^"\n]+\.css)"/g)].map(match => match[1]))]
+  expect(originalStyleIds.length).toBeGreaterThan(0)
+  await page.addInitScript(ids => {
+    // Desktop can preload another compiled copy of the sidebar under these
+    // same CSS IDs. Its class names need not match our installed native copy.
+    const install = () => {
+      if (!document.head) return false
+      for (const id of ids) {
+        const tag = document.createElement('style')
+        tag.dataset.plugin = '@deepseek-ai/dsh-client-ui-sidebar'
+        tag.dataset.pluginCss = id
+        tag.dataset.connectionsRegression = 'preloaded-sidebar'
+        tag.textContent = '.preloaded-desktop-sidebar { display: flex; }'
+        document.head.appendChild(tag)
+      }
+      return true
+    }
+    if (!install()) {
+      const observer = new MutationObserver(() => { if (install()) observer.disconnect() })
+      observer.observe(document, { childList: true, subtree: true })
+    }
+  }, originalStyleIds)
+  await page.goto(await launch(join(fixturePath!, 'host.log')), { waitUntil: 'domcontentloaded' }).catch(() => { throw new Error('The isolated local Host could not load.') })
+  await dismissWelcome(page)
+  await expect(page.getByRole('region', { name: 'Workspaces', exact: true })).toHaveCount(1)
+  const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
+  const panels = page.getByRole('navigation', { name: 'Global panels', exact: true })
+  const more = panels.getByRole('button', { name: 'More', exact: true })
+  const plugins = panels.getByRole('button', { name: 'Plugins', exact: true })
+  const assertAppearance = async () => {
+    await expect(newSession).toHaveCSS('display', 'flex')
+    await expect(newSession).toHaveCSS('height', '38px')
+    await expect(panels).toHaveCSS('flex-direction', 'column')
+    await expect(more).toHaveCSS('border-top-style', 'none')
+    await expect(more).toHaveCSS('min-height', '36px')
+    const pluginBounds = await plugins.boundingBox(), moreBounds = await more.boundingBox()
+    expect(pluginBounds).not.toBeNull()
+    expect(moreBounds).not.toBeNull()
+    expect(moreBounds!.y).toBeGreaterThanOrEqual(pluginBounds!.y + pluginBounds!.height)
+  }
+  await assertAppearance()
+  await expect(page.locator('style[data-connections-regression="preloaded-sidebar"]')).toHaveCount(originalStyleIds.length)
+  await page.evaluate(() => {
+    for (const tag of document.querySelectorAll('style[data-plugin="@deepseek-ai/dsh-client-ui-sidebar"]')) tag.remove()
+  })
+  await assertAppearance()
+  await more.click()
+  await expect(page.getByRole('menuitem', { name: 'Browse other plugins', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(more).toBeFocused()
+  await page.screenshot({ path: info.outputPath('native-sidebar-css-ownership.png'), fullPage: true })
+})
+
 test('one native sidebar switches local and SSH projects while remote content stays native', async ({ page }, info) => {
   test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
   page.setDefaultTimeout(15_000)

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { composeNativeSidebar } from './native-sidebar.mjs'
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 const { name } = manifest
@@ -20,10 +21,7 @@ const nativeSidebar = {
     build.onResolve({ filter: /^@deepseek-ai\/dsh-client-ui-sidebar\/client$/ }, () => ({ path: 'native-sidebar', namespace: 'native-sidebar' }))
     build.onLoad({ filter: /.*/, namespace: 'native-sidebar' }, async () => {
       const source = await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar/client')), 'utf8')
-      const prefix = 'window.__ModuleLoader__.load('
-      if (!source.startsWith(prefix)) throw new Error('Unsupported native sidebar bundle format')
-      return { contents: source.replace(prefix, 'const nativeSidebar = (entry => entry.factory(require))(')
-        + '\nexport const apply = nativeSidebar.apply; export const inject = nativeSidebar.inject;\n', loader: 'js' }
+      return { contents: composeNativeSidebar(source, name), loader: 'js' }
     })
   },
 }

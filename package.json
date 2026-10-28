@@ -1,6 +1,6 @@
 {
   "name": "@xunz03/dsh-connections",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "SSH connections to remote DeepSeek Harness hosts",
   "type": "module",
   "license": "MIT",
@@ -62,11 +62,13 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.6",
     "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.3",
     "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.3",
     "@deepseek-ai/dsh-api-workspace-controller": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-connection": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-locale": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-modules": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-shortcuts": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-store": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.3",
