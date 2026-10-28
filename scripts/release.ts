@@ -8,7 +8,7 @@ import { setTimeout } from 'node:timers/promises'
 type Metadata = { versions: Record<string, { dist?: { integrity?: string } }>; 'dist-tags': Record<string, string> }
 
 export async function metadata(name: string, fetcher: typeof fetch = fetch): Promise<Metadata> {
-  const response = await fetcher(`https://registry.npmjs.org/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(15_000), headers: { 'Cache-Control': 'no-cache' } })
+  const response = await fetcher(`https://registry.npmjs.org/${encodeURIComponent(name)}?check=${Date.now()}`, { signal: AbortSignal.timeout(15_000), headers: { 'Cache-Control': 'no-cache' } })
   if (response.status === 404) return { versions: {}, 'dist-tags': {} }
   if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`)
   const data = await response.json() as Metadata
@@ -19,16 +19,17 @@ export async function metadata(name: string, fetcher: typeof fetch = fetch): Pro
 export function releasePlan(version: string, registry: Metadata) {
   const core = '(0|[1-9][0-9]*)'
   const identifier = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-  assert(new RegExp(`^${core}\\.${core}\\.${core}(?:-${identifier}(?:\\.${identifier})*)?$`).test(version), 'Use a semantic version without build metadata')
+  const semanticVersion = new RegExp(`^${core}\\.${core}\\.${core}(?:-${identifier}(?:\\.${identifier})*)?$`)
+  assert(semanticVersion.test(version), 'Use a semantic version without build metadata')
   const tag = version.includes('-') ? 'next' : 'latest'
   if (Object.hasOwn(registry.versions, version)) return { publish: false, tag }
   const latest = registry['dist-tags'].latest
   if (tag === 'latest' && latest) {
     const current = version.split('.').map(BigInt)
-    assert(/^\d+\.\d+\.\d+$/.test(latest), 'Unexpected latest version; inspect npm before publishing')
-    const prior = latest.split('.').map(BigInt)
+    assert(semanticVersion.test(latest), 'Unexpected latest version; inspect npm before publishing')
+    const prior = latest.split('-')[0]!.split('.').map(BigInt)
     const difference = current.map((part, index) => part - prior[index]!).find(part => part !== 0n)
-    assert(difference !== undefined && difference > 0n, 'Refusing to move latest backwards')
+    assert(difference !== undefined ? difference > 0n : latest.includes('-'), 'Refusing to move latest backwards')
   }
   return { publish: true, tag }
 }
@@ -52,7 +53,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } else if (process.argv[2] === 'verify') {
     assert(process.env.EXPECTED_INTEGRITY && process.env.DIST_TAG, 'Missing expected release metadata')
     let verified = false
-    for (let attempt = 0; attempt < 12; attempt++) {
+    // npm scans accepted uploads before serving them; CDN misses may also lag publication.
+    for (let attempt = 0; attempt < 60; attempt++) {
       const data = await metadata(name)
       if (data.versions[version]) {
         assert.equal(data.versions[version]?.dist?.integrity, process.env.EXPECTED_INTEGRITY, 'Published archive differs from checked artifact')

@@ -11,6 +11,13 @@ test('release planning skips published versions and keeps prereleases off latest
   for (const version of ['latest', '1.01.0', '1.0.0-01', '1.0.0+build']) assert.throws(() => releasePlan(version, registry))
 })
 
+test('first stable release can replace a bootstrap prerelease on latest without downgrading', () => {
+  const registry = { versions: { '0.1.0-rc.0': {} }, 'dist-tags': { latest: '0.1.0-rc.0' } }
+  assert.deepEqual(releasePlan('0.1.0', registry), { publish: true, tag: 'latest' })
+  assert.deepEqual(releasePlan('0.1.1', registry), { publish: true, tag: 'latest' })
+  assert.throws(() => releasePlan('0.0.9', registry), /backwards/)
+})
+
 test('registry lookup treats only 404 as a new package and fails closed on errors', async () => {
   const respond = (status: number, body: unknown = {}) => (async () => new Response(JSON.stringify(body), { status })) as typeof fetch
   assert.deepEqual(await metadata('@xunz03/dsh-connections', respond(404)), { versions: {}, 'dist-tags': {} })
