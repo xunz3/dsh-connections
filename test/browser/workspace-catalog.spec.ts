@@ -5,8 +5,7 @@ const fixture = (page: Page) => page.evaluate(() => (window as unknown as { work
 
 test('workspace New chat creates a session on the owning computer', async ({ page }) => {
   await page.goto('/catalog')
-  await page.getByLabel('Actions: Remote project', { exact: true }).click()
-  await page.getByRole('menuitem', { name: 'New chat', exact: true }).click()
+  await page.getByRole('button', { name: 'New chat: Remote project', exact: true }).click()
   expect(await fixture(page)).toEqual([['newSession', 'remote', 'project']])
 })
 
@@ -31,6 +30,11 @@ test('large catalogs page mounted rows and search beyond the visible page', asyn
 test('a single workspace list opens equal native IDs on their owning computers', async ({ page }) => {
   await page.goto('/catalog')
   await expect(page.getByRole('heading', { name: 'Workspaces' })).toHaveCount(1)
+  // Presentation comes from the source's actual catalog, including its running state.
+  const remoteRow = page.locator('[data-source-id="remote"] .dcw-session').filter({ has: page.getByRole('button', { name: 'Remote discussion · devbox', exact: true }) })
+  await expect(remoteRow.getByRole('img', { name: 'Running', exact: true })).toBeVisible()
+  await expect(remoteRow.locator('time')).toHaveAttribute('datetime', /T/)
+  await expect(page.locator('[data-source-id="local"]').getByRole('img', { name: 'Running', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Remote discussion · devbox', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Remote discussion · devbox', exact: true })).toHaveAttribute('aria-current', 'page')
   await page.getByRole('button', { name: 'Local discussion', exact: true }).click()

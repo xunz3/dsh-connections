@@ -192,6 +192,55 @@ test('catalogs publish independently, retain offline rows and discard an edited 
   f.rows[0].target = 'replacement'; await controller.refresh(); assert.equal(controller.getCatalogs().sources[1].catalog, undefined); controller.dispose()
 })
 
+test('catalog refresh publishes immutable source snapshots through partial results, failure and recovery', async () => {
+  const f = fixture(), controller = new WorkspaceController(f.api), respond = f.respond
+  const local = deferred<WorkspaceResult>(), remote = deferred<WorkspaceResult>()
+  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188 }
+  f.respond = async (id, request) => request.op === 'catalog' ? (id === 'local' ? local : remote).promise : respond(id, request)
+  const history: { snapshot: ReturnType<WorkspaceController['getCatalogs']>; expected: ReturnType<WorkspaceController['getCatalogs']> }[] = []
+  controller.subscribe(() => {
+    const snapshot = controller.getCatalogs()
+    history.push({ snapshot, expected: structuredClone(snapshot) })
+  })
+  const refreshing = controller.refresh()
+  try {
+    await nextTick()
+    const loading = controller.getCatalogs()
+    local.resolve(catalog())
+    await nextTick()
+    const partial = controller.getCatalogs()
+    assert.ok(partial.sources[0].catalog)
+    assert.equal(partial.sources[1].catalog, undefined)
+    assert.equal(loading.sources[0].catalog, undefined, 'a completed request must not mutate the published loading snapshot')
+    remote.resolve(catalog())
+    await refreshing
+    const completed = controller.getCatalogs()
+    assert.ok(completed.sources[1].catalog)
+    assert.equal(partial.sources[1].catalog, undefined, 'the next host completion must leave the partial snapshot unchanged')
+    f.respond = async (id, request) => {
+      if (id === first && request.op === 'catalog') throw new Error('Temporary catalog failure')
+      return respond(id, request)
+    }
+    await controller.refresh()
+    const failed = controller.getCatalogs()
+    assert.ok(failed.sources[1].catalogError)
+    assert.equal(completed.sources[1].catalogError, undefined)
+    f.respond = async (id, request) => request.op === 'catalog'
+      ? { ...catalog(), workspaces: [], sessions: [], unchanged: true }
+      : respond(id, request)
+    await controller.refresh()
+    const recovered = controller.getCatalogs()
+    assert.equal(recovered.sources[1].catalogError, undefined)
+    assert.ok(failed.sources[1].catalogError, 'clearing the current error must not rewrite the failure snapshot')
+    assert.equal(recovered.sources[1].catalog, failed.sources[1].catalog, 'unchanged native catalogs retain their cached identity')
+    for (const { snapshot, expected } of history) assert.deepEqual(snapshot, expected)
+  } finally {
+    local.resolve(catalog()); remote.resolve(catalog())
+    await refreshing
+    controller.dispose()
+  }
+})
+
 test('mutation failures surface and successful writes refresh the native catalog', async () => {
   const f = fixture(), controller = new WorkspaceController(f.api), respond = f.respond
   let archived = false

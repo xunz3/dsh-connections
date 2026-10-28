@@ -147,7 +147,9 @@ export class WorkspaceController {
         ...(sameDestination(previous.get(row.id), row) ? old.get(row.id) : {}),
         id: row.id, name: row.name, phase: row.phase === 'updating' ? 'connecting' as const : row.phase,
       }))]
-      this.catalogs = { ...this.catalogs, sources }
+      // Workers update their private source records as requests settle. Never
+      // publish those records: subscribers must retain immutable old snapshots.
+      this.catalogs = { ...this.catalogs, sources: sources.map(source => ({ ...source })) }
       this.emit()
       for (const id of this.catalogGenerations.keys()) if (!sources.some(source => source.id === id)) {
         this.invalidateCatalog(id)
@@ -157,7 +159,7 @@ export class WorkspaceController {
       const current = (id: string) => !this.disposed && generations.get(id) === (this.catalogGenerations.get(id) ?? 0)
       const publish = () => {
         if (this.disposed) return
-        this.catalogs = { ...this.catalogs, sources: sources.map(source => current(source.id) ? source : this.catalogs.sources.find(latest => latest.id === source.id) ?? source) }
+        this.catalogs = { ...this.catalogs, sources: sources.map(source => current(source.id) ? { ...source } : this.catalogs.sources.find(latest => latest.id === source.id) ?? { ...source }) }
         this.emit()
       }
       const pending = sources.filter(source => source.phase === 'connected')

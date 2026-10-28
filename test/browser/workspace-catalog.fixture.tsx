@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { StrictMode, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { WorkspaceBrowser, type WorkspaceSelection, type WorkspaceSource } from '../../src/client/WorkspaceBrowser.js'
 import type { WorkspaceCatalog } from '../../src/shared/workspace-protocol.js'
@@ -12,10 +12,12 @@ function catalog(remote: boolean): WorkspaceCatalog {
     const sessions = Array.from({ length: 20_000 }, (_, index) => ({ id: `large-${index}`, title: `Large discussion ${index}`, updatedAt: 0, blank: false, running: false }))
     return { workspaces: [{ id: 'project', title: 'Remote project', path: '/project', sessionIds: sessions.map(row => row.id) }], sessions, pinnedSessionIds: [], archivedSessionIds: [] }
   }
+  const workspaceTitle = query.has('long') ? '长期维护的跨主机工作区与连接管理项目' : remote ? 'Remote project' : 'Local project'
+  const sessionTitle = query.has('long') ? '讨论远程工作区的模型配置、插件归属和侧栏设计' : remote ? 'Remote discussion' : 'Local discussion'
   return {
-    workspaces: [{ id: 'project', title: remote ? 'Remote project' : 'Local project', path: '/project', sessionIds: ['same', 'pinned', 'archived'] }],
+    workspaces: [{ id: 'project', title: workspaceTitle, path: '/project', sessionIds: ['same', 'pinned', 'archived'] }],
     sessions: [
-      { id: 'same', title: remote ? 'Remote discussion' : 'Local discussion', updatedAt: 0, blank: false, running: remote },
+      { id: 'same', title: sessionTitle, updatedAt: Date.now() - 120_000, blank: false, running: remote },
       { id: 'pinned', title: 'Plan release', updatedAt: 0, blank: false, running: false },
       { id: 'archived', title: 'Archived discussion', updatedAt: 0, blank: false, running: false },
     ],
@@ -49,4 +51,4 @@ function App() {
   </>
 }
 Object.assign(globalThis, { workspaceCatalogFixture: { calls, disconnect: () => disconnect(), resolveReconnect: () => resolveReconnect?.() } })
-createRoot(document.getElementById('root')!).render(<App />)
+createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>)
