@@ -30,8 +30,9 @@ export function apply(ctx: Context) {
   installNativeShortcuts(ctx, (command, context) => remoteSettings?.getSnapshot()
     ? remoteSettingsCommand(command, context, () => remoteSettings?.close())
     : commands?.(command, context), ready => {
+      const lost = shortcutsReady && !ready
       shortcutsReady = ready
-      if (!ready) closeRemote?.()
+      if (lost) closeRemote?.()
     })
   ctx.inject(['slots', 'theme', 'configForms'], scope => installShell(scope, {
     canRoute: () => shortcutsReady,
@@ -52,12 +53,19 @@ function installShell(ctx: Context, routing: {
   let startRemote: ((id?: string) => void) | undefined
   let closeRemote: (() => void) | undefined
   let routed = false
+  const setSidebarReady = (ready: boolean) => {
+    const lost = routed && !ready
+    routed = ready
+    // Initial dependency/slot discovery is not navigation. Closing here would
+    // erase the saved remote selection before its restoration can finish.
+    if (lost) closeRemote?.()
+  }
   ctx.inject(['uiWorkspace', 'layout', 'shortcuts'], scope => {
     installNativeSidebar(scope, { startSession: id => {
       if (startRemote) startRemote(id)
       else scope.uiWorkspace.startSession(id)
-    }, onReady: ready => { routed = ready; if (!ready) closeRemote?.() } })
-    return () => { routed = false; closeRemote?.() }
+    }, onReady: setSidebarReady })
+    return () => { setSidebarReady(false) }
   })
   ctx.effect(() => ctx.locale.register('connections', { en, zh }))
   const t = ctx.locale.bind('connections') as Translate

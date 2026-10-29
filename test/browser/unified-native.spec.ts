@@ -440,6 +440,9 @@ test('hot enable and disable preserve the native root, sidebar and unsent sessio
     const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
     const composedCss = page.locator('style[data-plugin-css^="@xunz03/dsh-connections/native-sidebar/"]')
     const assertShell = async () => {
+      // Restoring the native sidebar can remount its account contribution and
+      // reopen Get started in this deliberately unauthenticated fixture.
+      await dismissWelcome(page)
       await expect(panels).toHaveCount(1)
       await expect(newSession).toHaveCount(1)
       await expect(newSession).toHaveCSS('display', 'flex')

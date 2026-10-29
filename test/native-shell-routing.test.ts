@@ -83,7 +83,7 @@ class TestSlots extends Service {
   entriesOfSlot(key: string) { return this.core.entriesOfSlot(key) }
 }
 
-function fixture(tracked = false) {
+function fixture(tracked = false, workspace = true) {
   const ctx = new Context()
   const core = new slots.SlotCore()
   const native = tracked ? new TrackedNativeWorkspace(ctx) : new NativeWorkspace()
@@ -92,7 +92,7 @@ function fixture(tracked = false) {
     'settings.section': { kind: 'list', scope: 'root' },
   } }, (() => null) as never)
   const slotService = new TestSlots(ctx, core)
-  if (!tracked) ctx.provide('uiWorkspace', native as unknown as UiWorkspace)
+  if (!tracked && workspace) ctx.provide('uiWorkspace', native as unknown as UiWorkspace)
   ctx.provide('layout', { toggleSidebar() {}, selectPanel() {} } as never)
   const dictionaries = new Map<string, { en: Record<string, string> }>()
   ctx.provide('locale', {
@@ -412,8 +412,8 @@ test('missing remote service leaves Settings loading only until the deadline and
   } finally { await f.dispose() }
 })
 
-test('losing shortcut ownership closes remote views while keeping native navigation mounted', async () => {
-  const f = fixture()
+test('initial native discovery preserves restoration and ownership loss closes remote views', async () => {
+  const f = fixture(false, false)
   let ready!: (ready: boolean) => void
   let workspaceAllowed!: () => boolean, settingsAllowed!: () => boolean
   let workspaceClosed = 0, settingsClosed = 0
@@ -450,11 +450,20 @@ test('losing shortcut ownership closes remote views while keeping native navigat
   try {
     const owner = f.ctx.plugin(root.exports)
     await owner; await settled(); await settled()
-    const sidebar = f.core.entries('sidebar')[0]
-    assert.ok(sidebar)
+    assert.equal(f.core.entries('sidebar').length, 0)
     assert.equal(workspaceAllowed(), false)
     assert.equal(settingsAllowed(), false)
+    ready(false)
+    assert.equal(workspaceClosed, 0, 'initial native readiness must not cancel saved remote restoration')
+    assert.equal(settingsClosed, 0)
     ready(true)
+    assert.equal(workspaceAllowed(), false, 'sidebar readiness must also be established')
+    f.ctx.provide('uiWorkspace', f.native as unknown as UiWorkspace)
+    await settled(); await settled()
+    const sidebar = f.core.entries('sidebar')[0]
+    assert.ok(sidebar)
+    assert.equal(workspaceClosed, 0, 'late sidebar discovery must not cancel saved remote restoration')
+    assert.equal(settingsClosed, 0)
     assert.equal(workspaceAllowed(), true)
     assert.equal(settingsAllowed(), true)
     ready(false)
@@ -463,6 +472,9 @@ test('losing shortcut ownership closes remote views while keeping native navigat
     assert.equal(workspaceAllowed(), false)
     assert.equal(settingsAllowed(), false)
     assert.equal(f.core.entries('sidebar')[0], sidebar, 'an adapter failure must not retire native navigation')
+    ready(false)
+    assert.equal(workspaceClosed, 1, 'repeated unavailable notifications must not become local navigation')
+    assert.equal(settingsClosed, 1)
     ready(true)
     assert.equal(workspaceAllowed(), true)
     assert.equal(settingsAllowed(), true)
