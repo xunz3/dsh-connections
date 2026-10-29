@@ -459,6 +459,9 @@ async function worker(input) {
     }
   }
   const previous = await currentRelease(root);
+  // Default updates must not downgrade a newer Host or replace an unvalidated
+  // release. Inspect the installed version under the same maintenance lock.
+  if (input.latest && previous && !input.supportedVersions?.includes(previous)) fail('update-version');
   if (input.action === 'prepare' && previous && input.supportedVersions && !input.supportedVersions.includes(previous)) fail('version');
   if (previous) {
     const metadata = await json(join(root, 'releases', previous, 'release.json'));
@@ -549,7 +552,7 @@ async function main(encoded) {
     if (!['prepare', 'update'].includes(input.action) || !/^0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) || !/^[0-9a-f-]{36}$/.test(input.operation)) fail('ownership');
     result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input, encoded);
   } catch (error) {
-    result = { error: ['unavailable', 'install-tools', 'linger', 'ownership', 'install', 'runtime', 'version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
+    result = { error: ['unavailable', 'install-tools', 'linger', 'ownership', 'install', 'runtime', 'version', 'update-version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
   }
   if (process.argv[2] === '--worker') {
     const root = input.root ?? join(homedir(), '.local/share/dsh-connections');

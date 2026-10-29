@@ -332,7 +332,7 @@ test('root RPC setup failure preserves native navigation and a visible settings 
     './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings() {} },
     './native-shortcuts.js': { installNativeShortcuts() {} },
     './workspace-shortcuts.js': { remoteSettingsCommand() {} },
-    './native-settings.js': { settingsShell },
+    './native-settings.js': { settingsShell }, './settings-icon.js': { mountSettingsIcon() {} },
   }
   runInNewContext(compiled, { module: root, exports: root.exports, setTimeout, clearTimeout, require(id: string) {
     assert.ok(id in imports, `unexpected root dependency ${id}`)
@@ -380,7 +380,7 @@ test('missing remote service leaves Settings loading only until the deadline and
     './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings() {} },
     './native-shortcuts.js': { installNativeShortcuts() {} },
     './workspace-shortcuts.js': { remoteSettingsCommand() {} },
-    './native-settings.js': { settingsShell },
+    './native-settings.js': { settingsShell }, './settings-icon.js': { mountSettingsIcon() {} },
   }
   runInNewContext(compiled, {
     module: root, exports: root.exports,

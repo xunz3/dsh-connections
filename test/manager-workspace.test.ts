@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
 import test from 'node:test'
 import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import { ConnectionsManager } from '../src/host/manager.js'
@@ -53,6 +54,7 @@ function cookie(authority: string, counter: number): string {
 async function remote(title = 'Remote') {
   const state = {
     auth: 0, posts: 0, cookies: [] as string[], receivedCookies: [] as string[],
+    workspaceSockets: [] as Socket[],
     onAuth: undefined as ((request: IncomingMessage, response: ServerResponse, reply: () => void) => void) | undefined,
     onPost: undefined as ((request: IncomingMessage, response: ServerResponse, input: { op: string }) => void) | undefined,
   }
@@ -68,6 +70,7 @@ async function remote(title = 'Remote') {
     }
     if (request.method !== 'POST' || request.url !== WORKSPACE_ENDPOINT) { response.writeHead(404); response.end(); return }
     state.posts++
+    state.workspaceSockets.push(request.socket)
     state.receivedCookies.push(request.headers.cookie ?? '')
     const chunks: Buffer[] = []
     request.on('data', chunk => chunks.push(chunk))
@@ -143,6 +146,34 @@ test('workspace calls share a Host-only cookie without exposing or persisting it
   } finally { await manager.dispose(); await host.close() }
 })
 
+test('workspace pools end with their transport and a replacement on the same port gets a fresh socket', async () => {
+  for (const action of ['disconnect', 'remove', 'edit', 'unload', 'drop', 'reconnect'] as const) {
+    const host = await remote()
+    const { manager, add, tunnels } = await setup({ dev: host.port })
+    try {
+      const id = await add('dev')
+      await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+      await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+      const first = host.state.workspaceSockets[0]!
+      assert.equal(first, host.state.workspaceSockets[1])
+      const closed = once(first, 'close', { signal: AbortSignal.timeout(2000) })
+      if (action === 'disconnect') await manager.disconnect(id)
+      else if (action === 'remove') await manager.remove(id)
+      else if (action === 'edit') await manager.save({ id, name: 'Other', target: 'other', launchUrl: `http://127.0.0.1:3080/?token=${token}` })
+      else if (action === 'unload') await manager.dispose()
+      else if (action === 'drop') await tunnels[0]!.close()
+      else await manager.reconnect(id)
+      await closed
+      if (action === 'disconnect' || action === 'drop' || action === 'reconnect') {
+        await manager.connect(id)
+        await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
+        assert.notEqual(host.state.workspaceSockets[2], first, action)
+        assert.equal(host.state.auth, 2)
+      }
+    } finally { await manager.dispose(); await host.close() }
+  }
+})
+
 test('disconnect, removal, destination edit and unload abort in-flight workspace results', async () => {
   for (const action of ['disconnect', 'remove', 'edit', 'unload'] as const) {
     const host = await remote()
@@ -203,7 +234,12 @@ test('connections keep independent cookies and long polls do not block list or a
   const { manager, add } = await setup({ first: first.port, second: second.port })
   const received = deferred()
   let count = 0
-  first.state.onPost = (_request, _response) => { if (++count === 2) received.resolve() }
+  first.state.onPost = (_request, response, input) => {
+    if (input.op === 'catalog') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(catalog('First')))
+    } else if (++count === 2) received.resolve()
+  }
   try {
     const firstId = await add('first')
     const secondId = await add('second')
@@ -212,6 +248,7 @@ test('connections keep independent cookies and long polls do not block list or a
     await received.promise
     const started = Date.now()
     assert.equal((await manager.list()).filter(row => row.phase === 'connected').length, 2)
+    assert.deepEqual(await manager.workspace(firstId, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('First'))
     assert.deepEqual(await manager.workspace(secondId, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Second'))
     await manager.disconnect(firstId)
     assert.ok(Date.now() - started < 3000, 'management must not await a long poll')

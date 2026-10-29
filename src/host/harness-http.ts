@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { request } from 'node:http'
+import { Agent, request } from 'node:http'
 import type { ClientRequest, IncomingMessage } from 'node:http'
 import {
   WORKSPACE_ENDPOINT, WORKSPACE_ERRORS, WORKSPACE_REQUEST_LIMIT, WORKSPACE_RESPONSE_LIMIT,
@@ -17,6 +17,11 @@ const missingPlugin = 'This Host needs the Connections workspace plugin. Update 
 const expiredAuthorization = 'The remote workspace authorization expired. Reconnect and try again.'
 
 function validPort(port: number): boolean { return Number.isInteger(port) && port >= 1 && port <= 65535 }
+
+/** One bounded pool per SSH transport; its owner must destroy it when that transport ends. */
+export function createWorkspaceAgent(): Agent {
+  return new Agent({ keepAlive: true, maxSockets: 8, maxTotalSockets: 8, maxFreeSockets: 2, scheduling: 'lifo', timeout: 30_000 })
+}
 function cookieName(port: number): string {
   return `dsh-auth-${createHash('sha256').update(`127.0.0.1:${port}`).digest('base64url')}`
 }
@@ -93,7 +98,7 @@ export async function authenticateHarness(port: number, token: string, signal: A
 }
 
 /** One fixed owner endpoint, with typed inputs and bounded, projected responses. */
-export async function requestWorkspace(port: number, cookie: string, value: unknown, signal: AbortSignal): Promise<unknown> {
+export async function requestWorkspace(port: number, cookie: string, value: unknown, signal: AbortSignal, agent?: Agent): Promise<unknown> {
   let input: ReturnType<typeof parseWorkspaceRequest>
   let payload: Buffer
   try {
@@ -117,7 +122,7 @@ export async function requestWorkspace(port: number, cookie: string, value: unkn
     try {
       req = request({ hostname: '127.0.0.1', port, method: 'POST', path: WORKSPACE_ENDPOINT,
         headers: { cookie, 'content-type': 'application/json', 'content-length': payload.byteLength },
-        signal: bounded, agent: false, maxHeaderSize: 16_384 }, response => {
+        signal: bounded, agent: agent ?? false, maxHeaderSize: 16_384 }, response => {
         incoming = response
         const status = response.statusCode ?? 0
         if (status === 401 || status === 403) { fail(new HarnessAuthorizationError(expiredAuthorization)); return }

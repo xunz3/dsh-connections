@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Socket } from 'node:net'
 import test from 'node:test'
-import { authenticateHarness, HarnessAuthorizationError, HarnessConnectionError, requestWorkspace } from '../src/host/harness-http.js'
+import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, HarnessConnectionError, requestWorkspace } from '../src/host/harness-http.js'
 import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL, WORKSPACE_ERRORS, WORKSPACE_RESPONSE_LIMIT, WorkspaceProtocolError } from '../src/shared/workspace-protocol.js'
 
 const token = 'private-launch-token-never-in-an-error'
@@ -114,6 +115,62 @@ test('workspace transport sends only a validated request to its fixed route and 
     await assert.rejects(requestWorkspace(listener.port, cookie, dangerous, signal()), safeFailure)
     assert.equal(requests.length, 1)
   } finally { await listener.close() }
+})
+
+test('an owned workspace pool reuses TCP connections and closes idle sockets when destroyed', async () => {
+  const sockets: Socket[] = []
+  const listener = await server((request, response) => {
+    sockets.push(request.socket)
+    request.resume()
+    request.once('end', () => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(catalog))
+    })
+  })
+  const agent = createWorkspaceAgent()
+  const cookie = ownerCookie(`127.0.0.1:${listener.port}`)
+  try {
+    for (let index = 0; index < 3; index++) {
+      assert.deepEqual(await requestWorkspace(listener.port, cookie, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, signal(), agent), catalog)
+    }
+    assert.equal(sockets.length, 3)
+    assert.equal(new Set(sockets).size, 1, 'sequential RPCs share one SSH TCP stream')
+    const closed = once(sockets[0]!, 'close', { signal: AbortSignal.timeout(2000) })
+    agent.destroy()
+    await closed
+  } finally { agent.destroy(); await listener.close() }
+})
+
+test('the workspace pool bounds concurrent sockets and releases queued requests as slots complete', async () => {
+  const responses: ServerResponse[] = []
+  const sockets = new Set<Socket>()
+  const full = deferred(), queued = deferred()
+  const listener = await server((request, response) => {
+    request.resume()
+    request.once('end', () => {
+      sockets.add(request.socket)
+      responses.push(response)
+      if (responses.length === 8) full.resolve()
+      if (responses.length === 9) queued.resolve()
+    })
+  })
+  const agent = createWorkspaceAgent()
+  const controller = new AbortController()
+  const reply = (response: ServerResponse) => {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(catalog))
+  }
+  const requests = Array.from({ length: 9 }, () => requestWorkspace(listener.port, ownerCookie(`127.0.0.1:${listener.port}`), { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, controller.signal, agent))
+  const completed = Promise.allSettled(requests)
+  try {
+    await full.promise
+    assert.equal(responses.length, 8)
+    reply(responses[0]!)
+    await queued.promise
+    assert.equal(sockets.size, 8)
+    responses.slice(1).forEach(reply)
+    assert.ok((await completed).every(result => result.status === 'fulfilled'))
+  } finally { controller.abort(); agent.destroy(); await completed; await listener.close() }
 })
 
 test('HTTP failure envelopes preserve safe native errors while redirects and credentials remain private', async () => {

@@ -73,7 +73,7 @@ node test/integration/native-fixture.mjs stop /tmp/dsh-native-fixture
 
 The helper installs the normal plugin in a local profile and `dist/remote-plugin.tgz` in a separate content profile. A real isolated sshd forwards between them using temporary keys/config. No user SSH configuration or default Harness home is modified. Only public process/address metadata and private log paths are printed. Full commands and restart behavior are in `test/integration/README.md` in the source checkout.
 
-For the existing user trial's settings test, supply `DSH_WEB_LOG` pointing to its private startup log and run `pnpm exec playwright test native.spec.ts --config playwright.native.config.ts`. `DSH_EXPECT_SSH_HOSTS=1` also requires a nonempty configuration discovery list. That test saves and removes only a marked fake connection without connecting it.
+For the standalone settings test, supply `DSH_WEB_LOG` pointing to an isolated Host's private startup log and run `pnpm exec playwright test native.spec.ts --config playwright.native.config.ts`. `DSH_EXPECT_SSH_HOSTS=1` also requires a nonempty configuration discovery list. The test adds a marked existing-service connection to a reserved `.invalid` target, immediately switches off its automatic connection attempt, checks persistence and removes it. It never installs a remote service.
 
 ## Acceptance boundaries
 
@@ -88,7 +88,7 @@ checks computed button styles, vertical panel layout and menu interaction before
 and after the original styles are removed. Same-version Desktop/npm class-name
 differences were confirmed against the installed rc.3 Desktop application archive.
 
-SSH discovery tests cover Include resolution, literal patterns, permissions, traversal limits and command-free enumeration. Picker fixtures cover selection and naming, manual fallback, refresh failure/recovery, stale replies and targets removed from configuration. Set `DSH_EXPECT_SSH_HOSTS=1` with `DSH_WEB_LOG` for the native settings test to require a nonempty real configuration list; it saves and removes only a marked test entry without connecting.
+SSH discovery tests cover Include resolution, literal patterns, permissions, traversal limits and command-free enumeration. Picker fixtures cover selection and naming, manual fallback, refresh failure/recovery, stale replies and targets removed from configuration. Set `DSH_EXPECT_SSH_HOSTS=1` with an isolated `DSH_WEB_LOG` for the native settings test to require a nonempty real configuration list.
 
 CI browser fixtures do not run Electron. On 2026-10-28, the 0.1.2 build was also
 installed into a disposable Windows Desktop rc.3 profile, with a separate
@@ -129,5 +129,26 @@ transaction, third-party plugin compatibility or provider/model execution.
 For the reviewed bugs and maintenance decisions, see [Review findings](review-findings.md).
 Re-run the commands above for the current checkout; historical test counts are
 not a substitute for checking a changed build.
+
+## 2026-10-29 reference-inspired connection improvements
+
+The [reference comparison](reference-comparison.md) records the three cloned source versions, architecture differences, selected changes and remaining gaps.
+
+Validation of this change passed:
+
+- TypeScript checks, build and release archive verification.
+- All 323 Node tests with `DSH_CONNECTIONS_TEST_SSHD=1` and `DSH_CONNECTIONS_TEST_SYSTEMD=1`; no skipped cases. The real OpenSSH control/stdio fixtures additionally verify the new SSH check rejects an unknown key, accepts the explicitly trusted fixture key and leaves `known_hosts` unchanged.
+- All 40 browser fixture cases with `DSH_DESKTOP_CONTRACT=1`, including SSH checks before saving, target/form/API replacement, hidden-page polling, stale replies and actual connection-stage display. The fixture server was started independently and a temporary config reused that owned server; the repository's default configuration is unchanged.
+- Desktop and Chinese 390px screenshots were inspected. The narrow form had no horizontal overflow.
+
+HTTP regressions measure socket reuse directly: three sequential workspace RPCs use one TCP connection; concurrent requests admit at most eight sockets. Disconnect, removal, destination edit, unexpected tunnel closure and unload close idle sockets, and same-port reconnect uses a new pool. A slow first Host no longer delays every Host beyond the first four. These tests do not measure real Windows latency or establish acceptance on a live Desktop installation. Browser Desktop cases are bridge-contract fixtures, not Electron runs. No user Harness service was restarted or updated, and no model request was submitted.
+
+## 2026-10-29 connection settings flow
+
+The subsequent UI change adds multi-select discovery, manual entry, persistent connection switches, immediate connection after saving, native workspace actions and a latest-compatible update default. Its original SVG also replaces the Connections navigation gear through the guarded slot adapter described in [Design](design.md).
+
+Validation passed all 329 Node cases with real OpenSSH and systemd checks enabled, TypeScript and build checks. Browser coverage now totals 48 passing cases: the full initial 46-case suite followed by all 27 affected settings/SSH cases after the final fixes; the 21 unchanged workspace, Desktop-contract and icon cases were not repeated. Regressions cover partial saves and retries, disabling pending connections, stale replies, shared native modal Escape ownership and focus return, shrinking search results, and aliases matching Object property names. Final English, Chinese 390px and light/dark screenshots were manually inspected; they are not pixel baselines.
+
+An isolated installed rc.3 Harness additionally verified the sidebar logo without changes to other native icons, discovered-host and manual dialogs, Escape closing only the child and returning focus to Add, and a second Escape closing Settings. No page errors occurred. That check saved or connected no SSH target. Its test-owned Host and sshd were stopped afterward. It establishes native Web Settings acceptance, not a new Electron or live remote-update run; the user's Harness service was not restarted or changed.
 
 Tests and reports must not print launch URLs, proxy settings or private logs. Test-only services and fixtures are removed after verification; remote user configuration and the default Harness home are not modified.

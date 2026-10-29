@@ -7,6 +7,8 @@ export interface ConnectionStore {
   list(): Promise<ConnectionRecord[]>
   read(id: string): Promise<ConnectionRecord | undefined>
   save(input: SaveConnection): Promise<ConnectionRecord>
+  /** Change only the persistent connection intent, preserving concurrent metadata edits. */
+  setAutoConnect(id: string, enabled: boolean): Promise<ConnectionRecord>
   remove(id: string): Promise<void>
   rememberPort(id: string, target: string, port: number): Promise<void>
 }
@@ -103,6 +105,19 @@ export function createStore(credentials: Credentials): ConnectionStore {
         })
         if (result?.kind !== 'grant') throw new Error('The connection could not be saved.')
         return parseRecord(result.payload)
+      })
+    },
+    async setAutoConnect(id, enabled) {
+      if (typeof enabled !== 'boolean') throw new TypeError('Expected a boolean.')
+      return serialize(id, async () => {
+        await readCurrent(id)
+        const result = await credentials.modifyRecord(key(id), async current => {
+          if (current === undefined) throw new Error('This connection no longer exists.')
+          const previous = decode(current, id)
+          return previous.autoConnect === enabled ? current : { kind: 'grant', payload: { ...previous, autoConnect: enabled } }
+        })
+        if (result === undefined) throw new Error('The connection could not be saved.')
+        return decode(result, id)
       })
     },
     async remove(id) {

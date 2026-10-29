@@ -1,0 +1,8 @@
+/** Original Connections mark: two endpoints joined by a continuous route. */
+export const connectionsLogoPaths = [
+  'M4.5 3h3A1.5 1.5 0 0 1 9 4.5v3A1.5 1.5 0 0 1 7.5 9h-3A1.5 1.5 0 0 1 3 7.5v-3A1.5 1.5 0 0 1 4.5 3Z',
+  'M16.5 15h3a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-3a1.5 1.5 0 0 1-1.5-1.5v-3a1.5 1.5 0 0 1 1.5-1.5Z',
+  'M9 6h6a3 3 0 0 1 3 3v6M15 18H9a3 3 0 0 1-3-3V9',
+] as const
+
+export const connectionsLogoSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><title>Connections</title>${connectionsLogoPaths.map(d => `<path d="${d}"/>`).join('')}</svg>`

@@ -14,6 +14,7 @@ import { installNativeSidebar } from './native-shell-routing.js'
 import { installNativeShortcuts, type NativeCommandResolver } from './native-shortcuts.js'
 import { remoteSettingsCommand } from './workspace-shortcuts.js'
 import { settingsShell } from './native-settings.js'
+import { mountSettingsIcon } from './settings-icon.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' { interface LocaleNamespaceMap { connections: CopyKey } }
 export const inject = ['locale']
@@ -63,6 +64,7 @@ function installShell(ctx: Context, routing: {
   // This entry and the shell belong to the stable parent. Cordis rolls back a
   // rejected async apply, so RPC setup must run in a separately owned child.
   ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'connections', locale: 'connections', order: 30, label: () => t('title') }, SettingsPanel))
+  if (typeof document !== 'undefined') ctx.effect(() => mountSettingsIcon(ctx.slots))
   ctx.inject(['remote'], scope => {
     let active = true
     scope.effect(() => () => { active = false; settings.set({ failed: true }) })
@@ -74,7 +76,13 @@ function installShell(ctx: Context, routing: {
         const hostSettings = installHostSettings(connection, api)
         connection.effect(() => routing.setSettings(hostSettings))
         const route = (id?: string) => { void workspaces.newSession(id) }
-        const ReadyPanel = () => <Panel api={api} t={t} onOpen={id => workspaces.open(id)} onManagePlugins={id => {
+        const ReadyPanel = () => <Panel api={api} t={t} onOpen={id => {
+          settingsShell(connection)?.actions.close()
+          return workspaces.open(id)
+        }} onAddWorkspace={id => {
+          settingsShell(connection)?.actions.close()
+          return workspaces.pick(id)
+        }} onManagePlugins={id => {
           settingsShell(connection)?.actions.close()
           return workspaces.open(id, { kind: 'plugins' })
         }} />

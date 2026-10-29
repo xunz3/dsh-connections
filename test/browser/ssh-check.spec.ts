@@ -1,0 +1,73 @@
+import { test, expect, type Page } from '@playwright/test'
+import { en } from '../../src/client/messages.js'
+
+async function manual(page: Page) {
+  await page.getByRole('button', { name: en.add, exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: en.addManually, exact: true }).click()
+  return page.getByRole('dialog')
+}
+
+test('SSH can be tested before saving and the result belongs only to the tested target', async ({ page }) => {
+  await page.goto('/')
+  const dialog = await manual(page), target = dialog.getByLabel(en.target, { exact: true })
+  const check = dialog.getByRole('button', { name: en.checkSsh, exact: true })
+  await expect(check).toBeDisabled()
+  await target.fill('Dev')
+  await check.click()
+  await expect(dialog.getByText(en.sshCheckSuccess, { exact: true })).toBeVisible()
+  await expect(page.locator('.dc-list > li')).toHaveCount(0)
+  await target.fill('DH_H800')
+  await expect(dialog.getByText(en.sshCheckSuccess, { exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: en.addAndConnect, exact: true }).click()
+  await expect(page.getByText(en.connected, { exact: true })).toBeVisible()
+})
+
+test('SSH failures offer guidance and command syntax is rejected without a request', async ({ page }) => {
+  await page.goto('/?check=error')
+  const dialog = await manual(page), target = dialog.getByLabel(en.target, { exact: true })
+  await target.fill('Dev')
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await expect(dialog.getByText(en.SSH_DNS, { exact: true })).toBeVisible()
+  await target.fill('dev -p 22')
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await expect(dialog.getByText(en.invalidSshTarget, { exact: true })).toBeVisible()
+  await expect(page.locator('html')).toHaveAttribute('data-ssh-checks', '1')
+})
+
+test('changing the target or dismissing the dialog ignores a late SSH result', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+  await page.clock.pauseAt(new Date('2026-01-01T00:00:00Z'))
+  await page.goto('/?check=slow')
+  const dialog = await manual(page), target = dialog.getByLabel(en.target, { exact: true })
+  await target.fill('Dev')
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await expect(dialog.getByRole('button', { name: en.checkingSsh, exact: true })).toBeDisabled()
+  await target.fill('DH_H800')
+  await page.clock.runFor(900)
+  await expect(page.locator('html')).toHaveAttribute('data-ssh-check-settled', 'Dev')
+  await expect(page.getByText(en.sshCheckSuccess, { exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await page.keyboard.press('Escape')
+  await page.clock.runFor(900)
+  await expect(page.locator('html')).toHaveAttribute('data-ssh-check-settled', 'DH_H800')
+  await manual(page)
+  await expect(page.getByText(en.sshCheckSuccess, { exact: true })).toHaveCount(0)
+})
+
+test('replacing the connection service clears a pending SSH check and permits a new one', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+  await page.clock.pauseAt(new Date('2026-01-01T00:00:00Z'))
+  await page.goto('/?check=slow')
+  const dialog = await manual(page)
+  await dialog.getByLabel(en.target, { exact: true }).fill('Dev')
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await expect(dialog.getByRole('button', { name: en.checkingSsh, exact: true })).toBeDisabled()
+  await page.evaluate(() => window.dispatchEvent(new Event('api-swap')))
+  await expect(dialog.getByRole('button', { name: en.checkSsh, exact: true })).toBeEnabled()
+  await page.clock.runFor(900)
+  await expect(page.locator('html')).toHaveAttribute('data-ssh-check-settled', 'Dev')
+  await expect(dialog.getByText(en.sshCheckSuccess, { exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: en.checkSsh, exact: true }).click()
+  await page.clock.runFor(900)
+  await expect(dialog.getByText(en.sshCheckSuccess, { exact: true })).toBeVisible()
+})

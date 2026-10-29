@@ -6,7 +6,7 @@ import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentia
 import { ConnectionsRpc, mountRpc } from '../src/host/rpc.js'
 import * as hostPlugin from '../src/host/index.js'
 import { rpcContribution } from '../src/shared/rpc.js'
-import type { ConnectionsApi, ConnectionView } from '../src/shared/types.js'
+import type { ConnectionsApi, ConnectionView, UpdateConnection } from '../src/shared/types.js'
 import type { WorkspaceCall } from '../src/shared/workspace-rpc.js'
 import { WorkspaceProtocolError, WORKSPACE_ERRORS, WORKSPACE_PROTOCOL } from '../src/shared/workspace-protocol.js'
 
@@ -19,10 +19,12 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
   const registry = ctx.plugin(TypertRegistry)
   await registry
   let calls = 0
+  const updateCalls: UpdateConnection[] = []
   const workspaceCalls: WorkspaceCall[] = []
   const catalog = { protocol: WORKSPACE_PROTOCOL, revision: 'a'.repeat(43), workspaces: [], sessions: [], archivedSessionIds: [], pinnedSessionIds: [] }
   const privateView = { ...view, token }
   const api: ConnectionsApi = {
+    async checkSsh() { ++calls; return { ok: false, code: 'SSH_DNS', stderr: token } as const },
     async sshHosts() { ++calls; return ['dev', 'build'] },
     async list() { ++calls; return [privateView] },
     async save() { ++calls; return privateView },
@@ -30,7 +32,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     async connect() { ++calls; return privateView },
     async reconnect() { ++calls; return privateView },
     async disconnect() { ++calls; return privateView },
-    async update() { ++calls; return privateView },
+    async update(input) { ++calls; updateCalls.push(input); return privateView },
     async open() { ++calls; return { url: `http://127.0.0.1:41380/?token=${token}` } },
   }
   const plugin = ctx.plugin({ name: 'connections-rpc-test', inject: ['typert'], apply(child: Context) {
@@ -51,6 +53,7 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
       const receiver = scoped.get('connections' as never) as unknown as ConnectionsRpc
       await assert.rejects(receiver.list(), /Only the Harness owner/)
       await assert.rejects(receiver.sshHosts(), /Only the Harness owner/)
+      await assert.rejects(receiver.checkSsh('dev'), /Only the Harness owner/)
       await assert.rejects(receiver.save({ name: 'Work', target: 'dev' }), /Only the Harness owner/)
       await assert.rejects(receiver.update({ id, version: '0.2.1-rc.3' }), /Only the Harness owner/)
       await assert.rejects(receiver.workspace({ id: 'local', request: { op: 'catalog', protocol: WORKSPACE_PROTOCOL } }), /Only the Harness owner/)
@@ -63,11 +66,17 @@ test('real Typert registration binds owner-only RPC and strips extra fields from
     const receiver = owner.get('connections' as never) as unknown as ConnectionsRpc
     assert.deepEqual(await receiver.list(), [view])
     assert.deepEqual(await receiver.sshHosts(), ['dev', 'build'])
+    assert.deepEqual(await receiver.checkSsh('dev'), { ok: false, code: 'SSH_DNS' })
+    const beforeInvalidCheck = calls
+    await assert.rejects(receiver.checkSsh('-oProxyCommand=id'), /SSH alias/)
+    assert.equal(calls, beforeInvalidCheck)
     assert.deepEqual(await receiver.save({ name: 'Work', target: 'dev' }), view)
     assert.deepEqual(await receiver.connect(id), view)
     assert.deepEqual(await receiver.reconnect(id), view)
     assert.deepEqual(await receiver.disconnect(id), view)
+    assert.deepEqual(await receiver.update({ id }), view)
     assert.deepEqual(await receiver.update({ id, version: '0.2.1-rc.3' }), view)
+    assert.deepEqual(updateCalls, [{ id }, { id, version: '0.2.1-rc.3' }])
     assert.equal((await receiver.open(id)).url.includes(token), true)
     await receiver.forget(id)
     await assert.rejects(receiver.connect('invalid'), /Invalid connection identifier/)

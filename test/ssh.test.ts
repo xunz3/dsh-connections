@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { connectTunnel, SshTunnelError, type SshTunnelOptions } from '../src/host/ssh.js'
+import { checkSshTarget } from '../src/host/ssh-check.js'
 
 interface Invocation { pid: number; args: string[]; event: string }
 
@@ -300,6 +301,8 @@ for (const transport of ['control', 'stdio'] as const) test(`real OpenSSH ${tran
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
     const options = { configFile: clientConfig, startupTimeoutMs: 3_000, transport }
+    await assert.rejects(checkSshTarget({ target: 'fixture' }, options), { code: 'SSH_HOST_KEY' })
+    await assert.rejects(stat(knownHosts), { code: 'ENOENT' }, 'A check cannot trust an unknown host automatically.')
     if (transport === 'control') {
       await assert.rejects(connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options), { code: 'SSH_HOST_KEY' })
     } else {
@@ -311,6 +314,9 @@ for (const transport of ['control', 'stdio'] as const) test(`real OpenSSH ${tran
     }
     const publicKey = (await readFile(`${hostKey}.pub`, 'utf8')).trim().split(/\s+/).slice(0, 2).join(' ')
     await writeFile(knownHosts, `[127.0.0.1]:${sshPort} ${publicKey}\n`, { mode: 0o600 })
+    const trustedKeys = await readFile(knownHosts, 'utf8')
+    await checkSshTarget({ target: 'fixture' }, options)
+    assert.equal(await readFile(knownHosts, 'utf8'), trustedKeys, 'A check must preserve existing host trust.')
     tunnel = await connectTunnel({ target: 'fixture', remotePort: portOf(server) }, options)
     assert.equal(await (await fetch(`http://127.0.0.1:${tunnel.port}`)).text(), 'native-harness-fixture')
     await tunnel.close()

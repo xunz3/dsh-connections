@@ -1,5 +1,8 @@
 export type ConnectionPhase = 'disconnected' | 'connecting' | 'updating' | 'connected' | 'error'
 export type ConnectionMode = 'managed' | 'existing'
+export type ConnectionStage = 'preparing' | 'tunnel' | 'authenticating'
+export type SshFailureCode = 'SSH_UNAVAILABLE' | 'SSH_HOST_KEY' | 'SSH_AUTH' | 'SSH_TIMEOUT' | 'SSH_DNS' | 'SSH_REFUSED' | 'SSH_UNREACHABLE' | 'SSH_FORWARD' | 'SSH_CLOSED' | 'SSH_FAILED'
+export type SshCheckResult = { ok: true } | { ok: false; code: SshFailureCode }
 
 export interface ConnectionView {
   id: string
@@ -10,6 +13,8 @@ export interface ConnectionView {
   autoConnect?: boolean
   runtime?: { version: string; service: 'systemd'; pid: number }
   phase: ConnectionPhase
+  /** Actual current step; present only while connecting or updating. */
+  stage?: ConnectionStage
   localPort?: number
   /** Public, opaque identity of this authenticated SSH transport; contains no credential. */
   transportId?: string
@@ -38,9 +43,12 @@ export interface ConnectionRecord {
   lastLocalPort?: number
 }
 
-export interface UpdateConnection { id: string; version: string }
+/** Omit version to update to the newest remote release validated by this build. */
+export interface UpdateConnection { id: string; version?: string }
 
 export interface ConnectionsApi {
+  /** Test system SSH authentication and remote command execution without saving or installing. */
+  checkSsh(target: string): Promise<SshCheckResult>
   /** Literal host aliases from the local Harness computer's SSH configuration. */
   sshHosts(): Promise<string[]>
   list(): Promise<ConnectionView[]>

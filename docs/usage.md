@@ -8,6 +8,8 @@ The local bundle reuses Harness's native sidebar and shortcut service, routing w
 
 Configure SSH normally and verify `ssh devbox` in a terminal first. Connections uses noninteractive key/agent authentication and existing `known_hosts`. Password prompts and first-use host trust are handled in the terminal. Ports, IPv6 targets, jump hosts and other settings belong in SSH config.
 
+The connection form also offers **Test SSH** before saving. It runs a fixed, read-only command through system OpenSSH with a 15-second deadline, without saving a connection, installing Harness or starting a service. It does not accept new host keys or update existing ones. Success verifies SSH authentication and command execution in a POSIX-compatible remote shell; Node, systemd, forwarding and Harness readiness are checked separately when connecting. Changing the target clears the previous result. Failure distinguishes host trust, authentication, DNS, refused connections, network reachability and timeout, without exposing SSH output.
+
 For **Run in the background**, the remote computer needs:
 
 - Linux and a running systemd user manager, with `loginctl show-user "$USER" -p Linger` reporting `yes`.
@@ -20,13 +22,15 @@ Connections uses the Node on the remote noninteractive SSH PATH. Verify it with 
 
 On Windows, each local TCP connection uses a separate system `ssh -W` process; HTTP keepalive and WebSockets retain their stream. The listener is owned before use, and the native Harness authentication exchange must succeed before the connection is shown as connected. Idle listeners have no SSH process; the next stream authenticates again. Both transports preserve native SSH configuration and disable inherited port forwarding, agent forwarding and local commands.
 
+Workspace control requests reuse a bounded HTTP connection pool owned by their SSH transport. A pool retains at most two idle streams and admits eight active streams; idle streams expire after 30 seconds. Disconnect, reconnect and unload destroy it. Authentication exchanges remain separate, and an uncertain failed write is never replayed automatically.
+
 ## Add and open
 
-1. In **Settings → Connections → Add connection**, select an SSH host from the dropdown or choose **Add manually** to enter an alias or `user@hostname`. The name is filled from your selection and can be edited.
-2. Keep **Run in the background** selected. No launch URL is needed. **Connect automatically when Harness starts** is enabled by default for new managed connections.
-3. Save the connection, then select **Connect**. Saving does not initiate SSH. The first connection installs pinned Harness `0.2.1-rc.2`, its Connections content bundle, and starts its user service. Later connections reuse it.
+1. Open **Settings → Connections → Add**. The dialog lists SSH-configured hosts that have not already been added. Select one or more, then choose **Add**. Refresh rereads configuration; long lists offer search. Opening the dialog or selecting checkboxes never starts SSH.
+2. **Add** saves and enables the selected connections, then starts preparing each Host. The dialog closes after saving; connection progress appears in the list. If a save fails, successful entries stay saved and only the failed selections remain for retry. Quick-add uses **Run in the background**; the dialog explains its Linux/systemd requirement. The first connection installs pinned Harness `0.2.1-rc.2` and its content bundle; later connections reuse the service.
+3. To customize the name/target or attach an existing service, choose **Add manually**. Enter an alias or `user@hostname`, optionally **Test SSH**, then choose **Add and connect**. Existing-service mode requires the launch URL. Names can be edited later from the row menu.
 4. Local and remote projects share the **Workspaces** sidebar and the same entry points. Select a project or chat, or use **Add workspace** and choose its computer.
-5. Choose a directory using that computer's native picker. Remote computers use Harness's built-in browser directory list, so selection takes place in this window even if the server has a graphical desktop. Conversation and files appear in the main area while the unified sidebar stays available. The top **New Session** button and keyboard command create a chat on the currently selected computer. Select a local row to switch back to this computer.
+5. Connected rows also offer **Add workspace** and **View workspaces** icon buttons. These close Settings and open the native remote picker or existing workspace. Remote computers use Harness's built-in browser directory list, so selection takes place in this window even if the server has a graphical desktop. Conversation and files appear in the main area while the unified sidebar stays available. The top **New Session** button and keyboard command create a chat on the currently selected computer. Select a local row to switch back to this computer.
 
 Selecting a remote computer shows connection and loading feedback in the main area. Loading ends when the native directory picker is mounted or the requested session has become current. If that content-loading stage receives no readiness acknowledgement within 30 seconds, it shows an error: use **Reconnect** to refresh the managed Host address and authentication, rebuild its SSH tunnel and retry the operation, or **Cancel** to return to this computer. SSH setup and first-time installation have their own connection progress; the 30-second limit applies to presenting remote content.
 
@@ -34,7 +38,7 @@ Click the **Host** button beside the native **Settings** title to choose **This 
 
 To install or manage remote plugins, connect the computer in **Settings → Connections**, then choose its **More actions → Manage plugins**. The remote native Plugin Manager opens in the main area and applies changes to that Host. Select a local workspace/chat to return; local plugin installations are unchanged.
 
-The dropdown reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** rereads it without changing the draft. Already saved targets are marked; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
+The candidate list reads SSH configuration on the computer running Harness, including user/system config and static `Include` files. **Refresh SSH hosts** preserves selections that still exist. Already saved targets are omitted; only saved connections appear in the workspace host chooser. Empty or unreadable configuration still permits manual entry, and editing preserves a saved target that is no longer listed.
 
 Discovery lists concrete aliases only; wildcard and negated patterns are not choices. Conditional includes contribute candidates without evaluating `Match` or running commands. Host-dependent include paths cannot be discovered statically. Connection settings are resolved by OpenSSH when connecting; discovery does not copy keys, resolve hosts or contact servers.
 
@@ -44,11 +48,11 @@ The native brand/New Session controls and New Session keyboard command share the
 
 ## Closing and restoring
 
-**Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. **Disconnect**, **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
+**Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. Switching the connection off, choosing **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
 
-Editing the name or auto-connect preference keeps an active tunnel and view. Changing the destination or existing-service credential disconnects it.
+The switch enables a connection now and remembers it for the next Harness start. Switching off also cancels an in-progress connection; it closes only local access and does not stop remote work. A failed enabled connection keeps its switch on and offers **Retry**. Explicit connections from workspace navigation also enable this saved preference. Editing a name keeps the current transport; editing the destination or credential replaces access, and an enabled connection is reconnected to the edited destination. The edit form preserves a switch change made from another settings view.
 
-The next local startup reconnects saved auto-connect entries in batches of at most four. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
+The next local startup reconnects enabled entries with at most four attempts running concurrently, starting the next whenever a slot is free. If a remote view was selected when the browser closed, it opens again after connecting. The tunnel tries its previous local port to preserve native browser state; if another process owns that port, it allocates a different one. The remote projects and sessions persist regardless of that browser address.
 
 Explicit navigation, including creating a new local session while startup restoration is pending, cancels the older restoration request. Native background restoration of the previous local session does not erase the saved remote selection.
 
@@ -58,9 +62,13 @@ The service has `Restart=on-failure` and is enabled for the user's systemd targe
 
 When Connections refreshes its own remote content bundle, it asks the native plugin manager to apply that change without restarting the Host. It records success only after native activation succeeds. If Harness reports that a restart is required, Connections reports that requirement and leaves the Host running.
 
+The connection list shows the actual preparation, tunnel and authentication stages while connecting or updating. Startup restore runs at most four hosts concurrently and starts the next as soon as a slot is free. Manually disconnecting or editing a queued host takes precedence. The settings list pauses automatic polling in a hidden page and refreshes when it becomes visible again. These changes do not enable automatic retries after an unexpected disconnection; use **Reconnect** to restore access.
+
 ## Explicit updates
 
-Open the connection's **More actions → Update remote Harness**. Choose an explicitly supported exact version: `0.2.1-rc.2` or `0.2.1-rc.3`. Other versions, tags such as `latest`, and ranges are rejected. Local sidebar compatibility is exactly `rc.3` in the current Connections release; the independently built remote content bundle advertises only the tested remote versions. Cancel leaves the version unchanged. Ordinary connect never upgrades the installed version.
+Enable the connection, then open **More actions → Update remote Harness**. The dialog defaults to the **latest compatible version**, currently `0.2.1-rc.3`, and shows the exact target without a version input. Choose **Update** to proceed or **Cancel** to leave it unchanged. Updating an already current Host does not restart it. Ordinary connect never upgrades the installed version.
+
+“Latest compatible” means the newest version verified for the bundled remote content, not an unvalidated npm dist-tag. The npm `latest` tag observed on 2026-10-29 still pointed to rc.2, while `next` pointed to rc.4; installing `@latest` blindly could downgrade rc.3. If a managed installation already uses a version outside this plugin's verified list, a default update stops and asks you to update Connections rather than replacing that installation. The typed update API retains explicit exact-version selection for deliberate recovery; unknown versions and ranges are rejected. Local sidebar compatibility remains exactly rc.3.
 
 Let running tasks finish before submitting: updating restarts the remote Host. The new package is installed and validated first. The updater then snapshots the managed Harness home and agents directory while stopped, switches release, and checks native authentication. Failed startup rolls back the previous release and managed state. It does not snapshot or revert project files outside those directories. A rollback failure preserves the recovery snapshot and reports the error.
 

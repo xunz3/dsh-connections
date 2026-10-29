@@ -1,7 +1,9 @@
-import type { ConnectionMode, ConnectionRecord, ConnectionView, SaveConnection, UpdateConnection } from './types.js'
+import type { ConnectionMode, ConnectionRecord, ConnectionView, SaveConnection, SshCheckResult, SshFailureCode, UpdateConnection } from './types.js'
 import harnessVersions from './harness-versions.json' with { type: 'json' }
 
 export const SUPPORTED_REMOTE_VERSIONS: readonly string[] = Object.freeze(harnessVersions.remote)
+/** Compatibility entries are ordered oldest to newest; never use npm's mutable tags as install targets. */
+export const LATEST_SUPPORTED_REMOTE_VERSION = SUPPORTED_REMOTE_VERSIONS.at(-1)!
 
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Expected an object.')
@@ -29,6 +31,14 @@ export function parseTarget(value: unknown): string {
 export function parseSshHosts(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 1000) throw new TypeError('Invalid SSH hosts list.')
   return [...new Set(value.map(parseTarget))]
+}
+
+export function parseSshCheck(value: unknown): SshCheckResult {
+  const input = object(value)
+  if (input.ok === true) return { ok: true }
+  const codes: readonly SshFailureCode[] = ['SSH_UNAVAILABLE', 'SSH_HOST_KEY', 'SSH_AUTH', 'SSH_TIMEOUT', 'SSH_DNS', 'SSH_REFUSED', 'SSH_UNREACHABLE', 'SSH_FORWARD', 'SSH_CLOSED', 'SSH_FAILED']
+  if (input.ok !== false || !codes.includes(input.code as SshFailureCode)) throw new TypeError('Invalid SSH check result.')
+  return { ok: false, code: input.code as SshFailureCode }
 }
 
 function port(value: unknown): number {
@@ -66,7 +76,7 @@ export function parseSupportedVersion(value: unknown): string {
 
 export function parseUpdate(value: unknown): UpdateConnection {
   const input = object(value)
-  return { id: parseId(input.id), version: parseSupportedVersion(input.version) }
+  return { id: parseId(input.id), ...(input.version === undefined ? {} : { version: parseSupportedVersion(input.version) }) }
 }
 
 export function parseLaunchUrl(value: unknown): { remotePort: number; token: string } {
@@ -111,11 +121,13 @@ export function parseView(value: unknown): ConnectionView {
   const input = object(value)
   const phase = input.phase
   if (phase !== 'disconnected' && phase !== 'connecting' && phase !== 'updating' && phase !== 'connected' && phase !== 'error') throw new TypeError('Invalid connection state.')
+  if (input.stage !== undefined && ((phase !== 'connecting' && phase !== 'updating') || !['preparing', 'tunnel', 'authenticating'].includes(input.stage as string))) throw new TypeError('Invalid connection stage.')
   if (input.transportId !== undefined && (typeof input.transportId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.transportId))) throw new TypeError('Invalid transport identity.')
   const runtime = input.runtime === undefined ? undefined : object(input.runtime)
   if (runtime !== undefined && (runtime.service !== 'systemd' || !Number.isSafeInteger(runtime.pid) || (runtime.pid as number) < 1)) throw new TypeError('Invalid managed Host status.')
   return {
     id: parseId(input.id), name: text(input.name, 80), target: parseTarget(input.target), phase,
+    ...(input.stage === undefined ? {} : { stage: input.stage as NonNullable<ConnectionView['stage']> }),
     ...(input.remotePort === undefined ? {} : { remotePort: port(input.remotePort) }),
     ...(input.mode === undefined ? {} : { mode: mode(input.mode) }),
     ...(input.autoConnect === undefined ? {} : { autoConnect: boolean(input.autoConnect) }),

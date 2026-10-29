@@ -1,13 +1,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { ConnectionsApi, ConnectionView, SaveConnection, UpdateConnection } from '../shared/types.js'
+import type { ConnectionsApi, ConnectionView, SaveConnection, SshCheckResult, UpdateConnection } from '../shared/types.js'
 import { rpcContribution } from '../shared/rpc.js'
-import { parseOpenResult, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
+import { parseOpenResult, parseSshCheck, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
 import { parseWorkspaceCallResult, type WorkspaceApi, type WorkspaceCall, type WorkspaceCallResult } from '../shared/workspace-rpc.js'
 import type { WorkspaceRequest, WorkspaceResultMap } from '../shared/workspace-protocol.js'
 
 interface RemoteApi {
+  checkSsh(target: string): Promise<RemoteResult<SshCheckResult>>
   sshHosts(): Promise<RemoteResult<string[]>>
   list(): Promise<RemoteResult<ConnectionView[]>>
   save(input: SaveConnection): Promise<RemoteResult<ConnectionView>>
@@ -34,6 +35,7 @@ export async function mountRpc(ctx: Context): Promise<void> { await ctx.remote.$
 export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
   const api = ctx.remote.connections
   return {
+    checkSsh: target => unwrap(api.checkSsh(target), parseSshCheck),
     sshHosts: () => unwrap(api.sshHosts(), parseSshHosts),
     list: () => unwrap(api.list(), parseViews),
     save: input => unwrap(api.save(input), parseView),

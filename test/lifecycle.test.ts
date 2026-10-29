@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import { prepareHost, updateHost, RemoteHostError, type RemoteHostOptions } from '../src/host/lifecycle.js'
+import { LATEST_SUPPORTED_REMOTE_VERSION } from '../src/shared/validation.js'
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const token = 'private-launch-credential-1234567890'
@@ -32,6 +33,32 @@ test('accepts a validated native result without persisting its credential', asyn
   assert.deepEqual(await prepareHost({ target: 'dev' }, { workspacePlugin: false, executor: async () => JSON.stringify(result) }), result)
   await assert.rejects(prepareHost({ target: 'dev' }, { workspacePlugin: false, executor: async () => JSON.stringify({ ...result, pid: 0 }) }), { code: 'protocol' })
   await assert.rejects(prepareHost({ target: 'dev', signal: AbortSignal.abort() }, { workspacePlugin: false, executor: async () => { throw new Error('must not execute') } }), { name: 'AbortError' })
+})
+
+test('default update selects the latest compatible release and refuses to downgrade an unvalidated Host', { timeout: 40_000 }, async () => {
+  const f = await fixture()
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    assert.equal(first.version, '0.2.1-rc.2')
+    const updated = await updateHost({ target: 'dev' }, f.options)
+    assert.equal(updated.version, LATEST_SUPPORTED_REMOTE_VERSION)
+    assert.notEqual(updated.pid, first.pid)
+    assert.deepEqual(await updateHost({ target: 'dev' }, f.options), updated, 'an up-to-date Host is not restarted')
+
+    // Synthetic isolated releases exercise the protection without installing a
+    // new public release or mutating any user-owned remote service.
+    const newer = await updateHost({ target: 'dev', version: '0.2.1-rc.4' }, f.options)
+    const releases = await readdir(join(f.options.remoteRoot!, 'releases'))
+    const before = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').length
+    await assert.rejects(updateHost({ target: 'dev' }, f.options), { code: 'update-version' })
+    assert.equal((await f.state()).pid, newer.pid)
+    assert.deepEqual(await readdir(join(f.options.remoteRoot!, 'releases')), releases)
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').slice(before)
+      .map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.ok(!commands.some(row => row.command === 'npm' && row.args.includes('install')))
+    assert.ok(!commands.some(row => row.command === 'systemctl' && row.args.includes('stop')))
+    assert.equal((await prepareHost({ target: 'dev' }, f.options)).version, newer.version)
+  } finally { await f.dispose() }
 })
 
 async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffer, directoryPrefix = 'dsh-lifecycle-test-') {

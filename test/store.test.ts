@@ -117,3 +117,19 @@ test('malformed keys and individual corrupt credentials cannot hide valid connec
   const unavailable = createStore({ ...provider, async readRecord() { throw new Error('provider unavailable') } })
   await assert.rejects(unavailable.list(), /provider unavailable/)
 })
+
+test('connection intent changes preserve queued metadata edits and cannot recreate removed records', async () => {
+  const provider = credentials()
+  provider.records.set(legacyKey, record)
+  const first = createStore(provider), second = createStore(provider)
+  assert.equal((await first.setAutoConnect(id, false)).autoConnect, false)
+  assert.equal(provider.records.has(legacyKey), false, 'intent changes share the native migration path')
+  const edited = second.save({ id, name: 'Renamed', target: 'another', mode: 'managed' })
+  const enabled = first.setAutoConnect(id, true)
+  assert.deepEqual(await enabled, { ...await edited, autoConnect: true })
+  const removed = second.remove(id)
+  const disabled = first.setAutoConnect(id, false)
+  await removed
+  await assert.rejects(disabled, /no longer exists/)
+  assert.equal(await first.read(id), undefined)
+})

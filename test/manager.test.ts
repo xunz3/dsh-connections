@@ -7,6 +7,7 @@ import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentia
 import { ConnectionsManager, probeHarness } from '../src/host/manager.js'
 import { createStore } from '../src/host/store.js'
 import { SshTunnelError, type Tunnel } from '../src/host/ssh.js'
+import { LATEST_SUPPORTED_REMOTE_VERSION } from '../src/shared/validation.js'
 
 const PROBE_COOKIE = 'private-test-owner-cookie'
 const TOKEN = 'private-launch-token-never-in-status'
@@ -52,12 +53,12 @@ test('managed hosts retrieve fresh credentials, restore access after unload, and
   const provider = credentials()
   const store = createStore(provider)
   let prepares = 0
-  const updates: string[] = []
+  const updates: (string | undefined)[] = []
   let version = '0.2.1-rc.2'
   const host = () => ({ remotePort: 3080, token: TOKEN, version, pid: 512, service: 'systemd' as const })
   const options = {
     prepareHost: async () => { ++prepares; return host() },
-    updateHost: async (input: { version: string }) => { updates.push(input.version); version = input.version; return host() },
+    updateHost: async (input: { version?: string }) => { updates.push(input.version); version = input.version ?? LATEST_SUPPORTED_REMOTE_VERSION; return host() },
     connectTunnel: async (input: { preferredLocalPort?: number }) => { if (prepares >= 2) assert.equal(input.preferredLocalPort, 41380); return fakeTunnel() }, probe: async () => PROBE_COOKIE,
   }
   const manager = new ConnectionsManager(store, options)
@@ -75,9 +76,11 @@ test('managed hosts retrieve fresh credentials, restore access after unload, and
   assert.equal(prepares, 2)
   assert.equal((await reopened.list())[0]?.phase, 'connected')
   assert.deepEqual(updates, [])
-  const updated = await reopened.update({ id: saved.id, version: '0.2.1-rc.3' })
+  const updated = await reopened.update({ id: saved.id })
   assert.equal(updated.runtime?.version, '0.2.1-rc.3')
-  assert.deepEqual(updates, ['0.2.1-rc.3'])
+  assert.deepEqual(updates, [undefined], 'default update must reach the updater, not ordinary prepare')
+  await reopened.update({ id: saved.id, version: '0.2.1-rc.3' })
+  assert.deepEqual(updates, [undefined, '0.2.1-rc.3'])
   await assert.rejects(reopened.update({ id: saved.id, version: 'latest' }), /exact Harness version/)
   await reopened.dispose()
 })
@@ -94,11 +97,14 @@ test('cancelling local preparation never revives its tunnel after remote mainten
   const connecting = manager.connect(saved.id)
   const rejected = assert.rejects(connecting, /cancelled/)
   await entered.promise
+  assert.equal((await manager.list())[0]?.stage, 'preparing')
   const disconnecting = manager.disconnect(saved.id)
   await new Promise(resolve => setTimeout(resolve, 0))
   prepared.resolve({ remotePort: 3080, token: TOKEN, version: '0.2.1-rc.2', service: 'systemd', pid: 513 })
   await rejected
-  assert.equal((await disconnecting).phase, 'disconnected')
+  const disconnected = await disconnecting
+  assert.equal(disconnected.phase, 'disconnected')
+  assert.equal(disconnected.stage, undefined)
   assert.equal(tunnels, 0)
   await manager.dispose()
 })
@@ -447,7 +453,7 @@ test('probe cancels a stalled HTTP response without exposing the credential', as
   } finally { await close(server) }
 })
 
-test('later restore batches preserve explicit disconnects and current auto-connect settings', async () => {
+test('later restore workers preserve explicit disconnects and current auto-connect settings', async () => {
   for (const action of ['disconnect', 'disable', 'external-disable', 'manual-connect'] as const) {
     const store = createStore(credentials())
     const saved = []
@@ -496,4 +502,246 @@ test('later restore batches preserve explicit disconnects and current auto-conne
       await manager.dispose()
     }
   }
+})
+
+test('restore replaces each finished worker without waiting for the slowest Host', async () => {
+  const store = createStore(credentials())
+  for (let index = 1; index <= 6; index++) {
+    await store.save({ name: `Host ${index}`, target: `dev${index}`, mode: 'managed', autoConnect: true })
+  }
+  const gates = Array.from({ length: 4 }, () => deferred<void>())
+  const full = deferred<void>(), fifth = deferred<void>(), sixth = deferred<void>()
+  const prepared: string[] = []
+  let active = 0, maximum = 0
+  const manager = new ConnectionsManager(store, {
+    prepareHost: async ({ target }) => {
+      prepared.push(target)
+      active++; maximum = Math.max(maximum, active)
+      try {
+        if (prepared.length === 4) full.resolve()
+        const index = Number(target.slice(3)) - 1
+        if (index < 4) await gates[index]!.promise
+        if (target === 'dev5') { fifth.resolve(); throw new Error('unavailable') }
+        if (target === 'dev6') sixth.resolve()
+        return { remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', service: 'systemd', pid: 513 }
+      } finally { active-- }
+    },
+    connectTunnel: async () => fakeTunnel(), probe: async () => PROBE_COOKIE,
+  })
+  const restoring = manager.restore()
+  try {
+    await full.promise
+    gates[1]!.resolve()
+    await fifth.promise
+    await sixth.promise
+    assert.deepEqual(prepared, ['dev1', 'dev2', 'dev3', 'dev4', 'dev5', 'dev6'])
+    assert.equal(maximum, 4)
+    assert.equal((await manager.list()).find(row => row.target === 'dev1')?.stage, 'preparing')
+    gates.forEach(gate => gate.resolve())
+    await restoring
+    assert.equal((await manager.list()).find(row => row.target === 'dev5')?.phase, 'error')
+  } finally { gates.forEach(gate => gate.resolve()); await restoring; await manager.dispose() }
+})
+
+test('connect and update expose only their current preparation, tunnel and authentication stages', async () => {
+  for (const operation of ['connect', 'update'] as const) {
+    const entered = Array.from({ length: 3 }, () => deferred<void>())
+    const release = Array.from({ length: 3 }, () => deferred<void>())
+    let blocking = false
+    const pause = async (index: number) => {
+      if (!blocking) return
+      entered[index]!.resolve()
+      await release[index]!.promise
+    }
+    const host = async () => { await pause(0); return { remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', service: 'systemd' as const, pid: 513 } }
+    const manager = new ConnectionsManager(createStore(credentials()), {
+      prepareHost: host, updateHost: host,
+      connectTunnel: async () => { await pause(1); return fakeTunnel() },
+      probe: async () => { await pause(2); return PROBE_COOKIE },
+    })
+    let pending: Promise<unknown> | undefined
+    try {
+      const saved = await manager.save({ name: 'Managed', target: 'dev', mode: 'managed' })
+      if (operation === 'update') await manager.connect(saved.id)
+      blocking = true
+      pending = operation === 'connect' ? manager.connect(saved.id) : manager.update({ id: saved.id, version: '0.2.1-rc.3' })
+      for (const [index, stage] of ['preparing', 'tunnel', 'authenticating'].entries()) {
+        await entered[index]!.promise
+        const status = (await manager.list())[0]!
+        assert.equal(status.phase, operation === 'connect' ? 'connecting' : 'updating')
+        assert.equal(status.stage, stage)
+        assert.equal(JSON.stringify(status).includes(TOKEN), false)
+        release[index]!.resolve()
+      }
+      await pending
+      assert.equal((await manager.list())[0]?.stage, undefined)
+      assert.equal((await manager.disconnect(saved.id)).stage, undefined)
+    } finally { release.forEach(gate => gate.resolve()); await pending; await manager.dispose() }
+  }
+})
+
+test('SSH preflight coalesces a target without saving it or touching a connected Host', async () => {
+  const provider = credentials()
+  const ready = deferred<void>(), entered = deferred<void>()
+  const activeTunnel = fakeTunnel()
+  let checks = 0
+  const manager = new ConnectionsManager(createStore(provider), {
+    connectTunnel: async () => activeTunnel, probe: async () => PROBE_COOKIE,
+    checkSshTarget: async ({ target }) => { checks++; assert.equal(target, 'dev'); entered.resolve(); await ready.promise },
+  })
+  try {
+    const saved = await manager.save({ name: 'Managed', target: 'dev', launchUrl })
+    const before = await manager.connect(saved.id)
+    const records = JSON.stringify([...provider.records])
+    const first = manager.checkSsh('dev'), second = manager.checkSsh('dev')
+    assert.equal(first, second)
+    await entered.promise
+    assert.equal(checks, 1)
+    assert.deepEqual((await manager.list())[0], before)
+    ready.resolve()
+    assert.deepEqual(await first, { ok: true })
+    assert.equal(activeTunnel.closes, 0)
+    assert.equal(JSON.stringify([...provider.records]), records)
+    assert.throws(() => manager.checkSsh('-unsafe'), /SSH alias/)
+  } finally { ready.resolve(); await manager.dispose() }
+})
+
+test('SSH preflight bounds active checks, sanitizes errors and cancels them on unload', async () => {
+  const provider = credentials()
+  const started = deferred<void>()
+  let active = 0, cancelled = 0
+  const manager = new ConnectionsManager(createStore(provider), {
+    checkSshTarget: async ({ target, signal }) => {
+      if (target === 'denied') throw new SshTunnelError('SSH_AUTH', `private stderr ${TOKEN}`)
+      if (target === 'failed') throw new Error(`private stderr ${TOKEN}`)
+      active++
+      if (active === 4) started.resolve()
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => { cancelled++; reject(new Error(TOKEN)) }, { once: true }))
+    },
+  })
+  try {
+    assert.deepEqual(await manager.checkSsh('denied'), { ok: false, code: 'SSH_AUTH' })
+    assert.deepEqual(await manager.checkSsh('failed'), { ok: false, code: 'SSH_FAILED' })
+    const checks = [1, 2, 3, 4].map(index => manager.checkSsh(`dev${index}`))
+    await started.promise
+    assert.deepEqual(await manager.checkSsh('dev5'), { ok: false, code: 'SSH_FAILED' })
+    assert.equal(active, 4)
+    await manager.dispose()
+    assert.equal(cancelled, 4)
+    assert.deepEqual(await Promise.all(checks), Array.from({ length: 4 }, () => ({ ok: false, code: 'SSH_FAILED' })))
+    assert.equal(provider.records.size, 0)
+    assert.throws(() => manager.checkSsh('dev1'), /unloaded/)
+  } finally { await manager.dispose() }
+})
+
+test('explicit connection intent survives failure, disconnect and Host reload', async () => {
+  const provider = credentials()
+  const store = createStore(provider)
+  let attempts = 0, fail = true
+  const options = {
+    connectTunnel: async () => {
+      attempts++
+      if (fail) throw new SshTunnelError('SSH_REFUSED', 'unavailable')
+      return fakeTunnel()
+    },
+    probe: async () => PROBE_COOKIE,
+  }
+  let manager = new ConnectionsManager(store, options)
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl, autoConnect: false })
+    await assert.rejects(manager.connect(saved.id), /refused/)
+    assert.equal((await manager.list())[0]?.autoConnect, true, 'a failed attempt remains enabled')
+    assert.equal((await store.read(saved.id))?.autoConnect, true)
+    const disconnected = await manager.disconnect(saved.id)
+    assert.equal(disconnected.autoConnect, false)
+    assert.equal(disconnected.phase, 'disconnected')
+    await manager.dispose()
+    manager = new ConnectionsManager(createStore(provider), options)
+    await manager.restore()
+    assert.equal(attempts, 1, 'disabled connections stay off after Host reload')
+    fail = false
+    const connected = await manager.reconnect(saved.id)
+    assert.equal(connected.autoConnect, true, 'retry and other workspace entry points enable restoration')
+    await manager.dispose()
+    manager = new ConnectionsManager(createStore(provider), options)
+    await manager.restore()
+    assert.equal(attempts, 3, 'unloading an enabled connection retains its restoration preference')
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+  } finally { await manager.dispose() }
+})
+
+test('turning off a pending connection persists before cancellation and a late result cannot revive it', async () => {
+  const store = createStore(credentials()), entered = deferred<void>(), release = deferred<Tunnel>()
+  const tunnel = fakeTunnel()
+  const manager = new ConnectionsManager(store, {
+    connectTunnel: async () => { entered.resolve(); return release.promise },
+    probe: async () => { assert.fail('a cancelled transport must not authenticate') },
+  })
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl, autoConnect: false })
+    const pending = assert.rejects(manager.connect(saved.id), /cancelled/)
+    await entered.promise
+    assert.equal((await store.read(saved.id))?.autoConnect, true)
+    const disconnected = manager.disconnect(saved.id)
+    // Wait for the persistent transaction without waiting for an SSH child that
+    // ignores abort and has not yet returned its transport.
+    for (let attempt = 0; (await store.read(saved.id))?.autoConnect && attempt < 10; attempt++) {
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal((await store.read(saved.id))?.autoConnect, false)
+    release.resolve(tunnel)
+    assert.equal((await disconnected).phase, 'disconnected')
+    await pending
+    assert.equal(tunnel.closes, 1)
+    const view = (await manager.list())[0]!
+    assert.equal(view.autoConnect, false)
+    assert.equal(view.error, undefined)
+  } finally { release.resolve(tunnel); await manager.dispose() }
+})
+
+test('preference storage failures leave the current connection intent and transport unchanged', async () => {
+  const provider = credentials(), modify = provider.modifyRecord
+  let fail = false, attempts = 0
+  const tunnel = fakeTunnel()
+  provider.modifyRecord = async (key, mutate) => {
+    if (fail) throw new Error('credential storage unavailable')
+    return modify(key, mutate)
+  }
+  const store = createStore(provider)
+  const manager = new ConnectionsManager(store, {
+    connectTunnel: async () => { attempts++; return tunnel }, probe: async () => PROBE_COOKIE,
+  })
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl, autoConnect: false })
+    fail = true
+    await assert.rejects(manager.connect(saved.id), /credential storage unavailable/)
+    assert.equal(attempts, 0)
+    assert.equal((await store.read(saved.id))?.autoConnect, false)
+    fail = false
+    await manager.connect(saved.id)
+    fail = true
+    await assert.rejects(manager.disconnect(saved.id), /credential storage unavailable/)
+    assert.equal(tunnel.closes, 0)
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+    assert.equal((await store.read(saved.id))?.autoConnect, true)
+  } finally { fail = false; await manager.dispose() }
+})
+
+test('remote updates and destination edits preserve the saved restoration preference', async () => {
+  const store = createStore(credentials())
+  const host = async () => ({ remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', pid: 512, service: 'systemd' as const })
+  const manager = new ConnectionsManager(store, {
+    prepareHost: host, updateHost: host, connectTunnel: async () => fakeTunnel(), probe: async () => PROBE_COOKIE,
+  })
+  try {
+    const saved = await manager.save({ name: 'Managed', target: 'dev', mode: 'managed', autoConnect: false })
+    assert.equal((await manager.update({ id: saved.id })).autoConnect, false)
+    assert.equal((await store.read(saved.id))?.autoConnect, false)
+    await manager.connect(saved.id)
+    const edited = await manager.save({ id: saved.id, name: 'Renamed', target: 'another', mode: 'managed' })
+    assert.equal(edited.phase, 'disconnected')
+    assert.equal(edited.autoConnect, true, 'internal transport cleanup does not disable the connection')
+    await manager.update({ id: saved.id })
+    assert.equal((await store.read(saved.id))?.autoConnect, true)
+  } finally { await manager.dispose() }
 })

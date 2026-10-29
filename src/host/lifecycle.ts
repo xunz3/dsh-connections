@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { parseLaunchUrl, parseSupportedVersion, parseTarget, parseVersion, SUPPORTED_REMOTE_VERSIONS } from '../shared/validation.js'
+import { LATEST_SUPPORTED_REMOTE_VERSION, parseLaunchUrl, parseSupportedVersion, parseTarget, parseVersion, SUPPORTED_REMOTE_VERSIONS } from '../shared/validation.js'
 import { REMOTE_BOOTSTRAP_COMMAND } from './remote-bootstrap.js'
 import { REMOTE_SERVICE_SCRIPT } from './remote-service.js'
 import { terminateSshProcess } from './ssh-process.js'
+import { SSH_ERROR_MESSAGES, sshProcessError, type ProcessResult } from './ssh-common.js'
 
 export const DEFAULT_HARNESS_VERSION = SUPPORTED_REMOTE_VERSIONS[0]!
 
@@ -38,6 +39,7 @@ const messages = {
   'install-tools': 'Remote installation needs npm; Harness updates and recovery also need tar. Restore the required tools, then retry.',
   runtime: 'The managed Node runtime is missing, unsupported, or has a different native ABI. Restore the Node installation recorded in owner.json/release.json before reconnecting; do not change the owned service or reuse native dependencies with another Node ABI.',
   version: `The existing remote Harness version is not supported by this Connections build. Explicitly update to one of: ${SUPPORTED_REMOTE_VERSIONS.join(', ')}.`,
+  'update-version': 'The installed remote Harness version has not been validated by this Connections build. Update Connections before updating this Host; its current version was preserved.',
   linger: 'Enable persistent user services on the remote host: loginctl enable-linger "$USER". Then reconnect.',
   ownership: 'The remote Connections directory or service belongs to another installation. Resolve that conflict before connecting.',
   install: 'The remote Harness installation failed. Check the remote npm registry, disk space, and private install.log, then reconnect.',
@@ -48,10 +50,14 @@ const messages = {
   recovery: 'The update could not be rolled back automatically. The private recovery snapshot was preserved; inspect the remote installation before retrying.',
   busy: 'Remote Harness maintenance is still running. Reconnect to wait for its result.',
   maintenance: 'Remote Harness maintenance did not complete. Check the private maintenance.log and the systemd user manager, then reconnect.',
-  'ssh-unavailable': 'OpenSSH is unavailable. Install the system SSH client and ensure ssh is on PATH.',
-  'ssh-auth': 'SSH authentication failed. Check your key or agent in a terminal; Connections uses noninteractive authentication.',
-  'ssh-host-key': 'SSH host identity is not trusted or has changed. Verify the host in your terminal before connecting.',
-  'ssh-timeout': 'SSH connection timed out. Check the host, network, and SSH config.',
+  'ssh-unavailable': SSH_ERROR_MESSAGES.SSH_UNAVAILABLE,
+  'ssh-auth': SSH_ERROR_MESSAGES.SSH_AUTH,
+  'ssh-host-key': SSH_ERROR_MESSAGES.SSH_HOST_KEY,
+  'ssh-timeout': SSH_ERROR_MESSAGES.SSH_TIMEOUT,
+  'ssh-dns': SSH_ERROR_MESSAGES.SSH_DNS,
+  'ssh-refused': SSH_ERROR_MESSAGES.SSH_REFUSED,
+  'ssh-unreachable': SSH_ERROR_MESSAGES.SSH_UNREACHABLE,
+  'ssh-forward': SSH_ERROR_MESSAGES.SSH_FORWARD,
   ssh: 'Could not manage the remote Harness over SSH. Check the host, SSH key, and known_hosts in your terminal.',
   protocol: 'The remote Harness returned an invalid management response.',
 } as const
@@ -65,11 +71,14 @@ export class RemoteHostError extends Error {
 
 function aborted(): Error { return new DOMException('Remote connection cancelled.', 'AbortError') }
 
-function sshFailure(stderr: string): RemoteHostError {
-  if (/host key verification failed|remote host identification has changed|no .* host key is known|host key .*mismatch/i.test(stderr)) return new RemoteHostError('ssh-host-key')
-  if (/permission denied|authentication failed|no supported authentication/i.test(stderr)) return new RemoteHostError('ssh-auth')
-  if (/connection timed out|operation timed out|connection timeout/i.test(stderr)) return new RemoteHostError('ssh-timeout')
-  return new RemoteHostError('ssh')
+function sshFailure(stderr: string, result: ProcessResult): RemoteHostError {
+  const failure = sshProcessError(stderr, result, 'SSH_FAILED')
+  const codes = {
+    SSH_UNAVAILABLE: 'ssh-unavailable', SSH_HOST_KEY: 'ssh-host-key', SSH_AUTH: 'ssh-auth', SSH_TIMEOUT: 'ssh-timeout',
+    SSH_DNS: 'ssh-dns', SSH_REFUSED: 'ssh-refused', SSH_UNREACHABLE: 'ssh-unreachable', SSH_FORWARD: 'ssh-forward',
+    SSH_CLOSED: 'ssh', SSH_FAILED: 'ssh',
+  } as const
+  return new RemoteHostError(codes[failure.code])
 }
 
 async function execute(request: { target: string; script: string; signal?: AbortSignal; timeoutMs: number }, options: RemoteHostOptions): Promise<string> {
@@ -125,13 +134,13 @@ async function execute(request: { target: string; script: string; signal?: Abort
     // Diagnostics can contain native startup URLs and must never be exposed.
     child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-8_192) })
     child.stdin.on('error', () => { /* close/error below determines the result */ })
-    child.on('error', error => { failure ??= new RemoteHostError((error as NodeJS.ErrnoException).code === 'ENOENT' ? 'ssh-unavailable' : 'ssh') })
+    child.on('error', error => { failure ??= sshFailure(stderr, { code: null, error }) })
     child.on('close', (code) => {
       markClosed()
       void dispose().then(() => {
         if (failure) finish(failure)
         else if (code === 127) finish(new RemoteHostError('unavailable'))
-        else if (code !== 0) finish(sshFailure(stderr))
+        else if (code !== 0) finish(sshFailure(stderr, { code }))
         else finish()
       })
     })
@@ -142,7 +151,8 @@ async function execute(request: { target: string; script: string; signal?: Abort
 async function manage(action: 'prepare' | 'update', input: { target: string; version?: string; signal?: AbortSignal }, options: RemoteHostOptions): Promise<ManagedHost> {
   const target = parseTarget(input.target)
   // Isolated lifecycle fixtures deliberately exercise broken synthetic releases.
-  const version = (options.workspacePlugin === false ? parseVersion : parseSupportedVersion)(input.version ?? DEFAULT_HARNESS_VERSION)
+  const latest = action === 'update' && input.version === undefined
+  const version = (options.workspacePlugin === false ? parseVersion : parseSupportedVersion)(input.version ?? (latest ? LATEST_SUPPORTED_REMOTE_VERSION : DEFAULT_HARNESS_VERSION))
   if (input.signal?.aborted) throw aborted()
   const timeoutMs = options.timeoutMs ?? 15 * 60_000
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError('Invalid remote management timeout.')
@@ -153,7 +163,7 @@ async function manage(action: 'prepare' | 'update', input: { target: string; ver
   const archive = options.workspacePlugin === false ? undefined : await readFile(new URL('../remote-plugin.tgz', import.meta.url))
   if (archive && archive.byteLength > 4 * 1024 * 1024) throw new RemoteHostError('install')
   const plugin = archive === undefined ? undefined : { data: archive.toString('base64'), digest: createHash('sha256').update(archive).digest('hex') }
-  const payload = Buffer.from(JSON.stringify({ action, version, plugin, supportedVersions: options.workspacePlugin === false ? undefined : SUPPORTED_REMOTE_VERSIONS, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
+  const payload = Buffer.from(JSON.stringify({ action, version, latest, plugin, supportedVersions: options.workspacePlugin === false && !latest ? undefined : SUPPORTED_REMOTE_VERSIONS, root: options.remoteRoot, unit: options.unit, unitDirectory: options.unitDirectory, operation: randomUUID(), source: Buffer.from(REMOTE_SERVICE_SCRIPT).toString('base64') })).toString('base64')
   const script = `${REMOTE_SERVICE_SCRIPT}\nawait main(${JSON.stringify(payload)});\n`
   const stdout = await (options.executor ?? (request => execute(request, options)))({ target, script, signal: input.signal, timeoutMs })
   if (input.signal?.aborted) throw aborted()
@@ -177,7 +187,7 @@ export function prepareHost(input: { target: string; version?: string; signal?: 
   return manage('prepare', input, options)
 }
 
-/** Explicit exact-version update; the remote system manager owns the transaction. */
-export function updateHost(input: { target: string; version: string; signal?: AbortSignal }, options: RemoteHostOptions = {}): Promise<ManagedHost> {
+/** Defaults to the newest tested release; the remote system manager owns the transaction. */
+export function updateHost(input: { target: string; version?: string; signal?: AbortSignal }, options: RemoteHostOptions = {}): Promise<ManagedHost> {
   return manage('update', input, options)
 }

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, request as apiRequest, test, type FrameLocator, type Page, type Request, type Route } from '@playwright/test'
 import type { WorkspaceCatalog, WorkspaceViewState } from '../../src/shared/workspace-protocol.js'
+import { en as connectionMessages } from '../../src/client/messages.js'
 
 type Surface = Page | FrameLocator
 const fixturePath = process.env.DSH_UNIFIED_FIXTURE
@@ -42,7 +43,7 @@ async function prepareConnection(page: Page, alias: string, remoteUrl: string): 
   const panel = page.getByRole('region', { name: 'Connections', exact: true })
   await expect(panel.getByText('Loading connections…')).toHaveCount(0)
   if (!await panel.getByText(connectionName, { exact: true }).count()) {
-    await panel.getByRole('button', { name: 'Add connection', exact: true }).click()
+    await panel.getByRole('button', { name: connectionMessages.add, exact: true }).click()
     await expect(panel.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeEnabled()
     const manual = panel.getByRole('button', { name: 'Add manually', exact: true })
     if (await manual.isVisible()) await manual.click()
@@ -50,12 +51,12 @@ async function prepareConnection(page: Page, alias: string, remoteUrl: string): 
     await panel.getByLabel('SSH host', { exact: false }).fill(alias)
     await panel.getByRole('combobox', { name: /Remote Harness/ }).selectOption('existing')
     await panel.getByLabel('Remote Harness URL', { exact: false }).fill(remoteUrl)
-    await panel.getByRole('button', { name: 'Save connection', exact: true }).click()
+    await panel.getByRole('button', { name: 'Add and connect', exact: true }).click()
     await expect(panel.getByText(connectionName, { exact: true })).toBeVisible()
   } else {
     // The owned remote Host may have restarted between acceptance runs.
     await panel.getByLabel(`More actions: ${connectionName}`).click()
-    await panel.getByRole('button', { name: 'Edit', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Edit', exact: true }).click()
     await panel.getByLabel('Remote Harness URL', { exact: false }).fill(remoteUrl)
     await panel.getByRole('button', { name: 'Save connection', exact: true }).click()
     await expect(panel.getByRole('form', { name: 'Edit', exact: true })).toHaveCount(0)
@@ -682,7 +683,7 @@ test('native settings keep models and plugins remote while General and presentat
         && new URL(response.url()).origin !== localOrigin,
     })
     void inventory.catch(() => {})
-    await connections.getByRole('button', { name: 'Manage plugins', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Manage plugins', exact: true }).click()
     const pluginFrame = page.locator('iframe[title="Remote workspace"]')
     const plugins = page.frameLocator('iframe[title="Remote workspace"]')
     await expect(plugins.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })

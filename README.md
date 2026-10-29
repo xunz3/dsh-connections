@@ -2,12 +2,13 @@
 
 通过 SSH 在另一台电脑上持续运行 DeepSeek Harness，并在本地应用内使用远端的原生项目、会话和文件树。
 
-- 从已有 SSH 配置选择主机，或手动添加；保存连接并在启动时自动重连。
+- 从已有 SSH 配置多选添加主机，或手动连接已有服务；开关启用后立即连接，并随启动恢复。
+- 保存前可单独测试 SSH；连接时显示当前准备、隧道和验证阶段。
 - 首次连接安装独立的远端 Harness 服务；关闭本地应用不停止远端服务。
 - 本机和远端项目统一放在 Workspaces；点击会话在同一窗口切换，顶部 New Session 按钮与快捷键跟随当前主机。
 - 复用原生聊天、文件和侧栏外壳；打开远端时保留加载反馈，直到原生目录选择器出现或会话切换完成。
 - 设置页可选择本地或远端，分别管理模型、API 凭据和插件。
-- 手动指定已验证版本更新远端；保留连接已有 Harness 服务的方式。
+- 更新默认采用最新兼容版本，无需手填版本号；保留连接已有 Harness 服务的方式。
 
 ## 安装
 
@@ -23,4 +24,4 @@ dsh plugin --profile web add @xunz03/dsh-connections
 
 远端内容加载阶段超过 30 秒未就绪时，可重试或取消返回本机。插件复用 Harness 原生侧栏；停用整个 Connections 插件包会撤销其补丁并恢复原生侧栏。更新已打开的 Desktop 前请保存未发送的草稿；如遇原生热更新导致空白，可在安装完成后重新加载界面，详见[兼容性说明](docs/harness-compatibility.md#updating-an-open-rc3-desktop)。
 
-[使用与边界](docs/usage.md) · [依赖与设计](docs/design.md) · [后续路线](docs/roadmap.md) · [开发与验证](docs/development.md) · [评审核验与取舍](docs/review-findings.md) · [发布流程](docs/releasing.md)
+[使用与边界](docs/usage.md) · [依赖与设计](docs/design.md) · [参考插件对比](docs/reference-comparison.md) · [后续路线](docs/roadmap.md) · [开发与验证](docs/development.md) · [评审核验与取舍](docs/review-findings.md) · [发布流程](docs/releasing.md)

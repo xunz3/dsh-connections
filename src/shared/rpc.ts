@@ -1,5 +1,5 @@
 import type { InvocationDescriptor, TypertCodec, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { parseId, parseOpenResult, parseSave, parseSshHosts, parseUpdate, parseView, parseViews } from './validation.js'
+import { parseId, parseOpenResult, parseSave, parseSshCheck, parseSshHosts, parseTarget, parseUpdate, parseView, parseViews } from './validation.js'
 import { parseWorkspaceCall, parseWorkspaceCallResult } from './workspace-rpc.js'
 
 export const RPC_NAMESPACE = 'connections'
@@ -30,5 +30,10 @@ export const rpcContribution: TypertRemoteContribution = {
     invocation: { kind: 'direct' },
     parameters: [{ name: 'input', wire: 'input', source: 'json', codec: codec('WorkspaceCall', parseWorkspaceCall) }],
     result: codec('WorkspaceCallResult', parseWorkspaceCallResult),
+  }, {
+    id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/checkSsh`, service: RPC_NAMESPACE, namespace: RPC_NAMESPACE, method: 'checkSsh',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'target', wire: 'target', source: 'json', codec: codec('SshTarget', parseTarget) }],
+    result: codec('SshCheckResult', parseSshCheck),
   }],
 }
