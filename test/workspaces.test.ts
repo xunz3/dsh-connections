@@ -684,7 +684,7 @@ function localPresentationServices() {
 
 test('production workspace installation opens native desktop views through the validated loopback URL', async () => {
   const { installWorkspaces } = loadWorkspaces({
-    dshDesktop: { protocolVersion: 1, browser: {} },
+    dshDesktop: { protocolVersion: 1, browser: { acquire() {}, release() {}, onOpenRequested() {} } },
     window: { location: { protocol: 'dsh-app:', hostname: 'app' } },
   })
   const effects: (() => void)[] = []

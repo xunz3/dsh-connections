@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { composeNativeSidebar } from './native-sidebar.mjs'
-import { composeNativeShortcuts } from './native-shortcuts.mjs'
+import { assertNativeShortcutRegistry } from './native-shortcuts.mjs'
 
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 const { name } = manifest
@@ -15,6 +15,7 @@ const sidebarManifest = JSON.parse(await readFile(new URL(import.meta.resolve('@
 if (manifest.engines.dsh !== sidebarManifest.version || manifest.engines.dsh !== versions.local) throw new Error('The native sidebar adapter must target its exact tested Harness version')
 const shortcutsManifest = JSON.parse(await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-shortcuts/package.json')), 'utf8'))
 if (manifest.engines.dsh !== shortcutsManifest.version) throw new Error('The native shortcuts adapter must target its exact tested Harness version')
+assertNativeShortcutRegistry(await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-shortcuts/client')), 'utf8'))
 await rm('dist', { recursive: true, force: true })
 await mkdir('dist', { recursive: true })
 await build({ entryPoints: ['src/host/index.ts'], outdir: 'dist/host', bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22' })
@@ -30,20 +31,9 @@ const nativeSidebar = {
     })
   },
 }
-const nativeShortcuts = {
-  name: 'native-shortcuts-composition',
-  setup(build) {
-    build.onResolve({ filter: /^@deepseek-ai\/dsh-client-shortcuts\/client$/ }, () => ({ path: 'native-shortcuts', namespace: 'native-shortcuts' }))
-    build.onLoad({ filter: /.*/, namespace: 'native-shortcuts' }, async () => {
-      const source = await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-shortcuts/client')), 'utf8')
-      return { contents: composeNativeShortcuts(source), loader: 'js' }
-    })
-  },
-}
-const client = await build({ entryPoints: ['src/client/index.tsx'], bundle: true, packages: 'external', platform: 'browser', format: 'cjs', target: 'es2022', write: false, plugins: [nativeSidebar, nativeShortcuts] })
+const client = await build({ entryPoints: ['src/client/index.tsx'], bundle: true, packages: 'external', platform: 'browser', format: 'cjs', target: 'es2022', write: false, plugins: [nativeSidebar] })
 await writeFile('dist/client.js', `window.__ModuleLoader__.load({id:${JSON.stringify(name)},factory(require){const module={exports:{}};const exports=module.exports;\n${client.outputFiles[0].text}\nreturn module.exports;}});\n`)
 await writeFile('dist/native-sidebar.LICENSE', await readFile(new URL('./LICENSE', import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar/package.json'))))
-await writeFile('dist/native-shortcuts.LICENSE', await readFile(new URL('./LICENSE', import.meta.resolve('@deepseek-ai/dsh-client-shortcuts/package.json'))))
 
 // The remote artifact has its own dependency graph: native content and workspace
 // protocol only, without the version-pinned local sidebar or SSH management.

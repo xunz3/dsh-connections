@@ -1,7 +1,7 @@
 # Harness compatibility
 
-Reviewed against the published rc.2 and rc.3 packages on 2026-10-28. Connections
-0.1.5 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+Reviewed against the published rc.2 and rc.3 packages on 2026-10-29. Connections
+0.1.6 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
 
 Connections 0.1.3 separates workspace presentation and interaction state using
@@ -11,18 +11,29 @@ See [workspace list responsibilities](unified-workspaces.md#workspace-list-respo
 
 ## Desktop remote content and commands
 
-Connections 0.1.5 uses the native Desktop guest lease API for remote workspaces
-and Settings. The pinned native `ShortcutsService` is composed unchanged except
-for its public command resolver: source ownership is resolved before a retained
-local action can run. Native code continues to own keybindings, conflicts,
-revisions, repeat handling, keyboard/menu dispatch and disposal. The native Host
-configuration schema is reused too. The command guard lives with the view
-controller, independent of sidebar component mounting.
+Connections uses the native Desktop guest lease API for remote workspaces and
+Settings. In 0.1.6, the Connections settings page recognizes that same capability;
+0.1.5 incorrectly applied the browser's HTTP-loopback requirement to Desktop and
+disabled Add. A supported version-1 bridge must provide guest acquisition,
+release and popup subscription. Merely opening an arbitrary custom-protocol URL
+does not enable Desktop support. Ordinary browsers still require HTTP localhost
+or 127.0.0.1 on the local Harness computer.
+
+Version 0.1.6 retains the running native `ShortcutsService`, its provider and
+Host configuration. A version-checked adapter wraps only the registered command
+objects' resolvers in rc.3's private `registry.commands` map. Native code retains
+keybindings, conflicts, revisions, repeat handling, keyboard/menu dispatch and
+disposal. The adapter follows command registration changes and restores its own
+wrappers when disposed. The command guard lives with the view controller,
+independent of sidebar component mounting.
 
 New Session, search, add workspace and Close route to the selected surface.
 Commands without a safe remote delegation show guidance to use remote controls;
-they do not operate on the local session behind the remote view. A future public
-command-resolver hook would let Connections drop this service composition.
+they do not operate on the local session behind the remote view. Build-time
+source checks and runtime registry/ownership checks bound this private adapter
+to the reviewed rc.3 contract. If it cannot attach safely, remote views close or
+cannot open; the native local shortcut service remains available. A future
+public command-resolver hook would let Connections remove this private adapter.
 
 The remote bundle additionally composes the released native settings and account
 factories. The settings adapter extends the public ConfigForms accessor for an
@@ -37,23 +48,33 @@ silently inheriting this compatibility claim.
 
 ### Updating an open rc.3 Desktop
 
-Hot replacement of the shortcut provider can leave an already open rc.3
-frontend blank. This was reproduced in Windows Desktop: the native module
-loader's `ClientEntries.replace` tears down the old provider before activating
-its replacement, temporarily removing the dependent layout's `root` slot.
+Installing and first enabling 0.1.5 can leave an already open rc.3 frontend
+blank; it does not require an upgrade from an earlier Connections release.
+This was reproduced in an isolated Windows Desktop profile. The Desktop and
+Host processes remained alive while the renderer failed. The native module
+loader's `ClientEntries.replace` tears down the shortcut provider before
+activating its replacement, temporarily removing the dependent layout's `root` slot.
 The native renderer's `RootOutlet` throws `SlotAssemblyError` for that gap; its
 error boundary rethrows assembly errors, so restored services do not remount the
 React tree. These behaviors are present in the published rc.3
 `@deepseek-ai/dsh-client-modules` and `@deepseek-ai/dsh-client-ui-renderer`
-client bundles. Fresh startup and remote navigation are unaffected by this
-specific replacement failure.
+client bundles. Version 0.1.6 removes Connections' shortcut-provider replacement;
+the native provider and its dependent layout keep their lifetime when the new
+adapter attaches or detaches.
 
-Save any unsent drafts before updating the bundle in an open Desktop. If the
-frontend becomes blank, reload the Desktop frontend after installation finishes;
-the local and remote Hosts do not need restarting. Connections does not reload
-automatically or take ownership of the native React root. A lasting upstream fix
-needs a renderer boundary that survives service replacement, or the public
-command-resolver hook described above.
+An upgrade from 0.1.5 still has to retire that release's old replacement provider.
+It may therefore require one renderer reload after installation; the new
+adapter cannot guarantee uninterrupted removal of an already active old
+provider. Save any unsent drafts before migrating. If the frontend becomes
+blank, reload it after installation finishes; this failure does not require
+restarting the local or remote Host. Connections does not reload automatically
+or take ownership of the native React root. Broader resilience to another
+plugin replacing a root dependency remains an upstream renderer concern.
+
+Shortcut configuration now belongs to the native `shortcuts` deployment. If a
+previous version required moving `stopSequenceMs` into the Connections entry's
+`shortcuts` field, restore that override to the native deployment when upgrading.
+The adapter does not migrate or duplicate native configuration.
 
 ## Desktop sidebar stylesheet ownership
 

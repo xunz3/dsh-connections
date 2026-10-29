@@ -20,35 +20,44 @@ declare module '@deepseek-ai/dsh-client-ui-slots' { interface LocaleNamespaceMap
 export const inject = ['locale']
 export function apply(ctx: Context) {
   if ((globalThis as typeof globalThis & { __DSH_CONNECTIONS_EMBEDDED__?: boolean }).__DSH_CONNECTIONS_EMBEDDED__ === true) {
-    installNativeShortcuts(ctx, () => undefined)
     ctx.inject(['slots', 'theme'], scope => applyEmbedded(scope))
     return
   }
   let commands: NativeCommandResolver | undefined
   let remoteSettings: ReturnType<typeof installHostSettings> | undefined
+  let shortcutsReady = false
+  let closeRemote: (() => void) | undefined
   installNativeShortcuts(ctx, (command, context) => remoteSettings?.getSnapshot()
     ? remoteSettingsCommand(command, context, () => remoteSettings?.close())
-    : commands?.(command, context))
+    : commands?.(command, context), ready => {
+      shortcutsReady = ready
+      if (!ready) closeRemote?.()
+    })
   ctx.inject(['slots', 'theme', 'configForms'], scope => installShell(scope, {
+    canRoute: () => shortcutsReady,
+    setClose: close => { closeRemote = close; return () => { if (closeRemote === close) closeRemote = undefined } },
     setCommands: resolver => { commands = resolver; return () => { if (commands === resolver) commands = undefined } },
     setSettings: value => { remoteSettings = value; return () => { if (remoteSettings === value) remoteSettings = undefined } },
   }))
 }
 
 function installShell(ctx: Context, routing: {
+  canRoute(): boolean
+  setClose(close: () => void): () => void
   setCommands(resolver: NativeCommandResolver): () => void
   setSettings(value: ReturnType<typeof installHostSettings>): () => void
 }) {
   // Mount the native shell independently of the RPC/data plane. A failed
   // connection service must never remove navigation or access to Settings.
   let startRemote: ((id?: string) => void) | undefined
+  let closeRemote: (() => void) | undefined
   let routed = false
   ctx.inject(['uiWorkspace', 'layout', 'shortcuts'], scope => {
     installNativeSidebar(scope, { startSession: id => {
       if (startRemote) startRemote(id)
       else scope.uiWorkspace.startSession(id)
-    }, onReady: ready => { routed = ready } })
-    return () => { routed = false }
+    }, onReady: ready => { routed = ready; if (!ready) closeRemote?.() } })
+    return () => { routed = false; closeRemote?.() }
   })
   ctx.effect(() => ctx.locale.register('connections', { en, zh }))
   const t = ctx.locale.bind('connections') as Translate
@@ -72,8 +81,12 @@ function installShell(ctx: Context, routing: {
       await mountRpc(data)
       const connection = data.inject(['remote.connections'], connection => {
         const api = createApi(connection)
-        const workspaces = installWorkspaces(connection, api, t, () => routed, routing.setCommands)
-        const hostSettings = installHostSettings(connection, api)
+        const canRoute = () => routed && routing.canRoute()
+        const workspaces = installWorkspaces(connection, api, t, canRoute, routing.setCommands)
+        const hostSettings = installHostSettings(connection, api, canRoute)
+        const close = () => { workspaces.close(); hostSettings.close() }
+        closeRemote = close
+        connection.effect(() => routing.setClose(close))
         connection.effect(() => routing.setSettings(hostSettings))
         const route = (id?: string) => { void workspaces.newSession(id) }
         const ReadyPanel = () => <Panel api={api} t={t} onOpen={id => {
@@ -89,6 +102,7 @@ function installShell(ctx: Context, routing: {
         startRemote = route
         settings.set({ panel: ReadyPanel, failed: false })
         connection.effect(() => () => {
+          if (closeRemote === close) closeRemote = undefined
           if (startRemote === route) startRemote = undefined
           if (settings.getSnapshot().panel === ReadyPanel) settings.set({ failed: true })
         })

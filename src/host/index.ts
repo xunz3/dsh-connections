@@ -1,5 +1,4 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { Config as NativeShortcutsConfig, apply as applyNativeShortcuts } from '@deepseek-ai/dsh-client-shortcuts'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { ConnectionsManager } from './manager.js'
 import { createStore } from './store.js'
@@ -9,7 +8,7 @@ import { installWorkspaceEndpoint } from './workspace-endpoint.js'
 
 export const name = 'connections'
 export const inject = ['credentials', 'typert']
-export interface Config { embedded?: boolean; shortcuts?: { stopSequenceMs?: number } }
+export interface Config { embedded?: boolean }
 export function apply(ctx: Context, config: Config = {}): void {
   const workspaces = installWorkspaceEndpoint(ctx, { embedded: config.embedded === true })
   if (config.embedded === true) {
@@ -18,8 +17,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
     return
   }
-  // The composed client retains the native Host schema and timing injection too.
-  applyNativeShortcuts(ctx, NativeShortcutsConfig(config.shortcuts ?? {}))
   const manager = new ConnectionsManager(createStore(ctx.credentials))
   const lifetime = new AbortController()
   ctx.effect(() => {

@@ -105,7 +105,7 @@ function NativeSettings({ children }: { children: ReactNode }) {
 const panel = (current: ConnectionsApi) => <Panel
   onOpen={async id => { if (query.has('slowopen')) await delay(700); document.body.dataset.workspaceOpened = id }}
   onAddWorkspace={async id => { document.body.dataset.workspaceAdded = id }}
-  onManagePlugins={async id => { document.body.dataset.pluginsOpened = id }} api={current} t={translate} local={!query.has('remote')} />
+  onManagePlugins={async id => { document.body.dataset.pluginsOpened = id }} api={current} t={translate} {...query.has('remote') ? { local: false } : {}} />
 const render = (current: ConnectionsApi) => root.render(query.has('parentEscape') ? <NativeSettings>{panel(current)}</NativeSettings> : panel(current))
 window.addEventListener('api-swap', () => render({ ...api }))
 window.addEventListener('external-disable', () => { const row = rows[0]; if (row) { row.autoConnect = false; row.phase = 'disconnected'; delete row.localPort; publish() } })

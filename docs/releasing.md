@@ -4,7 +4,15 @@ The npm package is `@xunz03/dsh-connections`. The source repository is
 `xunz3/dsh-connections`; it is currently private. npm contains the built plugin,
 the remote content archive, declarations, license and usage documentation.
 
-## 0.1.5
+## 0.1.6
+
+- Preserve the running native shortcut provider and its configuration when enabling Connections. Route source-aware commands through a checked, reversible rc.3 registry adapter instead of replacing the service that the native layout depends on.
+- Recognize the native Desktop guest bridge in Connections settings so Add and connection controls are available. Keep ordinary browser origin restrictions intact.
+- Close or refuse remote views when the native routing contract is unavailable, preserving native local controls.
+
+Migration from an active 0.1.5 installation may still need one renderer reload while its old replacement provider retires. Do not automate that reload or discard unsent drafts. See [Desktop migration and shortcut configuration](harness-compatibility.md#updating-an-open-rc3-desktop).
+
+The 0.1.5 improvements remain available:
 
 - Multi-select SSH discovery, immediate connection after adding, persistent enable switches, failure retry and native workspace actions.
 - Original Connections logo in Settings; nested dialogs share native keyboard ownership and restore focus correctly.

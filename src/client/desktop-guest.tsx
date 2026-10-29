@@ -6,7 +6,9 @@ export function desktopBrowser(): DesktopBrowserBridge | undefined {
   const carrier = (globalThis as typeof globalThis & {
     dshDesktop?: { protocolVersion: number; browser?: DesktopBrowserBridge }
   }).dshDesktop
-  return carrier?.protocolVersion === 1 ? carrier.browser : undefined
+  const bridge = carrier?.protocolVersion === 1 ? carrier.browser : undefined
+  return bridge && typeof bridge.acquire === 'function' && typeof bridge.release === 'function'
+    && typeof bridge.onOpenRequested === 'function' ? bridge : undefined
 }
 
 interface GuestElement extends HTMLElement { loadURL(url: string): Promise<void> }

@@ -10,7 +10,11 @@ import { AddConnectionDialog } from './AddConnectionDialog.js'
 import { ConnectionsIcon } from './ConnectionsIcon.js'
 import { pollConnections } from './connection-polling.js'
 import { isWorkspaceSurface } from './workspace-surface.js'
-export const isLocalPage = isWorkspaceSurface
+import { desktopBrowser } from './desktop-guest.js'
+
+export function isLocalPage(page: Pick<Location, 'protocol' | 'hostname'>): boolean {
+  return isWorkspaceSurface(page, desktopBrowser() !== undefined)
+}
 
 interface Action extends MenuItem { run(): void }
 function Actions({ label, items }: { label: string; items: Action[] }) {

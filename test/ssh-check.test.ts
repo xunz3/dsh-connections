@@ -42,8 +42,15 @@ if (process.env.TEST_SSH_HANG) {
   return { options, call, started, dispose: () => rm(directory, { recursive: true, force: true }) }
 }
 
-function stopped(call: Invocation) {
-  assert.throws(() => process.kill(call.pid, 0), { code: 'ESRCH' }, 'The SSH check process must exit before settling.')
+async function stopped(call: Invocation) {
+  // Cleanup sends SIGKILL and bounds pipe shutdown; OS reaping can trail that
+  // deadline under parallel load. Assert actual exit without a 20ms scheduler assumption.
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(call.pid, 0) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return; throw error }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.fail('The SSH check process must exit after bounded cleanup.')
 }
 
 test('SSH check delegates aliases to system SSH and only executes its fixed read-only command', async () => {
@@ -55,7 +62,7 @@ test('SSH check delegates aliases to system SSH and only executes its fixed read
     assert.deepEqual(call.args.slice(-3), ['--', 'user@devbox', "printf '%s\\n' 'DSH_CONNECTIONS_SSH_CHECK_OK'"])
     for (const option of ['ControlMaster=no', 'ControlPath=none', 'ControlPersist=no', 'ClearAllForwardings=yes', 'BatchMode=yes', 'StrictHostKeyChecking=yes', 'UpdateHostKeys=no', 'ForwardAgent=no', 'ForwardX11=no', 'Tunnel=no', 'PermitLocalCommand=no', 'RemoteCommand=none', 'ForkAfterAuthentication=no', 'StdinNull=no']) assert.ok(call.args.includes(option), option)
     assert.ok(!call.args.includes('-L') && !call.args.includes('-W'))
-    stopped(call)
+    await stopped(call)
   } finally { await f.dispose() }
 })
 
@@ -78,7 +85,7 @@ test('SSH check requires both successful exit and the complete command marker', 
     const f = await fixture(environment)
     try {
       await assert.rejects(checkSshTarget({ target: 'devbox' }, f.options), { code: 'SSH_FAILED' })
-      stopped(await f.started())
+      await stopped(await f.started())
     } finally { await f.dispose() }
   }
 })
@@ -94,7 +101,7 @@ test('SSH check bounds output and never returns remote startup output', async ()
         assert.doesNotMatch(error.message, /private-token/)
         return true
       })
-      stopped(await f.started())
+      await stopped(await f.started())
     } finally { await f.dispose() }
   }
 })
@@ -109,7 +116,7 @@ test('SSH check cancellation and timeout clean up unresponsive owned processes',
       const call = await f.started()
       if (cancel) controller.abort()
       await rejected
-      stopped(call)
+      await stopped(call)
     } finally { controller.abort(); await f.dispose() }
   }
 })

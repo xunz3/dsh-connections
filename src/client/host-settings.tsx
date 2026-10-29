@@ -34,13 +34,16 @@ const zh: typeof en = {
 }
 
 /** Host selection lives in the native title. Each document keeps its own native forms. */
-export function installHostSettings(ctx: Context, api: ConnectionsApi & WorkspaceApi): HostSettingsHandle {
+export function installHostSettings(ctx: Context, api: ConnectionsApi & WorkspaceApi, canRoute = () => true): HostSettingsHandle {
   const bridge = desktopBrowser()
   let storage: Storage | undefined
   try { storage = window.sessionStorage } catch { /* Optional per-tab view lease. */ }
   const controller = new WorkspaceController(api, {
     clientId: viewClientId(storage, 'settings'), catalogs: false,
-    prepareUrl: url => workspaceUrl(url, window.location, bridge !== undefined),
+    prepareUrl: url => {
+      if (!canRoute()) throw new Error('sidebar-composition-unavailable')
+      return workspaceUrl(url, window.location, bridge !== undefined)
+    },
     surface: localSurface(ctx),
   })
   const hosts = createSnapshotStore<SettingsHostSnapshot>({ choices: [{ id: 'local', name: en.local, phase: 'connected' }], selectedId: 'local' })

@@ -1,6 +1,6 @@
 # Connections design
 
-Source review: 2026-10-28. Local sidebar baseline: exactly `0.2.1-rc.3`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
+Source review: 2026-10-29. Local sidebar and command-routing baseline: exactly `0.2.1-rc.3`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
 
 The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
 
@@ -40,6 +40,8 @@ The list switch expresses persistent connection intent using the existing `autoC
 
 Connection dialogs use the browser's modal focus containment and Harness's shared `useModalLayer` stack. Escape and application Close belong to the foreground dialog; the parent Settings remains open. Browser modal cleanup runs before the shared layer restores focus to the invoking control. Row menus and action icons use the native primitives.
 
+Settings and remote content use the same surface capability check: a supported native Desktop guest bridge or a local HTTP localhost/127.0.0.1 browser. Desktop is identified by its versioned guest capabilities, not a protocol-name exception. Browser origin limits preserve same-site loopback cookies and do not apply to native isolated guests.
+
 The original Connections SVG is shared by the panel and the packaged `assets/logo.svg`. Harness rc.3 exposes no settings-section icon option, so a lifecycle-scoped adapter follows the sorted native slot registry and adds a CSS mask only to the matching navigation row. Guards on row count and shape retain the host's icon if the shell changes. It does not observe the whole document, match localized labels or rewrite host elements; disposal removes its style and subscription.
 
 ```text
@@ -68,6 +70,8 @@ The native Settings header selects the local Host or a remote connection. Models
 ## Native project and file UI
 
 Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using public services and native conversation/rightbar slots. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
+
+The local native shortcut provider and Host configuration remain in place. A version-checked adapter wraps resolvers on the existing rc.3 command registry, follows registration changes and restores its own wrappers on disposal. Native dispatch and keybinding policy remain intact. This uses a narrow private registry contract until Harness exposes resolver middleware. Incompatibility closes or blocks remote surfaces while native local commands remain available; it never replaces the provider that the local layout depends on.
 
 Native owner controllers supply catalogs and mutations. A revisioned view channel carries navigation and actual selected-session acknowledgements. Credentials and destination resolution remain Host-side. The child document uses native transport for all conversation, files, media and approvals. Local selection closes only the remote view. The existing SSH port preference preserves browser origin when available; native workspace/session state remains independent of that origin.
 

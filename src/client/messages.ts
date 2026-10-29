@@ -48,7 +48,7 @@ export const en = {
   step2: 'Choose “Run in the background” to install and start the remote service on first connection.',
   setupNote: 'The remote service keeps running after this app closes. It owns its files, sessions and settings. Updates happen only when you request them.',
   localNote: 'Open connections from the same computer running this Harness. Disconnect closes the tunnel and leaves the remote host running.',
-  browserNote: 'Open Harness over HTTP at localhost or 127.0.0.1 on this computer to use SSH workspaces.',
+  browserNote: 'Use the native Harness Desktop app, or open Harness over HTTP at localhost or 127.0.0.1 on this computer, to use SSH workspaces.',
   ready: 'Ready to open',
   serviceUnavailable: 'Connections could not load. Local navigation is available. Reload Harness to retry.',
 } as const
@@ -102,7 +102,7 @@ export const zh: Record<CopyKey, string> = {
   step2: '选择“在后台持续运行”，首次连接时会安装并启动远端服务。',
   setupNote: '关闭本地应用后，远端服务仍继续运行，文件、会话和设置保留在远端。只有主动操作才会更新。',
   localNote: '请在运行此 Harness 的同一台电脑上打开连接。断开只关闭隧道，远端主机继续运行。',
-  browserNote: '请在运行 Harness 的电脑上，通过 HTTP localhost 或 127.0.0.1 打开页面，以使用 SSH 工作区。',
+  browserNote: '请使用 Harness 原生桌面应用，或在运行 Harness 的电脑上通过 HTTP localhost 或 127.0.0.1 打开页面，以使用 SSH 工作区。',
   ready: '可以打开',
   serviceUnavailable: '连接服务未能加载，仍可使用本机导航。请重新加载 Harness 后重试。',
 }

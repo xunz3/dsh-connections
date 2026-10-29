@@ -18,10 +18,10 @@
 dsh plugin --profile web add @xunz03/dsh-connections
 ```
 
-重启本地 Harness，在 **设置 → 连接** 添加 SSH 主机，选择 **在后台持续运行**，然后连接。SSH 沿用本地 Harness 主机的配置、密钥代理和 `known_hosts`；先在终端确认 `ssh <主机>` 可用。
+启用插件后，在 **设置 → 连接** 添加 SSH 主机；默认使用托管模式，保存后立即连接。SSH 沿用本地 Harness 主机的配置、密钥代理和 `known_hosts`；先在终端确认 `ssh <主机>` 可用。
 
 在运行本地 Harness 的同一台电脑上，通过原生 Desktop 或 HTTP 浏览器打开远端工作区。在设置页选择本地或某个远端，管理该电脑的模型账号；API 凭据与插件均不自动共享，详见[设置与插件归属](docs/host-settings.md)。托管模式自动安装远端内容插件；已有服务需安装随包提供的远端插件包，见使用文档。
 
-远端内容加载阶段超过 30 秒未就绪时，可重试或取消返回本机。插件复用 Harness 原生侧栏；停用整个 Connections 插件包会撤销其补丁并恢复原生侧栏。更新已打开的 Desktop 前请保存未发送的草稿；如遇原生热更新导致空白，可在安装完成后重新加载界面，详见[兼容性说明](docs/harness-compatibility.md#updating-an-open-rc3-desktop)。
+远端内容加载阶段超过 30 秒未就绪时，可重试或取消返回本机。插件复用 Harness 原生侧栏；停用整个 Connections 插件包会撤销其补丁并恢复原生侧栏。0.1.6 保留原生快捷键服务，修复首次启用时替换该服务引发的白屏，以及 Desktop 中添加按钮被错误禁用的问题。从正在运行的 0.1.5 升级时，旧服务退出仍可能需要一次界面重载；请先保存未发送的草稿，插件不会自动重载。详见[兼容性说明](docs/harness-compatibility.md#updating-an-open-rc3-desktop)。
 
 [使用与边界](docs/usage.md) · [依赖与设计](docs/design.md) · [参考插件对比](docs/reference-comparison.md) · [后续路线](docs/roadmap.md) · [开发与验证](docs/development.md) · [评审核验与取舍](docs/review-findings.md) · [发布流程](docs/releasing.md)

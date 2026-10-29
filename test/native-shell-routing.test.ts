@@ -376,8 +376,8 @@ test('missing remote service leaves Settings loading only until the deadline and
     react: React, 'react/jsx-runtime': jsx, '@deepseek-ai/dsh-client-store': stores,
     './rpc.js': { mountRpc: async () => {}, createApi: () => ({}) },
     './Panel.js': { Panel: () => React.createElement('p', null, 'Ready connections') }, './messages.js': connectionMessages,
-    './workspaces.js': { installWorkspaces: () => ({ newSession() {}, open() {} }) },
-    './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings() {} },
+    './workspaces.js': { installWorkspaces: () => ({ newSession() {}, open() {}, close() {} }) },
+    './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports, './host-settings.js': { installHostSettings: () => ({ close() {} }) },
     './native-shortcuts.js': { installNativeShortcuts() {} },
     './workspace-shortcuts.js': { remoteSettingsCommand() {} },
     './native-settings.js': { settingsShell }, './settings-icon.js': { mountSettingsIcon() {} },
@@ -409,5 +409,66 @@ test('missing remote service leaves Settings loading only until the deadline and
     assert.equal(timers.size, 0)
     await owner.dispose()
     assert.equal(f.core.entries('settings.section').length, 0)
+  } finally { await f.dispose() }
+})
+
+test('losing shortcut ownership closes remote views while keeping native navigation mounted', async () => {
+  const f = fixture()
+  let ready!: (ready: boolean) => void
+  let workspaceAllowed!: () => boolean, settingsAllowed!: () => boolean
+  let workspaceClosed = 0, settingsClosed = 0
+  const compiled = transformSync(readFileSync(new URL('../src/client/index.tsx', import.meta.url), 'utf8'), {
+    loader: 'tsx', jsx: 'automatic', format: 'cjs', target: 'es2022',
+  }).code
+  const root = { exports: {} as typeof import('../src/client/index.js') }
+  const imports: Record<string, unknown> = {
+    react: React, 'react/jsx-runtime': jsx, '@deepseek-ai/dsh-client-store': stores,
+    './rpc.js': { mountRpc: async () => {}, createApi: () => ({}) },
+    './Panel.js': { Panel: () => null }, './messages.js': connectionMessages,
+    './workspaces.js': { installWorkspaces(_ctx: unknown, _api: unknown, _t: unknown, canRoute: () => boolean) {
+      workspaceAllowed = canRoute
+      return { newSession() {}, open() {}, close() { workspaceClosed++ } }
+    } },
+    './embedded.js': { applyEmbedded() {} }, './native-shell-routing.js': module.exports,
+    './host-settings.js': { installHostSettings(_ctx: unknown, _api: unknown, canRoute: () => boolean) {
+      settingsAllowed = canRoute
+      return { close() { settingsClosed++ }, getSnapshot() {} }
+    } },
+    './native-shortcuts.js': { installNativeShortcuts(_ctx: unknown, _resolve: unknown, onReady: typeof ready) {
+      ready = onReady; ready(false)
+    } },
+    './workspace-shortcuts.js': { remoteSettingsCommand() {} },
+    './native-settings.js': { settingsShell }, './settings-icon.js': { mountSettingsIcon() {} },
+  }
+  runInNewContext(compiled, { module: root, exports: root.exports, setTimeout, clearTimeout, require(id: string) {
+    assert.ok(id in imports, `unexpected root dependency ${id}`)
+    return imports[id]
+  } })
+  f.ctx.provide('theme', {} as never)
+  f.ctx.provide('remote', {} as never)
+  f.ctx.provide('remote.connections' as never, {} as never)
+  try {
+    const owner = f.ctx.plugin(root.exports)
+    await owner; await settled(); await settled()
+    const sidebar = f.core.entries('sidebar')[0]
+    assert.ok(sidebar)
+    assert.equal(workspaceAllowed(), false)
+    assert.equal(settingsAllowed(), false)
+    ready(true)
+    assert.equal(workspaceAllowed(), true)
+    assert.equal(settingsAllowed(), true)
+    ready(false)
+    assert.equal(workspaceClosed, 1)
+    assert.equal(settingsClosed, 1)
+    assert.equal(workspaceAllowed(), false)
+    assert.equal(settingsAllowed(), false)
+    assert.equal(f.core.entries('sidebar')[0], sidebar, 'an adapter failure must not retire native navigation')
+    ready(true)
+    assert.equal(workspaceAllowed(), true)
+    assert.equal(settingsAllowed(), true)
+    await owner.dispose()
+    const closed = [workspaceClosed, settingsClosed]
+    ready(false)
+    assert.deepEqual([workspaceClosed, settingsClosed], closed, 'disposed controllers no longer receive adapter callbacks')
   } finally { await f.dispose() }
 })

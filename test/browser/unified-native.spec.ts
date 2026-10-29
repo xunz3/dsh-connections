@@ -386,6 +386,117 @@ test('composed native sidebar keeps its styles when the shell preloads and unloa
   await page.screenshot({ path: info.outputPath('native-sidebar-css-ownership.png'), fullPage: true })
 })
 
+test('hot enable and disable preserve the native root, sidebar and unsent session draft', async ({ page }, info) => {
+  test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
+  test.setTimeout(120_000)
+  page.setDefaultTimeout(15_000)
+  const startup = await launch(join(fixturePath!, 'host.log'))
+  const metadata = JSON.parse(await readFile(join(fixturePath!, 'processes.json'), 'utf8')) as { projects: { local: string } }
+  const owner = await apiRequest.newContext()
+  const errors: string[] = []
+  page.on('pageerror', error => errors.push(error.message.replace(/([?&]token=)[^&\s"']+/gi, '$1[redacted]')))
+  const setEnabled = async (enabled: boolean) => {
+    // Use a separate authenticated request context so cleanup works even if a
+    // regression blanks the renderer. This is the native bundle lifecycle API.
+    const response = await owner.post(new URL('/api/pluginManager/setBundleEnabled', startup).href, { data: {
+      type: 'client-request', rpcId: `connections-hot-enable-${enabled}-${Date.now()}`,
+      method: 'pluginManager/setBundleEnabled', payload: { args: { name: '@xunz03/dsh-connections', enabled } },
+    } })
+    expect(response.ok()).toBe(true)
+    const result = (await response.json()).result as { ok: boolean; value?: { application: string } }
+    expect(result.ok).toBe(true)
+    expect(result.value?.application).toBe('applied')
+  }
+  try {
+    expect((await owner.get(startup)).ok()).toBe(true)
+    await page.goto(startup, { waitUntil: 'domcontentloaded' }).catch(() => { throw new Error('The isolated local Host could not load.') })
+    await dismissWelcome(page)
+    const workspaces = page.getByRole('region', { name: 'Workspaces', exact: true })
+    const project = workspaces.getByRole('button', { name: 'local-project', exact: true })
+    if (!await project.count()) {
+      await workspaces.getByRole('button', { name: 'Add workspace', exact: true }).click()
+      await page.getByRole('dialog', { name: 'Open a project', exact: true }).getByRole('button', { name: 'This computer', exact: true }).click()
+      await chooseDirectory(page, metadata.projects.local)
+    }
+    await project.click()
+    const editor = page.locator('[data-composer-input][contenteditable="true"]')
+    await expect(editor).toBeVisible()
+    const selection = () => page.evaluate(() => (JSON.parse(localStorage.getItem('dsh.sessions.current') ?? '{}') as { sessionId?: string }).sessionId)
+    await expect.poll(selection).toBeTruthy()
+    const selected = await selection()
+    const previousDraft = await editor.innerText()
+    const draft = 'Unsent draft across native Connections enable and disable'
+    await editor.fill(draft)
+    // Retain the actual native composer node, not just its replacement's text:
+    // taking down layout/root must not silently recreate a matching-looking UI.
+    const monitor = await editor.evaluateHandle(element => {
+      const state = { detached: false, observer: new MutationObserver(records => {
+        if (!element.isConnected || records.some(record => [...record.removedNodes].some(node => node === element || node.contains(element)))) state.detached = true
+      }) }
+      state.observer.observe(document.body, { childList: true, subtree: true })
+      return state
+    })
+    const panels = page.getByRole('navigation', { name: 'Global panels', exact: true })
+    const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
+    const composedCss = page.locator('style[data-plugin-css^="@xunz03/dsh-connections/native-sidebar/"]')
+    const assertShell = async () => {
+      await expect(panels).toHaveCount(1)
+      await expect(newSession).toHaveCount(1)
+      await expect(newSession).toHaveCSS('display', 'flex')
+      await expect(newSession).toHaveCSS('height', '38px')
+      await expect(panels).toHaveCSS('flex-direction', 'column')
+      await expect(editor).toHaveText(draft)
+      expect(await selection()).toBe(selected)
+      expect(await monitor.evaluate(state => state.detached)).toBe(false)
+      expect(errors).toEqual([])
+      const more = panels.getByRole('button', { name: 'More', exact: true })
+      await more.click()
+      await expect(page.getByRole('menuitem', { name: 'Browse other plugins', exact: true })).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(more).toBeFocused()
+    }
+    try {
+      // Retire the existing composition first. Both subsequent enables occur
+      // in this same live document with the ordinary native sidebar installed.
+      await setEnabled(false)
+      await expect(composedCss).toHaveCount(0)
+      await assertShell()
+      for (let cycle = 0; cycle < 2; cycle++) {
+        await setEnabled(true)
+        await expect.poll(() => composedCss.count()).toBeGreaterThan(0)
+        await assertShell()
+        await page.getByRole('button', { name: 'Account menu', exact: true }).click()
+        await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
+        await page.getByRole('button', { name: 'Connections', exact: true }).click()
+        const panel = page.getByRole('region', { name: 'Connections', exact: true })
+        const add = panel.getByRole('button', { name: connectionMessages.add, exact: true })
+        await expect(add).toBeEnabled()
+        await add.click()
+        const dialog = page.getByRole('dialog', { name: connectionMessages.addSsh, exact: true })
+        await expect(dialog).toBeVisible()
+        await page.keyboard.press('Escape')
+        await expect(dialog).toBeHidden()
+        await expect(add).toBeFocused()
+        await page.keyboard.press('Escape')
+        await expect(panel).toBeHidden()
+        await assertShell()
+        if (cycle === 0) {
+          await setEnabled(false)
+          await expect(composedCss).toHaveCount(0)
+          await assertShell()
+        }
+      }
+      await page.screenshot({ path: info.outputPath('native-hot-enable-preserves-draft.png'), fullPage: true })
+    } finally {
+      await monitor.evaluate(state => state.observer.disconnect()).catch(() => {})
+      await monitor.dispose()
+      if (await editor.count()) await editor.fill(previousDraft).catch(() => {})
+    }
+  } finally {
+    try { await setEnabled(true) } finally { await owner.dispose() }
+  }
+})
+
 test('one native sidebar switches local and SSH projects while remote content stays native', async ({ page }, info) => {
   test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
   page.setDefaultTimeout(15_000)

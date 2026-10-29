@@ -37,7 +37,7 @@ const en = {
   localUnavailable: 'The local directory picker is unavailable.', frame: 'Remote workspace',
   disconnected: 'This connection is no longer available. Reconnect to continue.',
   protocolMismatch: 'The remote content plugin uses an incompatible protocol. Update the remote content bundle and reconnect.',
-  compositionUnavailable: 'The native sidebar is owned by another plugin. Disable the conflicting sidebar composition and reload to open remote workspaces.',
+  compositionUnavailable: 'Native workspace navigation is unavailable. Reload Harness and check for incompatible versions or conflicting navigation plugins.',
   pluginRequired: 'Install the remote content bundle on this Harness profile to open its workspaces. See the Connections usage guide.',
 } as const
 const zh: Record<keyof typeof en, string> = {
@@ -49,7 +49,7 @@ const zh: Record<keyof typeof en, string> = {
   shortcutBlocked: '请使用当前远端会话的菜单和面板按钮完成此操作。',
   localUnavailable: '本地目录选择器不可用。', frame: '远端工作区', disconnected: '此连接已不可用，请重新连接后继续。',
   protocolMismatch: '远端内容插件的协议版本不兼容。请更新远端内容插件包后重新连接。',
-  compositionUnavailable: '另一个插件正在管理原生侧栏。请停用冲突的侧栏插件并重新加载，再打开远端工作区。',
+  compositionUnavailable: '原生工作区导航暂不可用。请重新加载 Harness，并检查版本兼容性或导航插件冲突。',
   pluginRequired: '请在远端 Harness 配置中安装内容插件包，再打开工作区。安装步骤见 Connections 使用文档。',
 }
 export type WorkspaceTranslate = (key: keyof typeof en) => string

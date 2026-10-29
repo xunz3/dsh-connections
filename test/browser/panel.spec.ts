@@ -174,6 +174,47 @@ test('remote browsers keep the local transport boundary and disable opening or e
   await expect(page.getByRole('menuitem', { name: en.managePlugins, exact: true })).toBeDisabled()
 })
 
+async function routeDesktopOrigin(page: Page) {
+  await page.route('https://desktop.test/**', async route => {
+    const target = new URL(route.request().url())
+    await route.fulfill({ response: await page.request.get(target.pathname + target.search) })
+  })
+}
+
+test('the settings default gate accepts the native desktop bridge and adds a connection', async ({ page }) => {
+  await routeDesktopOrigin(page)
+  await page.addInitScript(() => Object.assign(globalThis, { dshDesktop: { protocolVersion: 1, browser: {
+    async acquire() { throw new Error('Settings must not allocate a workspace guest') },
+    async release() {}, onOpenRequested() { return () => {} },
+  } } }))
+  await page.goto('https://desktop.test/')
+  await expect(page.getByText(en.browserNote, { exact: true })).toHaveCount(0)
+  const dialog = await addDialog(page)
+  await dialog.getByRole('checkbox', { name: 'Dev', exact: true }).check()
+  await dialog.getByRole('button', { name: en.addSelected + ' (1)', exact: true }).click()
+  const row = rowFor(page, 'Dev')
+  await expect(row.getByRole('status')).toHaveText(en.connected)
+  await expect(row.getByRole('switch')).toBeChecked()
+  await expect(row.getByRole('button', { name: en.open + ': Dev', exact: true })).toBeEnabled()
+})
+
+for (const carrier of ['absent', 'incomplete', 'unsupported'] as const) {
+  test(`the settings default gate keeps HTTPS disabled with an ${carrier} desktop bridge`, async ({ page }) => {
+    await routeDesktopOrigin(page)
+    await page.addInitScript(kind => {
+      if (kind === 'incomplete') Object.assign(globalThis, { dshDesktop: { protocolVersion: 1, browser: {} } })
+      if (kind === 'unsupported') Object.assign(globalThis, { dshDesktop: { protocolVersion: 2, browser: {
+        async acquire() {}, async release() {}, onOpenRequested() { return () => {} },
+      } } })
+    }, carrier)
+    await page.goto('https://desktop.test/?populated')
+    await expect(page.getByText(en.browserNote, { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: en.add, exact: true })).toBeDisabled()
+    await expect(rowFor(page, 'Research workstation').getByRole('switch')).toBeDisabled()
+    await expect(page.getByRole('button', { name: en.open + ': Development', exact: true })).toBeDisabled()
+  })
+}
+
 test('connected row actions route separately to workspaces, the folder picker and native plugin management', async ({ page }) => {
   await page.goto('/?populated')
   await page.getByRole('button', { name: en.addWorkspace + ': Development', exact: true }).click()

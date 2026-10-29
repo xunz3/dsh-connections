@@ -15,10 +15,9 @@ import { transformSync } from 'esbuild'
 
 const require = createRequire(import.meta.url)
 const source = readFileSync(require.resolve('@deepseek-ai/dsh-client-shortcuts/client'), 'utf8')
-const { composeNativeShortcuts } = await import(new URL('../scripts/native-shortcuts.mjs', import.meta.url).href) as {
-  composeNativeShortcuts(source: string): string
+const { assertNativeShortcutRegistry } = await import(new URL('../scripts/native-shortcuts.mjs', import.meta.url).href) as {
+  assertNativeShortcutRegistry(source: string): void
 }
-const serviceCode = transformSync(composeNativeShortcuts(source), { loader: 'js', format: 'cjs', target: 'es2022' }).code
 const adapterCode = transformSync(readFileSync(new URL('../src/client/native-shortcuts.ts', import.meta.url), 'utf8'), {
   loader: 'ts', format: 'cjs', target: 'es2022',
 }).code
@@ -54,7 +53,7 @@ function command(id: string, code: string, run: () => void, modals: string[] = [
   }
 }
 
-async function fixture(resolve: NativeCommandResolver) {
+async function fixture(resolve: NativeCommandResolver, before?: (ctx: cordis.Context) => void) {
   const keyboard = new Set<(input: DesktopShortcutInput) => void>()
   const preferences = new Set<(snapshot: ShortcutConfigSnapshot) => void>()
   const observers = new Set<object>()
@@ -84,8 +83,8 @@ async function fixture(resolve: NativeCommandResolver) {
     },
   })
   const nativeModule = { exports: {} as { default: unknown } }
-  runInNewContext(serviceCode, {
-    window, document, navigator: { platform: 'Win32' }, console, crypto: webcrypto,
+  runInNewContext(source, {
+    document, navigator: { platform: 'Win32' }, console, crypto: webcrypto,
     Element: FocusTarget, HTMLIFrameElement: class {},
     MutationObserver: class {
       observe() { observers.add(this) }
@@ -93,29 +92,29 @@ async function fixture(resolve: NativeCommandResolver) {
       disconnect() { observers.delete(this) }
     },
     __DSH_SHORTCUTS_CONFIG__: { stopSequenceMs: 750 },
-    module: nativeModule, exports: nativeModule.exports,
-    require(id: string) {
-      if (id === '@deepseek-ai/cordis') return cordis
-      if (id === '@deepseek-ai/dsh-client-store') return stores
-      assert.equal(id, '@deepseek-ai/dsh-client-ui-primitives')
-      return { modalSelector: '[data-shortcut-modal]', observeComposition: () => ({ guards: () => false, dispose() {} }) }
-    },
+    window: Object.assign(window, { __ModuleLoader__: { load(registration: { factory(require: (id: string) => unknown): unknown }) {
+      nativeModule.exports = { default: registration.factory(nativeRequire) }
+    } } }),
   })
+  function nativeRequire(id: string) {
+    if (id === '@deepseek-ai/cordis') return cordis
+    if (id === '@deepseek-ai/dsh-client-store') return stores
+    assert.equal(id, '@deepseek-ai/dsh-client-ui-primitives')
+    return { modalSelector: '[data-shortcut-modal]', observeComposition: () => ({ guards: () => false, dispose() {} }) }
+  }
   const adapter = { exports: {} as typeof import('../src/client/native-shortcuts.js') }
-  runInNewContext(adapterCode, { module: adapter, exports: adapter.exports, require(id: string) {
-    assert.equal(id, '@deepseek-ai/dsh-client-shortcuts/client'); return nativeModule.exports
-  } })
+  runInNewContext(adapterCode, { module: adapter, exports: adapter.exports })
   const ctx = new cordis.Context()
   const locale = new Set<() => void>()
   ctx.provide('locale', { subscribe(listener: () => void) { locale.add(listener); return () => { locale.delete(listener) } } } as never)
-  const install = () => adapter.exports.installNativeShortcuts(ctx, resolve)
+  await ctx.plugin(nativeModule.exports.default as typeof import('@deepseek-ai/dsh-client-shortcuts/client').default)
+  await settled()
+  before?.(ctx)
+  const readiness: boolean[] = []
+  const install = () => adapter.exports.installNativeShortcuts(ctx, resolve, ready => readiness.push(ready))
   const provider = await install(); await settled()
   return {
-    ctx, document, window, keyboard, preferences, locale, observers, provider,
-    async restoreNative() {
-      await ctx.plugin(nativeModule.exports.default as typeof import('@deepseek-ai/dsh-client-shortcuts/client').default)
-      await settled()
-    },
+    ctx, document, window, keyboard, preferences, locale, observers, provider, readiness, install,
     async register(value: ShortcutCommand) {
       const off = ctx.shortcuts.register(value); await settled(); return off
     },
@@ -214,22 +213,124 @@ test('Windows modal-priority bindings retain native local actions while protecti
   } finally { await f.dispose() }
 })
 
-test('retiring the composed provider permits native restoration without duplicate commands or input listeners', async () => {
+test('enabling, unloading and re-enabling routing preserves the native provider and dependent root', async () => {
   let remoteCalls = 0, localCalls = 0
-  const f = await fixture(() => ({ status: 'handled', run: () => { remoteCalls++ } }))
+  let mounts = 0, disposals = 0
+  const original = command('session.new', 'KeyN', () => { localCalls++ })
+  const nativeResolver = original.resolve
+  const f = await fixture(() => ({ status: 'handled', run: () => { remoteCalls++ } }), ctx => {
+    ctx.shortcuts.register(original)
+    ctx.inject(['shortcuts'], scope => {
+      mounts++
+      scope.effect(() => () => { disposals++ })
+    })
+  })
   try {
-    await f.register(command('session.new', 'KeyN', () => { localCalls++ }))
+    const nativeCatalog = f.ctx.shortcuts.catalog
+    assert.equal(f.readiness.at(-1), true)
     f.input('KeyN')
     await f.provider.dispose()
-    assert.equal(f.ctx.get('shortcuts', false), undefined)
-    assert.equal(f.keyboard.size + f.preferences.size + f.locale.size + f.observers.size, 0)
-    assert.equal(f.document.listenerCount + f.window.listenerCount, 0)
-    await f.restoreNative()
-    await f.register(command('session.new', 'KeyN', () => { localCalls++ }))
+    assert.equal(f.ctx.shortcuts.catalog, nativeCatalog, 'The original native service and its state survive removal')
+    assert.equal(original.resolve, nativeResolver, 'Only our resolver is restored')
     assert.equal(f.keyboard.size, 1)
     assert.equal(f.ctx.shortcuts.catalog.getSnapshot().length, 1)
+    assert.equal(f.readiness.at(-1), false)
     f.input('KeyN')
     assert.equal(remoteCalls, 1)
     assert.equal(localCalls, 1)
+    await f.install(); await settled()
+    f.input('KeyN')
+    assert.equal(remoteCalls, 2)
+    assert.equal(mounts, 1, 'Native layout dependencies never remount')
+    assert.equal(disposals, 0, 'No root-slot gap exists during enable, disable or reload')
+    assert.equal(f.keyboard.size, 1)
   } finally { await f.dispose() }
+  assert.equal(disposals, 1)
+})
+
+test('catalog refresh and re-registration keep one wrapper and preserve native disposal identity', async () => {
+  let resolutions = 0, localCalls = 0
+  const f = await fixture(() => { resolutions++; return undefined })
+  try {
+    const first = command('session.new', 'KeyN', () => { localCalls++ })
+    const native = first.resolve
+    const off = await f.register(first)
+    const wrapper = first.resolve
+    for (const refresh of f.locale) { refresh(); refresh() }
+    assert.equal(first.resolve, wrapper)
+    f.input('KeyN')
+    assert.equal(resolutions, 1)
+    assert.equal(localCalls, 1)
+    off(); await settled()
+    assert.equal(first.resolve, native, 'Retired commands release their original resolver')
+    assert.equal(f.ctx.shortcuts.catalog.getSnapshot().length, 0)
+    const second = command('session.new', 'KeyN', () => { localCalls++ })
+    await f.register(second)
+    f.input('KeyN')
+    assert.equal(resolutions, 2)
+    assert.equal(localCalls, 2)
+    const retiredResult = wrapper({ region: 'page', modal: null, target: null })
+    if (retiredResult.status === 'handled') retiredResult.run()
+    assert.equal(resolutions, 2, 'A retained old wrapper cannot reactivate after another command registers')
+    assert.equal(localCalls, 3)
+  } finally { await f.dispose() }
+})
+
+test('a foreign resolver replacement is retained and withdraws routing readiness', async () => {
+  const f = await fixture(() => ({ status: 'blocked', reason: 'fixture' }))
+  let localCalls = 0
+  try {
+    const first = command('session.new', 'KeyN', () => { localCalls++ })
+    const second = command('page.close', 'KeyW', () => {})
+    const secondNative = second.resolve
+    await f.register(first); await f.register(second)
+    const captured = first.resolve
+    const foreign: ShortcutCommand['resolve'] = context => captured(context)
+    first.resolve = foreign
+    for (const refresh of f.locale) refresh()
+    assert.equal(f.readiness.at(-1), false)
+    assert.equal(first.resolve, foreign)
+    assert.equal(second.resolve, secondNative, 'Other wrappers are restored after readiness is withdrawn')
+    for (const refresh of f.locale) refresh()
+    assert.equal(f.readiness.at(-1), false, 'A failed contract cannot silently rewrap a foreign resolver')
+    assert.equal(first.resolve, foreign)
+    f.input('KeyN')
+    assert.equal(localCalls, 1, 'A foreign wrapper retaining our retired resolver delegates only to the native action')
+    await f.provider.dispose()
+    assert.equal(first.resolve, foreign, 'Cleanup never overwrites another owner')
+  } finally { await f.dispose() }
+})
+
+test('unsupported or immutable command contracts refuse routing without replacing the native service', async () => {
+  const f = await fixture(() => ({ status: 'blocked', reason: 'fixture' }), ctx => {
+    ctx.shortcuts.register(Object.freeze(command('session.new', 'KeyN', () => {})))
+  })
+  try {
+    assert.equal(f.readiness.includes(true), false)
+    assert.equal(f.keyboard.size, 1)
+    assert.equal(f.ctx.shortcuts.catalog.getSnapshot().length, 1)
+  } finally { await f.dispose() }
+})
+
+test('a command frozen after attachment disables routing without failing native cleanup', async () => {
+  const f = await fixture(() => ({ status: 'blocked', reason: 'fixture' }))
+  let localCalls = 0
+  try {
+    const native = command('session.new', 'KeyN', () => { localCalls++ })
+    await f.register(native)
+    Object.freeze(native)
+    for (const refresh of f.locale) refresh()
+    assert.equal(f.readiness.at(-1), false)
+    f.input('KeyN')
+    assert.equal(localCalls, 1, 'An unremovable wrapper becomes an inert native passthrough')
+    await f.provider.dispose()
+    assert.equal(f.keyboard.size, 1)
+  } finally { await f.dispose() }
+})
+
+test('build validation rejects changes to native command identity or dispatch', () => {
+  assertNativeShortcutRegistry(source)
+  assert.throws(() => assertNativeShortcutRegistry(source.replace('this.commands.set(command.id, command)', 'this.commands.set(command.id, { ...command })')), /command identity contract/)
+  assert.throws(() => assertNativeShortcutRegistry(source.replace('this.bindings.set(bindingKey(row.binding), command)', 'this.bindings.set(bindingKey(row.binding), { ...command })')), /command identity contract/)
+  assert.throws(() => assertNativeShortcutRegistry(source.replace('command.resolve(context)', 'command.cachedResolve(context)')), /command identity contract/)
 })
