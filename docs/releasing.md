@@ -4,6 +4,15 @@ The npm package is `@xunz03/dsh-connections`. The source repository is
 `xunz3/dsh-connections`; it is currently private. npm contains the built plugin,
 the remote content archive, declarations, license and usage documentation.
 
+## 0.1.5
+
+- Multi-select SSH discovery, immediate connection after adding, persistent enable switches, failure retry and native workspace actions.
+- Original Connections logo in Settings; nested dialogs share native keyboard ownership and restore focus correctly.
+- Updates default to the latest verified compatible remote Harness, currently `0.2.1-rc.3`, without an implicit downgrade.
+- Read-only SSH diagnostics, bounded HTTP connection reuse, continuously replenished startup workers and visibility-aware settings polling.
+
+Local Harness compatibility remains exactly `0.2.1-rc.3`; remote content supports the verified rc.2 and rc.3 releases. Saved connections and credentials retain their existing storage format.
+
 ## Normal releases
 
 1. Increase `version` in `package.json` using an exact semantic version.

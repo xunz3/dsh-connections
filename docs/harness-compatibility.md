@@ -1,7 +1,7 @@
 # Harness compatibility
 
 Reviewed against the published rc.2 and rc.3 packages on 2026-10-28. Connections
-0.1.4 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+0.1.5 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
 
 Connections 0.1.3 separates workspace presentation and interaction state using
@@ -11,7 +11,7 @@ See [workspace list responsibilities](unified-workspaces.md#workspace-list-respo
 
 ## Desktop remote content and commands
 
-Connections 0.1.4 uses the native Desktop guest lease API for remote workspaces
+Connections 0.1.5 uses the native Desktop guest lease API for remote workspaces
 and Settings. The pinned native `ShortcutsService` is composed unchanged except
 for its public command resolver: source ownership is resolved before a retained
 local action can run. Native code continues to own keybindings, conflicts,
