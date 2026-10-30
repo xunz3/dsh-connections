@@ -4,6 +4,20 @@ The npm package is `@xunz03/dsh-connections`. The source repository is
 `xunz3/dsh-connections`; it is currently private. npm contains the built plugin,
 the remote content archive, declarations, license and usage documentation.
 
+## 0.1.8
+
+- Target exact local Harness rc.5 and admit remote rc.5 alongside rc.2/rc.3.
+  Keep matching peer inputs, source-integrity records and explicit rejection of
+  untested versions; 0.1.7 remains the local rc.3 release.
+- Check every admitted remote Settings/Account source before sharing factories,
+  and run native preference tests against all three matching runtimes.
+- Document which review performance findings are resolved and which costs remain,
+  without treating functional regressions as a measured speedup.
+
+Saved connection formats are unchanged. Existing remote Hosts are not upgraded
+by installing this plugin; an explicit Update selects latest compatible rc.5.
+See [compatibility](harness-compatibility.md) and [performance](performance.md).
+
 ## 0.1.7
 
 - Contain synchronous Windows OpenSSH launch failures, including `spawn UNKNOWN`, so they report a connection error instead of terminating the Host. Isolate later stdio channel failures from other HTTP/WebSocket streams.

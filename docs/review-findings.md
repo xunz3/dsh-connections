@@ -4,6 +4,18 @@ This document records the verified findings and maintenance decisions from the
 supplied reviews. The **2026-10-28** review identified further issues beyond the
 earlier fixes; its findings and the earlier review are recorded separately below.
 
+## 2026-10-30 follow-up: performance and rc.5
+
+The 0.1.7 changes resolve C6's duplicated scheduling and concurrent list reads.
+They do not remove the separate native remote document, persistent surface
+bridges or full-catalog scan/hash. Actual refresh eligibility and outstanding
+costs are recorded in [performance](performance.md); no measured speedup is claimed.
+
+Connections 0.1.8 moves the exact local target to rc.5 and adds explicitly tested
+remote rc.5 alongside rc.2/rc.3. The original private-contract/version-lock
+finding remains: this is reviewed admission, not a public multi-Host API or
+capability-negotiated version range. See [compatibility](harness-compatibility.md).
+
 ## 2026-10-30 review and Windows Host crash
 
 The supplied review was checked against the implementation and the installed

@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
-import { WORKSPACE_PROTOCOL } from '../../src/shared/workspace-protocol.ts'
+import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL, parseWorkspaceResponse } from '../../src/shared/workspace-protocol.ts'
+import { bindViewSurfaceParent } from '../../src/client/view-surface.ts'
 
 const execute = promisify(execFile)
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -32,7 +33,7 @@ for (const prefix of installations) {
     assert.equal(evaluatePluginCompatibility(remote, {}, candidate), undefined, `Remote engines must admit ${candidate}`)
     assert.equal(evaluatePluginCompatibility(local, {}, candidate) === undefined, candidate === versions.local, 'Local native sidebar remains exactly pinned')
   }
-  for (const candidate of ['0.2.1-rc.1', '0.2.1-rc.4', '0.2.2', '0.3.0']) assert(evaluatePluginCompatibility(remote, {}, candidate), 'Untested releases must be rejected')
+  for (const candidate of ['0.2.1-rc.1', '0.2.1-rc.4', '0.2.2-alpha.2', '0.2.2', '0.3.0']) assert(evaluatePluginCompatibility(remote, {}, candidate), 'Untested releases must be rejected')
   const root = await mkdtemp(join(tmpdir(), `dsh-connections-compat-${version}-`))
   const archive = join(root, createHash('sha256').update(archiveBytes).digest('hex') + '.tgz')
   await writeFile(archive, archiveBytes, { mode: 0o600 })
@@ -43,8 +44,10 @@ for (const prefix of installations) {
   let child
   let handle
   let browser
+  let stopSurface
   let passed = false
   try {
+    console.log(`${version}: installing the checked remote archive in an isolated profile.`)
     const installed = await execute(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', '--save-exact', archive], { cwd: root, env, timeout: 300000, maxBuffer: 4 * 1024 * 1024 })
     await writeFile(join(root, 'install.log'), installed.stdout + installed.stderr, { mode: 0o600 })
     handle = await open(join(root, 'service.log'), 'w', 0o600)
@@ -63,15 +66,25 @@ for (const prefix of installations) {
     const expected = 'dsh-auth-' + createHash('sha256').update(new URL(origin).host).digest('base64url') + '='
     let cookie = login.headers.getSetCookie().find(value => value.startsWith(expected))?.split(';')[0]
     assert(cookie)
-    async function post(path, body) {
-      const response = await fetch(new URL(path, origin), { method: 'POST', redirect: 'error', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(20000) })
+    async function post(path, body, signal) {
+      const response = await fetch(new URL(path, origin), { method: 'POST', redirect: 'error', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(20000), ...(signal ? [signal] : [])]) })
       assert.equal(response.status, 200)
       return response.json()
     }
-    async function rpc(method, args) {
-      const response = await post('/api/pluginManager/' + method, { type: 'client-request', rpcId: randomUUID(), method: 'pluginManager/' + method, payload: { args } })
+    async function rpc(method, args, service = 'pluginManager') {
+      const response = await post(`/api/${service}/${method}`, { type: 'client-request', rpcId: randomUUID(), method: `${service}/${method}`, payload: { args } })
       assert.equal(response.result?.ok, true)
       return response.result.value
+    }
+    async function workspace(request, signal) {
+      const response = parseWorkspaceResponse(request.op, await post(WORKSPACE_ENDPOINT, request, signal))
+      if (!response.ok) throw Object.assign(new Error(response.error.message), { code: response.error.code })
+      return response.value
+    }
+    async function uiPreferences() {
+      const { namespaces } = await rpc('describe', {}, 'settings')
+      return namespaces.filter(row => ['locale', 'ui-theme', 'ui-chat', 'ui-conversation', 'ui-settings'].includes(row.ns))
+        .map(({ ns, value, user }) => ({ ns, value, user }))
     }
     const entries = (await rpc('listPlugins', {})).filter(row => row.moduleName === local.name)
     assert.equal(entries.length, 1)
@@ -93,11 +106,28 @@ for (const prefix of installations) {
     assert.equal((await rpc('setPluginEnabled', { id: entries[0].entryId, enabled: true })).application, 'applied')
     const catalog = await post('/api/connections/workspaces', { op: 'catalog', protocol: WORKSPACE_PROTOCOL })
     assert.equal(catalog.ok, true)
-    const view = await post('/api/connections/workspaces', { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: randomUUID() })
+    // Protocol 3 bootstraps the child from its parent's presentation before any
+    // native Locale/Theme service can select remote UI preferences.
+    let presentation = { locale: 'en', theme: {
+      preference: 'light', fontSize: 14, codeFontSize: 11, terminalFontSize: 13,
+      textFontFamily: '', codeFontFamily: '', terminalFontFamily: '',
+    }, tokens: {}, general: {
+      transcriptView: 'standard', collapseTiming: 'completion', performanceUsage: 'compact',
+      linkOpening: 'sidebar', busyEnter: 'queue', developerTools: false,
+    } }
+    const view = await post('/api/connections/workspaces', { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: randomUUID(), presentation })
     assert.equal(view.ok, true)
     assert.equal(view.value.protocol, WORKSPACE_PROTOCOL)
+    assert.deepEqual(await workspace({ op: 'surfaceSnapshot', channel: view.value.channel }), { nativeVersion: version, presentation })
     if (process.env.DSH_QA_BROWSER === '1') {
       const { chromium, expect } = await import('@playwright/test')
+      const previousPreferences = await uiPreferences()
+      const externalActions = []
+      let revision = view.value.revision
+      stopSurface = bindViewSurfaceParent({ channel: view.value.channel, endpoint: workspace,
+        getRevision: () => revision, getPresentation: () => presentation,
+        perform: async action => { externalActions.push(action); throw new Error('No login action is expected in this fixture') },
+      })
       browser = await chromium.launch({ headless: true })
       const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1000, height: 760 } })
       const equals = cookie.indexOf('=')
@@ -110,7 +140,7 @@ for (const prefix of installations) {
       if (await preview.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await preview.click()
       const welcome = page.getByRole('dialog', { name: 'Get started', exact: true })
       if (await welcome.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await welcome.getByRole('button', { name: 'Close', exact: true }).click()
-      assert.equal((await post('/api/connections/workspaces', { op: 'navigate', channel: view.value.channel, requestId: randomUUID(), target: { kind: 'pick' } })).ok, true)
+      revision = (await workspace({ op: 'navigate', channel: view.value.channel, requestId: randomUUID(), target: { kind: 'pick' } })).revision
       const picker = page.getByRole('dialog', { name: 'Select Workspace Directory', exact: true })
       await expect(picker).toBeVisible({ timeout: 30000 })
       const presented = await post('/api/connections/workspaces', { op: 'viewState', channel: view.value.channel })
@@ -130,24 +160,32 @@ for (const prefix of installations) {
         const state = await post('/api/connections/workspaces', { op: 'viewState', channel: view.value.channel })
         return state.value?.sessionId
       }, { timeout: 30000 }).toBeTruthy()
-      assert.equal((await post('/api/connections/workspaces', { op: 'navigate', channel: view.value.channel, requestId: randomUUID(), target: { kind: 'settings' } })).ok, true)
+      revision = (await workspace({ op: 'navigate', channel: view.value.channel, requestId: randomUUID(), target: { kind: 'settings' } })).revision
       const settings = page.locator('[data-shortcut-modal="settings"]').filter({ has: page.locator('[data-slot="settings.header"]') })
-      await expect(settings).toBeVisible({ timeout: 30000 })
       // Native onboarding belongs to the sidebar and can first mount when this
       // remote document exposes Settings. Complete that same first-use flow.
       if (await preview.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await preview.click()
       if (await welcome.waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false)) await welcome.getByRole('button', { name: 'Close', exact: true }).click()
-      if (!await settings.isVisible()) await page.getByRole('button', { name: 'Open settings', exact: true }).click()
-      await expect(settings).toBeVisible()
+      const launcher = page.getByRole('button', { name: 'Open settings', exact: true })
+      await expect.poll(async () => await settings.isVisible() || await launcher.isVisible(), { timeout: 30000 }).toBe(true)
+      if (!await settings.isVisible()) await launcher.click()
+      await expect(settings).toBeVisible({ timeout: 30000 })
       await settings.getByRole('button', { name: 'Models', exact: true }).click()
       await expect(settings.getByRole('button', { name: 'Models', exact: true })).toHaveAttribute('aria-current', 'true')
       await settings.getByRole('button', { name: 'Built-in plugins', exact: true }).click()
       await expect(settings.getByRole('searchbox', { name: 'Search plugins', exact: true })).toBeVisible()
       await expect(settings.getByText('Global plugins', { exact: true })).toBeVisible()
+      presentation = { ...presentation, locale: 'zh', theme: { ...presentation.theme, preference: 'dark', fontSize: 18 } }
+      await expect(page.locator('html')).toHaveAttribute('lang', /^zh/, { timeout: 15000 })
+      await expect(page.locator('body')).toHaveAttribute('data-ds-dark-theme', '')
+      assert.deepEqual(await uiPreferences(), previousPreferences, 'Parent presentation must not write remote UI preferences')
+      assert.deepEqual(externalActions, [], 'The fixture never opens an external sign-in flow')
       assert.deepEqual(errors, [], 'The embedded native UI must load without page errors')
+      stopSurface()
+      stopSurface = undefined
       await browser.close()
       browser = undefined
-      console.log(`${version}: embedded browser, native directory picker, presentation acknowledgement, session selection, Models and Built-in plugins settings passed.`)
+      console.log(`${version}: embedded browser, native directory picker, presentation acknowledgement, session selection, Models, Built-in plugins and parent-owned Locale/Theme without remote preference writes passed.`)
     }
     assert.equal((await post('/api/connections/workspaces', { op: 'closeView', channel: view.value.channel })).ok, true)
     assert.equal(child.exitCode, null)
@@ -161,6 +199,7 @@ for (const prefix of installations) {
     }
     throw error
   } finally {
+    stopSurface?.()
     await browser?.close()
     child?.kill('SIGTERM')
     if (child) for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) await pause(50)

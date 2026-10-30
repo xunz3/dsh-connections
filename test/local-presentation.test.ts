@@ -37,7 +37,8 @@ function nativeFactory(packageName: string, settingsAdapter?: NativeSettingsAdap
 }
 const nativePackages = {
   'rc.2': { settings: 'native-settings-rc2', locale: 'native-locale-rc2', theme: 'native-theme-rc2' },
-  'rc.3': { settings: '@deepseek-ai/dsh-client-ui-settings', locale: '@deepseek-ai/dsh-client-locale', theme: '@deepseek-ai/dsh-client-ui-theme' },
+  'rc.3': { settings: 'native-settings-rc3', locale: 'native-locale-rc3', theme: 'native-theme-rc3' },
+  'rc.5': { settings: '@deepseek-ai/dsh-client-ui-settings', locale: '@deepseek-ai/dsh-client-locale', theme: '@deepseek-ai/dsh-client-ui-theme' },
 }
 const settled = () => new Promise<void>(resolve => setImmediate(resolve))
 const presentation = (): LocalPresentation => ({
@@ -84,7 +85,7 @@ async function fixture(version: keyof typeof nativePackages) {
   return { ctx, source, writes, installed, presentationOwner, get subscribers() { return subscribers } }
 }
 
-for (const version of ['rc.2', 'rc.3'] as const) {
+for (const version of ['rc.2', 'rc.3', 'rc.5'] as const) {
   test(`${version} native settings provider shares local UI preferences with unchanged native locale/theme runtimes`, async t => {
     const f = await fixture(version)
     t.after(() => f.ctx.fiber.dispose())

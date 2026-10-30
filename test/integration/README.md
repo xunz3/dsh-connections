@@ -40,7 +40,7 @@ The tests cover:
 - Both the sidebar and conversation workspace picker offering local and remote
   computers, with native directory selection, cancellation and switching.
 - The global New Session action reusing the selected computer's native blank
-  session and preserving its unsent draft on rc.3, with requests reaching only
+  session and preserving its unsent draft on rc.3 and rc.5, with requests reaching only
   that computer. The native More menu remains available.
 - The loading overlay remaining until the remote native document acknowledges
   that its directory picker or content is presented.
@@ -86,13 +86,17 @@ remote Host and `stop` closes only its local Host and SSH listener.
 Remote-version acceptance uses independently installed runtime prefixes and the
 built remote archive. It checks the native compatibility evaluator, actual CLI
 installation and activation, damaged-file repair, and optional Chromium
-workspace/Settings navigation. All Host homes are temporary; no model is called:
+workspace/Settings navigation. Protocol 3 supplies parent presentation before
+the child boots, then verifies live Locale/Theme changes without writing remote
+UI preferences. All Host homes are temporary; no model is called:
 
 ```sh
-DSH_QA_BROWSER=1 node test/integration/remote-compatibility.mjs \
-  /tmp/isolated-harness-rc2 /tmp/isolated-harness-rc3
+DSH_QA_BROWSER=1 node --import tsx test/integration/remote-compatibility.mjs \
+  /tmp/isolated-harness-rc2 /tmp/isolated-harness-rc3 /tmp/isolated-harness-rc5
 ```
 
 Each prefix must already contain the respective exact `@deepseek-ai/dsh` npm
-installation. This check does not stand in for a real systemd cross-version
+installation for every version admitted by `src/shared/harness-versions.json`.
+The `tsx` loader handles the shared TypeScript protocol and client bridge code.
+This check does not stand in for a real systemd cross-version
 transaction, third-party plugin compatibility, or provider/model execution.

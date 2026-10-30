@@ -26,22 +26,22 @@ These tests simulate the guest bridge in Chromium; they do not validate Electron
 - `src/shared`: browser-safe contracts and validation.
 - `test`: transport, cancellation, ownership, update recovery and browser integration.
 
-The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.3 and checked against its sidebar package; remote compatibility explicitly enumerates tested rc.2 and rc.3 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
+The host build externalizes Harness peer dependencies. The browser bundle uses native ModuleLoader services; React and Electron are not bundled replacements. The local `cordis.patch.yml` disables the separate `ui-sidebar` deployment and registers Connections. The package checker builds and inspects both the main tarball and its nested remote content bundle: runtime exports, ModuleLoader identity, profile patches, allowed files and documentation links. The local and remote host/client entries are built separately. The remote entry excludes the local sidebar and SSH manager. The deterministic build currently uses GNU tar. Local compatibility is exactly rc.5 and checked against its sidebar package; remote compatibility explicitly enumerates rc.2, rc.3 and rc.5 in src/shared/harness-versions.json. The package checker verifies both manifests and entry boundaries.
 
 The build includes the installed native sidebar ModuleLoader factory through a generated adapter. Its dependencies stay external and are supplied through the main manifest. The adapter assigns the compiled CSS ownership and deduplication IDs to Connections, preserving the original CSS and class names. This avoids collisions with Desktop's separately compiled sidebar and lets Harness unload/reload the composed styles correctly. `dist/native-sidebar.LICENSE` preserves its upstream MIT license. Workspace menus and icons resolve the native `dsh-client-ui-primitives` baseline at runtime. Browser fixtures bundle the published primitives and CSS using development-only dependencies; they do not replace the native components with mocks.
 
-The native shortcut provider is retained. Connections checks the exact rc.3 registry implementation at build time and adapts only command resolvers in the live service's private `registry.commands` map. Runtime checks verify registry identity, writable resolver fields and wrapper ownership; disposal restores only wrappers still owned by Connections. Native code owns keyboard/menu dispatch, keybindings, conflicts, revisions, repeat behavior, configuration and service disposal. A failed compatibility check withdraws remote surfaces before restoring local command resolution. No native shortcut factory or replacement Host schema is bundled.
+The native shortcut provider is retained. Connections checks the exact rc.5 registry implementation at build time and adapts only command resolvers in the live service's private `registry.commands` map. Runtime checks verify registry identity, writable resolver fields and wrapper ownership; disposal restores only wrappers still owned by Connections. Native code owns keyboard/menu dispatch, keybindings, conflicts, revisions, repeat behavior, configuration and service disposal. A failed compatibility check withdraws remote surfaces before restoring local command resolution. No native shortcut factory or replacement Host schema is bundled.
 
 The adapter reuses the original module's `apply`, components and child declarations; it does not vendor a source fork or recreate the sidebar. At runtime a Cordis-isolated `uiWorkspace` facade changes only `startSession` routing, with other methods and accessors bound to their native receiver. Disabling the whole Connections bundle removes its patch and restores the native sidebar deployment.
 
 The remote bundle's profile patch disables `directory-picker` auto selection and registers the existing `dsh-host-directory-picker-browse` and `dsh-client-ui-directory-picker-browse` pair. Both packages are supplied by Harness's Web bundle; the ordinary client row makes its surface available to ModuleLoader. This avoids waiting for a system dialog on a remote graphical desktop without adding a picker implementation or runtime dependency. Package checks require both browse faces and leave local picker composition unchanged.
 
-The remote patch also replaces the `ui-settings` and `ui-settings-account` deployments with their version-checked native factories inside Connections. Bootstrap waits for the view's local presentation snapshot before installing ConfigForms; original locale/theme providers then activate normally. Only the native form accessor for local UI preferences and the account browser capabilities are adapted. Factory CSS is inventoried under Connections, and the remote archive includes `native-settings.LICENSE` and `native-account.LICENSE`. Focused tests execute both supported releases' actual ConfigForms, locale and theme services to verify live local presentation, refused UI writes, retained remote model/permission/privacy writes, and service disposal. These tests do not establish live account authentication or Electron acceptance.
+The remote patch also replaces the `ui-settings` and `ui-settings-account` deployments with their version-checked native factories inside Connections. Bootstrap waits for the view's local presentation snapshot before installing ConfigForms; original locale/theme providers then activate normally. Only the native form accessor for local UI preferences and the account browser capabilities are adapted. Factory CSS is inventoried under Connections, and the remote archive includes `native-settings.LICENSE` and `native-account.LICENSE`. Focused tests execute all three supported releases' actual ConfigForms, locale and theme services to verify live local presentation, refused UI writes, retained remote model/permission/privacy writes, and service disposal. These tests do not establish live account authentication or Electron acceptance.
 
 CI also installs the checked release tarball into two disposable native Hosts
 on the declared local Harness version and runs the native browser suite. No
 compatibility exemptions are granted. See [Harness compatibility](harness-compatibility.md)
-for the rc.3 review and integration boundaries.
+for the rc.5 review and integration boundaries.
 
 ## Transport and service tests
 
@@ -207,3 +207,29 @@ an unsent draft, local/SSH workspace switching, reload/restart restoration and
 Settings ownership. Installed Host/client hashes matched the built artifacts.
 The review's temporary Hosts and SSH listeners were stopped afterward; the
 user's running Desktop and managed remote Hosts were not restarted or upgraded.
+
+
+## 2026-10-30 rc.5 compatibility acceptance
+
+Connections 0.1.8 was built against exact rc.5 native inputs. All 363 Node tests
+passed under Node 26.5.0, with one Windows-only test skipped on Linux. Real
+OpenSSH and systemd syntax opt-ins were enabled. TypeScript, production build
+and the 48-file package/remote-archive check passed; all 50 Chromium fixture
+tests and all five installed native two-Host rc.5 cases passed.
+
+The standalone remote matrix additionally passed on rc.2, rc.3 and rc.5:
+compatibility evaluation, CLI installation, damaged-file repair, activation,
+catalog/view protocol, native directory picker/session selection, Models and
+Built-in plugins Settings, and live parent-owned Locale/Theme with no writes
+to remote UI preferences. CI now exercises every admitted remote runtime from
+the exact checked release archive, alongside the local two-Host suite.
+
+These runs use isolated Linux Web profiles and Chromium. They do not establish
+packaged Windows Desktop rc.5 acceptance, live account sign-in, model/provider
+execution, third-party plugin parity or a real systemd cross-version update.
+The installed Windows Desktop is rc.5, but was not launched or modified for
+this validation. All test-owned Hosts and SSH listeners were stopped; no user
+profile or existing Host was upgraded or restarted.
+
+The resource-bound regressions are recorded in [performance](performance.md).
+No CPU, memory or responsiveness speedup was measured by this acceptance.

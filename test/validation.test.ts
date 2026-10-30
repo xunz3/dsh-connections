@@ -6,12 +6,13 @@ const id = 'connection-a54d0a10-1234-4567-abcd-123456789012'
 const token = 'a-valid-launch-token-with-enough-entropy'
 test('only validated remote runtimes are install targets while observed versions remain parseable', () => {
   assert.deepEqual(parseUpdate({ id }), { id }, 'omitting a version requests the latest compatible release')
-  assert.equal(LATEST_SUPPORTED_REMOTE_VERSION, '0.2.1-rc.3')
+  assert.equal(LATEST_SUPPORTED_REMOTE_VERSION, '0.2.1-rc.5')
+  assert.deepEqual(SUPPORTED_REMOTE_VERSIONS, ['0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.5'])
   for (const version of SUPPORTED_REMOTE_VERSIONS) {
     assert.equal(parseSupportedVersion(version), version)
     assert.deepEqual(parseUpdate({ id, version }), { id, version })
   }
-  for (const version of ['0.2.1-rc.1', '0.2.1-rc.4', '0.2.2', 'latest', '^0.2.1', '0.3.0']) assert.throws(() => parseUpdate({ id, version }), TypeError)
+  for (const version of ['0.2.1-rc.1', '0.2.1-rc.4', '0.2.2-alpha.2', '0.2.2', 'latest', '^0.2.1', '0.3.0']) assert.throws(() => parseUpdate({ id, version }), TypeError)
   assert.equal(parseVersion('0.2.1-rc.1'), '0.2.1-rc.1')
 })
 test('SSH inputs are destinations, not command lines', () => {

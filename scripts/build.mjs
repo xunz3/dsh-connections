@@ -13,6 +13,14 @@ import { createHash } from 'node:crypto'
 const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
 const { name } = manifest
 const versions = JSON.parse(await readFile(new URL('../src/shared/harness-versions.json', import.meta.url), 'utf8'))
+const nativeContentReleases = {
+  rc2: { version: '0.2.1-rc.2', settings: 'native-settings-rc2', account: 'native-account-rc2' },
+  rc3: { version: '0.2.1-rc.3', settings: 'native-settings-rc3', account: 'native-account-rc3' },
+  rc5: { version: '0.2.1-rc.5', settings: '@deepseek-ai/dsh-client-ui-settings', account: '@deepseek-ai/dsh-client-ui-settings-account' },
+}
+if (JSON.stringify(Object.values(nativeContentReleases).map(release => release.version)) !== JSON.stringify(versions.remote)) {
+  throw new Error('Every admitted remote release needs reviewed native content inputs')
+}
 const sidebarManifest = JSON.parse(await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar/package.json')), 'utf8'))
 if (manifest.engines.dsh !== sidebarManifest.version || manifest.engines.dsh !== versions.local) throw new Error('The native sidebar adapter must target its exact tested Harness version')
 const shortcutsManifest = JSON.parse(await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-shortcuts/package.json')), 'utf8'))
@@ -22,8 +30,7 @@ const integrity = value => `sha512-${createHash('sha512').update(value).digest('
 const nativeInputs = { packages: [], adapters: [] }
 const settingsSources = {}
 for (const id of ['@deepseek-ai/dsh-client-ui-sidebar', '@deepseek-ai/dsh-client-shortcuts',
-  '@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-settings-account',
-  'native-settings-rc2', 'native-account-rc2', ...nativeSettingsPackages]) {
+  ...Object.values(nativeContentReleases).flatMap(release => [release.settings, release.account]), ...nativeSettingsPackages]) {
   const metadata = JSON.parse(await readFile(new URL(import.meta.resolve(`${id}/package.json`)), 'utf8'))
   const source = await readFile(new URL(import.meta.resolve(`${id}/client`)), 'utf8')
   if (nativeSettingsPackages.includes(id)) {
@@ -62,7 +69,12 @@ await writeFile('dist/native-sidebar.LICENSE', await readFile(new URL('./LICENSE
 const nativeContent = {
   name: 'native-content-composition',
   setup(build) {
-    build.onResolve({ filter: /^@connections-native\// }, args => ({ path: `@connections-native/shared/${args.path.split('/').at(-1)}`, namespace: 'native-content' }))
+    build.onResolve({ filter: /^@connections-native\// }, args => {
+      const [scope, release, part, extra] = args.path.split('/')
+      if (scope !== '@connections-native' || !Object.hasOwn(nativeContentReleases, release)
+        || !['settings', 'account'].includes(part) || extra !== undefined) throw new Error('Unsupported native content')
+      return { path: `@connections-native/shared/${part}`, namespace: 'native-content' }
+    })
     build.onLoad({ filter: /.*/, namespace: 'native-content' }, async ({ path }) => {
       const [, release, part] = path.split('/')
       const nativeId = { settings: '@deepseek-ai/dsh-client-ui-settings', account: '@deepseek-ai/dsh-client-ui-settings-account' }[part]
@@ -71,12 +83,16 @@ const nativeContent = {
       const metadata = JSON.parse(await readFile(new URL(import.meta.resolve(`${packageId}/package.json`)), 'utf8'))
       if (metadata.name !== nativeId || metadata.version !== versions.local) throw new Error('Native content must match its exact tested version')
       const source = await readFile(new URL(import.meta.resolve(`${packageId}/client`)), 'utf8')
-      const older = JSON.parse(await readFile(new URL(import.meta.resolve(`native-${part}-rc2/package.json`)), 'utf8'))
-      const olderSource = await readFile(new URL(import.meta.resolve(`native-${part}-rc2/client`)), 'utf8')
-      // These two tested releases share this exact implementation. Refuse to
-      // deduplicate if a future release changes more than its version label.
-      if (older.name !== nativeId || older.version !== '0.2.1-rc.2'
-        || olderSource.replaceAll(older.version, '<release>') !== source.replaceAll(metadata.version, '<release>')) throw new Error('Native settings releases need separate implementations')
+      // Share a factory only after checking every admitted release's actual
+      // source. A changed implementation needs a separately reviewed adapter.
+      for (const reviewed of Object.values(nativeContentReleases)) {
+        const input = JSON.parse(await readFile(new URL(import.meta.resolve(`${reviewed[part]}/package.json`)), 'utf8'))
+        const inputSource = await readFile(new URL(import.meta.resolve(`${reviewed[part]}/client`)), 'utf8')
+        if (input.name !== nativeId || input.version !== reviewed.version
+          || inputSource.replaceAll(input.version, '<release>') !== source.replaceAll(metadata.version, '<release>')) {
+          throw new Error(`Native settings releases need separate implementations: ${reviewed.version}/${part}`)
+        }
+      }
       return { contents: part === 'account' ? composeNativeAccount(source, name) : composeNativeSettings(source), loader: 'js' }
     })
   },

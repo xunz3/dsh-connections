@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import harnessVersions from '../src/shared/harness-versions.json' with { type: 'json' }
 
 const nativeId = '@deepseek-ai/dsh-client-ui-settings-account'
 const hostName = 'connectionsLoginHost'
@@ -25,7 +26,7 @@ export function composeNativeAccount(source, owner) {
     return false
   }
   function visit(node) {
-    if (ts.isStringLiteral(node) && /^0\.2\.1-rc\.[23]$/.test(node.text)) {
+    if (ts.isStringLiteral(node) && harnessVersions.remote.includes(node.text)) {
       if (version && version !== node.text) throw new Error('Ambiguous native account release')
       version = node.text; versionUses++; replace(node, 'nativeRelease')
     }

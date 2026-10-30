@@ -1,8 +1,32 @@
 # Harness compatibility
 
-Reviewed against the published rc.2 and rc.3 packages on 2026-10-30. Connections
-0.1.7 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
-The separate remote content archive supports both explicitly tested versions.
+Connections 0.1.8 targets local Harness `0.2.1-rc.5`. Remote content explicitly
+admits `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5`. The local engine remains
+exact: use Connections 0.1.7 for local rc.3, or 0.1.0 for local rc.2.
+Published 0.1.7 is rejected by Harness rc.5's native compatibility evaluator;
+its engine restriction was not widened retroactively.
+
+## rc.5 contract review
+
+On 2026-10-30, all published `lib/*.js`, `*.d.ts` and `*.json` inputs of the
+29 direct Harness development dependencies were compared with rc.3. They match
+after normalizing their release labels, except the sidebar build badge and
+client module server commit identifiers. The Settings, Account, shortcut
+registry, workspace/layout and Typert contracts used here did not change.
+The rc.5 [release notes](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.5)
+describe improved thinking-content display; this source comparison and native
+acceptance, rather than the notes alone, determine admission.
+
+All Harness development and peer inputs now target exact rc.5. The build also
+checks separately installed rc.2/rc.3 Settings and Account sources against rc.5
+before sharing their factory. Native preference tests execute all three
+matching Settings, locale and theme runtimes. A changed implementation fails
+the build and needs a separate reviewed adapter. rc.4 and 0.2.2-alpha.2 remain
+unadmitted; a compatible-looking neighboring version is not sufficient evidence.
+
+Existing remote Hosts retain their version. Explicit Update defaults to the
+latest admitted rc.5; new managed installations retain the original rc.2
+baseline. This admission does not silently migrate existing services.
 
 The native factory and shortcut adapters still require exact tested inputs.
 `dist/native-inputs.json` records their versions and SHA-512 digests; `NOTICE`
@@ -16,6 +40,38 @@ MVVM, aligns its list with native icons and spacing, and fixes catalog snapshot
 and asynchronous action handling. It retains the 0.1.2 stylesheet ownership fix.
 See [workspace list responsibilities](unified-workspaces.md#workspace-list-responsibilities).
 
+## Version policy and automatic admission
+
+The intended policy is a minimum supported version and an explicit compatibility
+boundary, with narrowly excluded releases that have demonstrated a regression.
+The latest stable release within that contract should be installable without a
+new Connections release. The build input version, installed-version admission
+and CI's actually tested versions are separate facts; a passing matrix should
+not itself become an installation allowlist.
+
+That policy is not yet safe for the current local bundle. Its profile patch
+unconditionally disables the native sidebar before the Connections client
+factory loads. A later capability check cannot undo that patch if an upstream
+change prevents this factory from loading. Shortcut guards withdraw remote
+routing, but cannot restore a sidebar lost at that earlier boundary. A bare
+`>=` engine would therefore remove the existing protection without supplying
+that fallback. The exact 0.1.8 local gate is a temporary integration limitation,
+not the desired long-term versioning model.
+
+Broad admission first needs a conditional native provider extension/replacement
+with ownership and failure recovery, or a public source-aware navigation API.
+Capabilities can then be checked before enabling remote content; a failed check
+must preserve native navigation, retain basic connection management and explain
+which capability is unavailable. Builds can still pin their derivation inputs,
+while runtime admission uses the reviewed contract range and known exclusions.
+
+Harness's current evaluator uses semver with `includePrerelease: true`. A lower
+bound alone also admits future alpha releases and incompatible major versions.
+A future range must therefore state its contract boundary and channel policy;
+“not yet tested” and “known incompatible” should remain distinct. Remote
+maintenance must additionally resolve a compatible version explicitly, verify
+its protocol/capabilities and avoid automatically upgrading a running Host.
+
 ## Desktop remote content and commands
 
 Connections uses the native Desktop guest lease API for remote workspaces and
@@ -28,7 +84,7 @@ or 127.0.0.1 on the local Harness computer.
 
 Version 0.1.6 retains the running native `ShortcutsService`, its provider and
 Host configuration. A version-checked adapter wraps only the registered command
-objects' resolvers in rc.3's private `registry.commands` map. Native code retains
+objects' resolvers in the tested private `registry.commands` map. Native code retains
 keybindings, conflicts, revisions, repeat handling, keyboard/menu dispatch and
 disposal. The adapter follows command registration changes and restores its own
 wrappers when disposed. The command guard lives with the view controller,
@@ -38,7 +94,7 @@ New Session, search, add workspace and Close route to the selected surface.
 Commands without a safe remote delegation show guidance to use remote controls;
 they do not operate on the local session behind the remote view. Build-time
 source checks and runtime registry/ownership checks bound this private adapter
-to the reviewed rc.3 contract. If it cannot attach safely, remote views close or
+to the reviewed rc.5 contract. If it cannot attach safely, remote views close or
 cannot open; the native local shortcut service remains available. A future
 public command-resolver hook would let Connections remove this private adapter.
 
@@ -48,7 +104,7 @@ explicit set of local UI preferences; native remote schemas and write queues
 remain intact. Account composition adapts browser opening/copying and stylesheet
 ownership while retaining native authorization logic. The build verifies the
 exact package versions and constructor/capability sites before composing them.
-The currently supported rc.2/rc.3 factory implementations are deduplicated only
+The currently supported rc.2/rc.3/rc.5 factory implementations are deduplicated only
 after a source comparison that permits the native account release label to
 differ. A changed implementation must be reviewed separately rather than
 silently inheriting this compatibility claim.

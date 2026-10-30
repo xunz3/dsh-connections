@@ -78,7 +78,7 @@ test('managed hosts retrieve fresh credentials, restore access after unload, and
   assert.equal((await reopened.list())[0]?.phase, 'connected')
   assert.deepEqual(updates, [])
   const updated = await reopened.update({ id: saved.id })
-  assert.equal(updated.runtime?.version, '0.2.1-rc.3')
+  assert.equal(updated.runtime?.version, LATEST_SUPPORTED_REMOTE_VERSION)
   assert.deepEqual(updates, [undefined], 'default update must reach the updater, not ordinary prepare')
   await reopened.update({ id: saved.id, version: '0.2.1-rc.3' })
   assert.deepEqual(updates, [undefined, '0.2.1-rc.3'])

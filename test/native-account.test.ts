@@ -154,6 +154,11 @@ test('login capability rejects non-web or credential-bearing URLs without dispat
 
 test('native account composition rejects changed seams and gives copied styles independent ownership', () => {
   assert.throws(() => composeNativeAccount('export const apply = () => {}', 'owner'), /bundle format/)
+  for (const unsupported of ['0.2.1-rc.4', '0.2.2-alpha.2']) {
+    const unreviewed = ['0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.5']
+      .reduce((text, version) => text.replaceAll(version, unsupported), source)
+    assert.throws(() => composeNativeAccount(unreviewed, 'owner'), /release contract/)
+  }
   assert.throws(() => composeNativeAccount(source.replace('window.open("about:blank", "_blank")', 'window.open("", "_blank")'), 'owner'), /capability contract/)
   assert.throws(() => composeNativeAccount(source.replace('navigator.clipboard.writeText', 'clipboard.writeText'), 'owner'), /capability contract/)
   assert.throws(() => composeNativeAccount(source.replaceAll('tag.dataset.plugin =', 'tag.dataset.unsupportedOwner ='), 'owner'), /stylesheet ownership format/)
