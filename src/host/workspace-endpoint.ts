@@ -265,7 +265,7 @@ export class WorkspaceEndpoint {
       case 'forgetWorkspace': await workspaceController.delete({ workspaceId: input.id }); return { done: true }
       case 'renameSession': await sessionController.rename({ sessionId: input.id, title: input.title }); return { done: true }
       case 'archiveSession':
-        if (input.archived) await workspaceController.archiveSession({ sessionId: input.id })
+        if (input.archived) await workspaceController.archiveSession({ sessionId: input.id, ...(input.stopActivity === true ? { stopActivity: true } : {}) })
         else await workspaceController.unarchiveSession({ sessionId: input.id })
         return { done: true }
       case 'pinSession':

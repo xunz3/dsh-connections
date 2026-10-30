@@ -14,9 +14,9 @@ const bootVersion = (globalThis as typeof globalThis & { __DSH_BOOT__?: { releas
 let adaptSettings: NativeSettingsAdapter = Native => Native
 let loginHost: LoginHost | undefined
 const requireLogin = () => { if (!loginHost) throw new Error('The login view is unavailable'); return loginHost }
-const factories = nativeContent(bootVersion ?? '', window.parent === window ? {
+const factories = nativeContent(bootVersion ?? '', {
   prepare: () => requireLogin().prepare(), copy: url => requireLogin().copy(url), dispose() {},
- } : undefined, Native => adaptSettings(Native))
+ }, Native => adaptSettings(Native))
 
 // Bootstrap local presentation before any native content can choose remote UI
 // preferences. Execution/configuration services remain those of this Host.

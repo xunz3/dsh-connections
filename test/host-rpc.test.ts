@@ -14,6 +14,16 @@ const id = 'connection-12345678-1234-1234-1234-123456789abc'
 const view: ConnectionView = { id, name: 'Work', target: 'dev', remotePort: 3080, phase: 'disconnected' }
 const token = 'private-launch-token-never-in-status'
 
+test('local configuration rejects embedded mode before it can disable its manager', () => {
+  const validate = hostPlugin.Config['~standard'].validate
+  assert.deepEqual(validate({}), { value: { embedded: false } })
+  assert.deepEqual(validate({ embedded: false }), { value: { embedded: false } })
+  for (const embedded of [true, 'true', 'false', 0, 1]) {
+    const result = validate({ embedded })
+    assert.ok('issues' in result && result.issues?.length)
+  }
+})
+
 test('real Typert registration binds owner-only RPC and strips extra fields from status', async () => {
   const ctx = new Context()
   const registry = ctx.plugin(TypertRegistry)

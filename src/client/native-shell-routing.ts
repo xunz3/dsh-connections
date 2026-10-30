@@ -22,6 +22,7 @@ export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting
   if (ctx.slots.entries('sidebar').length !== 0) {
     // Another composition owns the shell. Preserve it and leave remote opening
     // unavailable; its New Session action cannot safely target a remote source.
+    ctx.logger.warn('Connections found an existing sidebar provider; native navigation is preserved and remote workspace routing is unavailable.')
     return undefined
   }
   const native = ctx.uiWorkspace
@@ -30,11 +31,12 @@ export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting
   // A Proxy over the native Cordis Service inherits its tracker and method
   // descriptors. ctx.get() then wraps it again and reads the native prototype's
   // startSession descriptor, bypassing the routing get trap. This facade owns
-  // its method and forwards only the public string-keyed navigation interface.
+  // its method and forwards the remaining navigation interface. Cordis's native
+  // tracker alone must stay absent or it would bypass our own startSession.
   const navigation = new Proxy({ startSession }, {
     get(target, property) {
       if (property === 'startSession') return target.startSession
-      if (typeof property !== 'string') return undefined
+      if (property === Symbol.for('cordis.tracker')) return undefined
       // Preserve receivers for native methods and getters, including future additions.
       const value: unknown = Reflect.get(native, property, native)
       if (typeof value !== 'function') return value
@@ -42,6 +44,17 @@ export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting
       if (bound === undefined) { bound = value.bind(native) as Function; methods.set(value, bound) }
       return bound
     },
+    set(_target, property, value) { return Reflect.set(native, property, value, native) },
+    has(target, property) { return property in target || property !== Symbol.for('cordis.tracker') && property in native },
+    ownKeys(target) { return [...new Set([...Reflect.ownKeys(native), ...Reflect.ownKeys(target)])].filter(key => key !== Symbol.for('cordis.tracker')) },
+    getOwnPropertyDescriptor(target, property) {
+      if (property === Symbol.for('cordis.tracker')) return undefined
+      const own = Reflect.getOwnPropertyDescriptor(target, property)
+      if (own) return own
+      const descriptor = Reflect.getOwnPropertyDescriptor(native, property)
+      return descriptor && { ...descriptor, configurable: true }
+    },
+    deleteProperty(_target, property) { return property !== 'startSession' && Reflect.deleteProperty(native, property) },
   }) as UiWorkspace
   return ctx.isolate('uiWorkspace').plugin({
     name: 'connections-native-sidebar',

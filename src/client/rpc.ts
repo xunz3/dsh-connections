@@ -34,16 +34,28 @@ async function unwrap<T>(pending: Promise<RemoteResult<T>>, parse: (value: unkno
 export async function mountRpc(ctx: Context): Promise<void> { await ctx.remote.$mount(rpcContribution) }
 export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
   const api = ctx.remote.connections
+  let listing: Promise<ConnectionView[]> | undefined
+  const change = async <T,>(operation: () => Promise<T>): Promise<T> => {
+    listing = undefined
+    try { return await operation() }
+    finally { listing = undefined }
+  }
   return {
     checkSsh: target => unwrap(api.checkSsh(target), parseSshCheck),
     sshHosts: () => unwrap(api.sshHosts(), parseSshHosts),
-    list: () => unwrap(api.list(), parseViews),
-    save: input => unwrap(api.save(input), parseView),
-    remove: id => unwrap(api.forget(id), () => undefined),
-    connect: id => unwrap(api.connect(id), parseView),
-    reconnect: id => unwrap(api.reconnect(id), parseView),
-    disconnect: id => unwrap(api.disconnect(id), parseView),
-    update: input => unwrap(api.update(input), parseView),
+    // The workspace and Settings schedulers may sample the same live Host in a
+    // tick. Coalesce concurrent reads only; navigation still gets a fresh read.
+    list: () => {
+      if (listing) return listing
+      const pending = unwrap(api.list(), parseViews).finally(() => { if (listing === pending) listing = undefined })
+      return listing = pending
+    },
+    save: input => change(() => unwrap(api.save(input), parseView)),
+    remove: id => change(() => unwrap(api.forget(id), () => undefined)),
+    connect: id => change(() => unwrap(api.connect(id), parseView)),
+    reconnect: id => change(() => unwrap(api.reconnect(id), parseView)),
+    disconnect: id => change(() => unwrap(api.disconnect(id), parseView)),
+    update: input => change(() => unwrap(api.update(input), parseView)),
     open: id => unwrap(api.open(id), parseOpenResult),
     async workspace<R extends WorkspaceRequest>(id: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
       const result = await unwrap(api.workspace({ id, request }), parseWorkspaceCallResult)

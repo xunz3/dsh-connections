@@ -75,12 +75,37 @@ test('login capabilities reject executable schemes and credentials, and presenta
     assert.throws(() => parseLocalPresentation({ ...presentation(), theme: { ...presentation().theme, [field]: value } }))
   }
   for (const value of ['url(https://example.com/x)', 'red;display:none', 'var(--safe)}']) {
-    assert.throws(() => parseLocalPresentation({ ...presentation(), tokens: { '--dsw-alias-bg-base': value } }))
+    assert.deepEqual(parseLocalPresentation({ ...presentation(), tokens: { '--dsw-alias-bg-base': value } }).tokens, {})
   }
   assert.throws(() => parseLocalPresentation({ ...presentation(), general: undefined }))
   for (const [field, value] of [['transcriptView', 'unknown'], ['collapseTiming', 'eager'], ['performanceUsage', 'on'], ['linkOpening', 'shell'], ['busyEnter', 'execute'], ['developerTools', 'true']]) {
     assert.throws(() => parseLocalPresentation({ ...presentation(), general: { ...presentation().general, [field]: value } }))
   }
+})
+
+test('unsupported palette tokens are omitted while native bootstrap retains the valid presentation', async t => {
+  const f = await fixture()
+  t.after(() => f.service.dispose())
+  const tokens = { ...presentation().tokens, '--dsw-extension-invalid': 'red;display:none', '--other-plugin': '#fff', '--dsw-extension-good': '#aabbcc' }
+  await f.endpoint({ op: 'syncSurface', channel: f.channel, presentation: { ...presentation(), tokens }, acknowledgements: [] }, signal)
+  const client = createViewSurfaceClient(f.channel, f.endpoint, 2)
+  t.after(() => client.dispose())
+  await client.ready
+  assert.deepEqual(client.getSnapshot()?.tokens, { ...presentation().tokens, '--dsw-extension-good': '#aabbcc' })
+})
+
+test('bootstrap retries a transient surface failure without rejecting the remote document', async t => {
+  const f = await fixture()
+  t.after(() => f.service.dispose())
+  let failures = 0
+  const endpoint: SettingsHostEndpoint = async (request, lifetime) => {
+    if (request.op === 'surfaceSnapshot' && failures++ === 0) throw new Error('Temporary transport outage')
+    return f.endpoint(request, lifetime)
+  }
+  const client = createViewSurfaceClient(f.channel, endpoint, 2)
+  t.after(() => client.dispose())
+  assert.equal((await client.ready).nativeVersion, '0.2.1-rc.3')
+  assert.ok(failures >= 2)
 })
 
 test('cancellation before enqueue leaves a tombstone and stale revisions or closed leases cannot request login', async t => {

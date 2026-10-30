@@ -209,6 +209,27 @@ test('the complete isolated facade binds native methods and accessors to their o
   } finally { await f.dispose() }
 })
 
+test('the isolated facade forwards public symbols and native writes while retaining routed creation', async () => {
+  const f = fixture()
+  const symbol = Symbol('extension-state')
+  try {
+    Reflect.set(f.native, symbol, 'initial')
+    const installed = installNativeSidebar(f.ctx, { startSession() {} })
+    await installed; await settled()
+    const scoped = installed!.ctx.get('uiWorkspace')!
+    assert.equal(Reflect.get(scoped, symbol), 'initial')
+    assert.equal(Reflect.set(scoped, symbol, 'updated'), true)
+    assert.equal(Reflect.get(f.native, symbol), 'updated')
+    assert.equal(Reflect.set(scoped, 'extensionState', 42), true)
+    assert.equal(Reflect.get(f.native, 'extensionState'), 42)
+    assert.equal(symbol in scoped, true)
+    assert.ok(Reflect.ownKeys(scoped).includes(symbol))
+    assert.equal(Reflect.get(scoped, Symbol.for('cordis.tracker')), undefined, 'native tracing must not bypass the facade-owned startSession')
+    f.face('sidebar').startSession()
+    assert.deepEqual(f.native.calls, [])
+  } finally { await f.dispose() }
+})
+
 test('disposal removes only the isolated provider and native shell tree, then permits reinstall', async () => {
   const f = fixture()
   try {

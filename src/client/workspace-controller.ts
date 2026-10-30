@@ -24,6 +24,8 @@ export interface WorkspaceOptions {
   clientId?: string
   catalogs?: boolean
   surface?: LocalSurface
+  /** Shell-owned visible polling may be shared with Settings. */
+  schedulePoll?: (task: () => Promise<void>) => () => void
 }
 // Persisted identifiers remain stable across the public npm scope rename.
 const STORAGE_KEY = '@xunz/dsh-connections/selection'
@@ -56,11 +58,13 @@ export class WorkspaceController {
   private readonly catalogPolls = new Map<string, { next: number; failures: number }>()
   private readonly catalogGenerations = new Map<string, number>()
   private timer?: ReturnType<typeof setTimeout>
+  private stopPoll?: () => void
   private presentationTimer?: ReturnType<typeof setTimeout>
   private presentationDeadline?: ReturnType<typeof setTimeout>
   private readonly allocating = new Map<string, Promise<unknown>>()
   private readonly clientId: string
   private checkFailures = 0
+  private checking?: Promise<void>
   private target?: WorkspaceNavigationTarget
   private surfaceChannel?: string
   private stopSurface?: () => void
@@ -122,6 +126,10 @@ export class WorkspaceController {
   start(): void {
     if (this.disposed || this.started) return
     this.started = true
+    if (this.options.schedulePoll) {
+      this.stopPoll = this.options.schedulePoll(async () => { if (this.visible) await this.refresh(false) })
+      return
+    }
     const tick = async () => { if (this.visible) await this.refresh(false); if (!this.disposed) this.timer = setTimeout(tick, 2500) }
     void tick()
   }
@@ -362,7 +370,10 @@ export class WorkspaceController {
     stopSurface?.(); this.release(previous)
     this.remember({ sourceId: 'local' }); this.emit()
   }
-  async check(): Promise<void> {
+  check(): Promise<void> {
+    return this.checking ??= this.checkView().finally(() => { this.checking = undefined })
+  }
+  private async checkView(): Promise<void> {
     const state = this.state
     if (!state || state.phase !== 'ready' || this.navigating === this.version) return
     const version = this.version
@@ -415,7 +426,7 @@ export class WorkspaceController {
       this.publish({ id: state.id, name: state.name, phase: 'error', error: code === 'INCOMPATIBLE_PROTOCOL' ? 'protocolMismatch' : error instanceof Error && error.message === 'navigation-failed' ? 'failed' : 'disconnected' })
     }
   }
-  dispose(): void { this.stopSurface?.(); this.stopPresentationWatch(); this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
+  dispose(): void { this.stopPoll?.(); this.stopSurface?.(); this.stopPresentationWatch(); this.release(this.state); this.disposed = true; this.version++; clearTimeout(this.timer); this.state = undefined; this.listeners.clear() }
 }
 
 /** Reload replaces the old lease; a duplicated tab forks the active owner's ID. */

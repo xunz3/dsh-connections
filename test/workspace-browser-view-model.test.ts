@@ -52,6 +52,28 @@ test('same native IDs remain source-qualified and each pending row deduplicates 
   assert.equal(vm.getSnapshot().pending.size, 0)
 })
 
+test('native active-work archive refusal requires a separate confirmed stop operation', async () => {
+  const calls: unknown[][] = []
+  const vm = new WorkspaceBrowserViewModel(model({
+    onArchiveSession(...args) {
+      calls.push(args)
+      if (!args[3]?.stopActivity) throw Object.assign(new Error('private diagnostic'), { code: 'SESSION_ACTIVE' })
+    },
+  }))
+  const key = workspaceRowKey('remote', 'session', 'chat')
+  await vm.archiveSession('remote', 'chat', true)
+  assert.equal(vm.getSnapshot().archiving, key)
+  assert.equal(vm.getSnapshot().error, undefined)
+  assert.deepEqual(calls, [['remote', 'chat', true]], 'a refusal must never auto-replay with stopActivity')
+  vm.confirmArchive(undefined)
+  assert.equal(vm.getSnapshot().archiving, undefined)
+  assert.equal(calls.length, 1, 'cancelling leaves the native session untouched')
+  vm.confirmArchive(key)
+  await vm.archiveSession('remote', 'chat', true, { stopActivity: true })
+  assert.deepEqual(calls[1], ['remote', 'chat', true, { stopActivity: true }])
+  assert.equal(vm.getSnapshot().archiving, undefined)
+})
+
 test('offline records can reconnect through navigation, while mutations and archived opens validate the current owner', async () => {
   const calls: unknown[][] = []
   const data = catalog(['chat', 'archived'])

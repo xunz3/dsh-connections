@@ -67,7 +67,7 @@ export type WorkspaceRequest =
   | { op: 'renameWorkspace'; id: string; title: string }
   | { op: 'forgetWorkspace'; id: string }
   | { op: 'renameSession'; id: string; title: string }
-  | { op: 'archiveSession'; id: string; archived: boolean }
+  | { op: 'archiveSession'; id: string; archived: boolean; stopActivity?: true }
   | { op: 'pinSession'; id: string; pinned: boolean }
   | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string; presentation?: LocalPresentation }
   | { op: 'navigate'; channel: string; requestId: string; target: WorkspaceNavigationTarget }
@@ -221,8 +221,12 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
       keys(input, ['op', 'id', 'title'])
       return { op, id: parseWorkspaceId(input.id), title: text(input.title, 512).trim() }
     case 'forgetWorkspace': keys(input, ['op', 'id']); return { op, id: parseWorkspaceId(input.id) }
-    case 'archiveSession':
-      keys(input, ['op', 'id', 'archived']); return { op, id: parseWorkspaceId(input.id), archived: boolean(input.archived) }
+    case 'archiveSession': {
+      keys(input, ['op', 'id', 'archived', 'stopActivity'])
+      const archived = boolean(input.archived)
+      if (input.stopActivity !== undefined && (input.stopActivity !== true || !archived)) throw new TypeError(WORKSPACE_ERRORS.BAD_REQUEST)
+      return { op, id: parseWorkspaceId(input.id), archived, ...(input.stopActivity === true ? { stopActivity: true } : {}) }
+    }
     case 'pinSession':
       keys(input, ['op', 'id', 'pinned']); return { op, id: parseWorkspaceId(input.id), pinned: boolean(input.pinned) }
     case 'navigate':

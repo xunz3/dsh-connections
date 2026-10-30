@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { pollConnections } from '../src/client/connection-polling.js'
+import { pollConnections, scheduleVisiblePoll } from '../src/client/connection-polling.js'
 
 class Visibility extends EventTarget {
   visibilityState: DocumentVisibilityState = 'visible'
@@ -108,4 +108,80 @@ test('disposal silences pending success and failure and removes visibility subsc
     t.mock.timers.tick(10_000)
     assert.equal(calls, 1)
   }
+})
+
+test('workspace and settings polling share visibility and preserve each remaining owner', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility()
+  let workspaces = 0, settings = 0
+  const stopWorkspaces = scheduleVisiblePoll(document, async () => { workspaces++ })
+  const stopSettings = scheduleVisiblePoll(document, async () => { settings++ })
+  t.after(() => { stopWorkspaces(); stopSettings() })
+  for (let i = 0; i < 10; i++) await settled()
+  t.mock.timers.tick(3000)
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 2)
+  assert.equal(settings, 2)
+  document.set('hidden')
+  t.mock.timers.tick(30_000)
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 2)
+  assert.equal(settings, 2)
+  stopSettings()
+  document.set('visible')
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 3)
+  assert.equal(settings, 2, 'unmounting Settings cannot stop or restart workspace polling')
+  stopWorkspaces()
+  document.set('hidden'); document.set('visible')
+  t.mock.timers.tick(30_000)
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 3)
+})
+
+test('a pending workspace read does not delay a new settings owner or its later ticks', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility()
+  const slow = deferred<void>()
+  let workspaces = 0, settings = 0
+  const stopWorkspaces = scheduleVisiblePoll(document, async () => { workspaces++; await slow.promise })
+  for (let i = 0; i < 10; i++) await settled()
+  const stopSettings = scheduleVisiblePoll(document, async () => { settings++ })
+  t.after(() => { slow.resolve(); stopWorkspaces(); stopSettings() })
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 1)
+  assert.equal(settings, 1, 'a newly mounted owner gets its initial read while another owner is pending')
+  t.mock.timers.tick(3000)
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(workspaces, 1, 'the same owner never overlaps reads')
+  assert.equal(settings, 2, 'a slow catalog cannot stall the settings host menu')
+  stopWorkspaces()
+  t.mock.timers.tick(3000)
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(settings, 3, 'the remaining owner retains its timer after a pending owner unmounts')
+  document.set('hidden')
+  document.set('visible')
+  for (let i = 0; i < 10; i++) await settled()
+  assert.equal(settings, 4)
+  assert.equal(workspaces, 1)
+})
+
+test('repeating an old owner cleanup cannot unregister a newer document group', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  class CountedVisibility extends Visibility {
+    subscriptions = 0
+    override addEventListener(...args: Parameters<EventTarget['addEventListener']>) { this.subscriptions++; super.addEventListener(...args) }
+    override removeEventListener(...args: Parameters<EventTarget['removeEventListener']>) { this.subscriptions--; super.removeEventListener(...args) }
+  }
+  const document = new CountedVisibility()
+  const stopOld = scheduleVisiblePoll(document, async () => {})
+  stopOld()
+  const stopCurrent = scheduleVisiblePoll(document, async () => {})
+  stopOld()
+  const stopOther = scheduleVisiblePoll(document, async () => {})
+  assert.equal(document.subscriptions, 1, 'both new owners must share the same surviving visibility listener')
+  stopCurrent()
+  assert.equal(document.subscriptions, 1)
+  stopOther(); stopOther()
+  assert.equal(document.subscriptions, 0)
 })

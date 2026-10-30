@@ -170,16 +170,28 @@ test('mutations delegate to native controllers without changing paths or stoppin
     for (const input of [
       { op: 'forgetWorkspace', id: 'workspace-1' }, { op: 'renameSession', id: 'session-1', title: 'Session name' },
       { op: 'archiveSession', id: 'session-1', archived: true }, { op: 'archiveSession', id: 'session-1', archived: false },
+      { op: 'archiveSession', id: 'session-1', archived: true, stopActivity: true },
       { op: 'pinSession', id: 'session-1', pinned: true }, { op: 'pinSession', id: 'session-1', pinned: false },
     ] satisfies WorkspaceRequest[]) assert.deepEqual(await call(endpoint, input), { done: true })
     assert.deepEqual(calls, [
       ['renameWorkspace', { workspaceId: 'workspace-1', title: 'Renamed' }], ['delete', { workspaceId: 'workspace-1' }],
       ['renameSession', { sessionId: 'session-1', title: 'Session name' }], ['archive', { sessionId: 'session-1' }],
-      ['unarchive', { sessionId: 'session-1' }], ['pin', { sessionId: 'session-1' }], ['unpin', { sessionId: 'session-1' }],
+      ['unarchive', { sessionId: 'session-1' }], ['archive', { sessionId: 'session-1', stopActivity: true }],
+      ['pin', { sessionId: 'session-1' }], ['unpin', { sessionId: 'session-1' }],
     ])
     services.workspaceController.archiveSession = async () => { throw Object.assign(new Error(secret), { code: 'workspace/session-active', details: { token: secret } }) }
     failure(await endpoint.handle({ op: 'archiveSession', id: 'session-1', archived: true }, new AbortController().signal), 'SESSION_ACTIVE')
   } finally { endpoint.dispose() }
+})
+
+test('archive stops native activity only with explicit archive confirmation', () => {
+  const request = { op: 'archiveSession', id: 'session-1', archived: true }
+  assert.deepEqual(parseWorkspaceRequest(request), request)
+  assert.deepEqual(parseWorkspaceRequest({ ...request, stopActivity: true }), { ...request, stopActivity: true })
+  for (const stopActivity of [false, 'true', 1, null]) {
+    assert.throws(() => parseWorkspaceRequest({ ...request, stopActivity }))
+  }
+  assert.throws(() => parseWorkspaceRequest({ ...request, archived: false, stopActivity: true }))
 })
 
 test('view navigation wakes long polls, deduplicates requests and ignores stale acknowledgements', async () => {

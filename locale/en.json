@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Connections",
+    "description": "Use persistent remote Harness workspaces through system OpenSSH."
+  }
+}

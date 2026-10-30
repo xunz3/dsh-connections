@@ -26,10 +26,24 @@ try {
   for (const [name, version] of Object.entries(manifest.peerDependencies)) {
     if (name.startsWith('@deepseek-ai/dsh-')) assert.equal(version, versions.local, `${name} must match the tested local Host`)
   }
-  for (const path of ['assets/logo.svg', 'dist/host/index.js', 'dist/host/index.d.ts', 'dist/client.js', 'dist/remote-plugin.tgz', 'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/design.md', 'docs/usage.md']) assert(entries.includes(`package/${path}`), `Missing ${path}`)
-  for (const entry of entries) assert(/^package\/(?:package\.json|README\.md|LICENSE|cordis\.patch\.yml|assets\/logo\.svg|dist\/[\w./-]+|docs\/[\w.-]+\.md)$/.test(entry), `Unexpected packaged file ${entry}`)
+  for (const path of ['assets/logo.svg', 'locale/en.json', 'locale/zh.json', 'dist/native-inputs.json', 'dist/host/index.js', 'dist/host/index.d.ts', 'dist/client.js', 'dist/remote-plugin.tgz', 'cordis.patch.yml', 'README.md', 'LICENSE', 'NOTICE', 'docs/design.md', 'docs/usage.md']) assert(entries.includes(`package/${path}`), `Missing ${path}`)
+  for (const entry of entries) assert(/^package\/(?:package\.json|README\.md|LICENSE|NOTICE|cordis\.patch\.yml|assets\/logo\.svg|locale\/(?:en|zh)\.json|dist\/[\w./-]+|docs\/[\w.-]+\.md)$/.test(entry), `Unexpected packaged file ${entry}`)
+  assert.equal(manifest.exports['./icon'], './assets/logo.svg')
+  assert.equal(manifest.exports['./locale/*.json'], './locale/*.json')
+  for (const locale of ['en', 'zh']) {
+    const { meta } = JSON.parse(read(`locale/${locale}.json`))
+    assert.equal(typeof meta.title, 'string')
+    assert(meta.title.trim() && meta.description.trim(), 'Plugin metadata needs a readable title and description')
+  }
+  const inputs = JSON.parse(read('dist/native-inputs.json'))
+  assert(inputs.packages.length >= 9 && inputs.adapters.length === 5)
+  for (const input of inputs.packages) assert.match(input.clientIntegrity, /^sha512-[A-Za-z0-9+/]{86}==$/)
+  for (const input of inputs.adapters) {
+    assert.equal(input.integrity, `sha512-${createHash('sha512').update(await readFile(input.path)).digest('base64')}`, `Stale adapter input: ${input.path}`)
+  }
+  assert.match(read('NOTICE'), /Copyright \(c\) 2026 DeepSeek/)
   assert.match(read('assets/logo.svg'), /viewBox="0 0 24 24"[^>]+stroke="currentColor"/, 'Connections must ship its scalable theme-aware logo')
-  for (const target of [manifest.exports['.'].default, manifest.exports['.'].types, manifest.exports['./client']]) assert(entries.includes(`package/${target.replace(/^\.\//, '')}`))
+  for (const target of [manifest.exports['.'].default, manifest.exports['.'].types, manifest.exports['./client'], manifest.exports['./icon']]) assert(entries.includes(`package/${target.replace(/^\.\//, '')}`))
   assert(read('dist/client.js').includes(`window.__ModuleLoader__.load({id:${JSON.stringify(manifest.name)}`))
   assert(read('cordis.patch.yml').includes(manifest.name))
   assert.match(read('cordis.patch.yml'), /id: ui-sidebar[\s\S]*disabled: true/)
@@ -51,6 +65,9 @@ try {
   assert.equal(remoteManifest.version, manifest.version)
   assert.equal(remoteManifest.devDependencies, undefined)
   assert.equal(remoteManifest.scripts, undefined)
+  assert.deepEqual(JSON.parse(remoteRead('dist/native-inputs.json')), inputs)
+  assert.equal(remoteManifest.dependencies['@deepseek-ai/schemastery'], manifest.dependencies['@deepseek-ai/schemastery'])
+  for (const path of ['NOTICE', 'assets/logo.svg', 'locale/en.json', 'locale/zh.json']) assert(remoteEntries.includes(`package/${path}`), `Missing remote metadata: ${path}`)
   assert(remoteEntries.includes('package/dist/client.js'))
   assert(!remoteEntries.includes('package/dist/remote-plugin.tgz'), 'Remote archive must not contain itself')
   assert.equal(remoteManifest.engines.dsh, versions.remote.join(' || '))

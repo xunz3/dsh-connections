@@ -15,15 +15,19 @@
       "default": "./dist/host/index.js"
     },
     "./client": "./dist/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./assets/logo.svg"
   },
   "files": [
     "assets/logo.svg",
+    "locale/*.json",
     "dist",
     "docs",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "dsh": {
     "bundle": {
@@ -41,7 +45,10 @@
         "@deepseek-ai/dsh-api-workspace-controller",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-theme"
+        "@deepseek-ai/dsh-client-ui-theme",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-store",
+        "@deepseek-ai/dsh-client-ui-slots"
       ]
     }
   },
@@ -74,11 +81,14 @@
     "@deepseek-ai/dsh-client-shortcuts": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-store": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-permission-presets": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-session": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-settings-account": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-settings-models": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-settings-session-log": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-sidebar-browser": "0.2.1-rc.3",
     "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.3",
@@ -129,6 +139,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
+    "@deepseek-ai/schemastery": "3.18.5",
     "glob": "13.0.6",
     "ssh-config": "5.3.0"
   },

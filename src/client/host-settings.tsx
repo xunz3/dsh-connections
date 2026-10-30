@@ -14,6 +14,7 @@ import { installSettingsHostHeader, SettingsHostMenu } from './settings-host-men
 import { desktopBrowser, DesktopGuest } from './desktop-guest.js'
 import { bindSettingsHostRelay } from './settings-host-relay.js'
 import { localSurface } from './local-surface.js'
+import { scheduleVisiblePoll } from './connection-polling.js'
 
 export interface HostSettingsHandle {
   getSnapshot(): WorkspaceState | undefined
@@ -153,17 +154,14 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
       const current = hosts.getSnapshot(), selectedId = controller.getSnapshot()?.id ?? 'local'
       if (current.selectedId !== selectedId) hosts.set({ ...current, selectedId })
     })
-    let timer: ReturnType<typeof setTimeout>
-    const tick = async () => {
-      if (!document.hidden && controller.getSnapshot()) {
+    const stopPoll = scheduleVisiblePoll(document, async () => {
+      if (controller.getSnapshot()) {
         await refresh().catch(() => {})
         await controller.check()
       }
-      if (!disposed) timer = setTimeout(tick, 2500)
-    }
+    })
     void refresh().catch(() => {})
-    void tick()
-    return () => { disposed = true; clearTimeout(timer); unsubscribe(); controller.dispose() }
+    return () => { disposed = true; stopPoll(); unsubscribe(); controller.dispose() }
   })
   return { getSnapshot: controller.getSnapshot, close: () => controller.close() }
 }

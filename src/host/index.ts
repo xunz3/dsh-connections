@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-credentials'
 import { ConnectionsManager } from './manager.js'
 import { createStore } from './store.js'
@@ -8,15 +9,12 @@ import { installWorkspaceEndpoint } from './workspace-endpoint.js'
 
 export const name = 'connections'
 export const inject = ['credentials', 'typert']
-export interface Config { embedded?: boolean }
-export function apply(ctx: Context, config: Config = {}): void {
-  const workspaces = installWorkspaceEndpoint(ctx, { embedded: config.embedded === true })
-  if (config.embedded === true) {
-    ctx.on('webserver/index-inject', table => {
-      table.push({ kind: 'script', placement: 'head', text: 'window.__DSH_CONNECTIONS_EMBEDDED__=true;' })
-    })
-    return
-  }
+// Embedded profiles use the separate remote artifact. A local configuration
+// must never silently turn off its connection manager or replace its layout.
+export interface Config { embedded?: false }
+export const Config: Schema<Config> = Schema.object({ embedded: Schema.const(false).default(false).hidden() })
+export function apply(ctx: Context): void {
+  const workspaces = installWorkspaceEndpoint(ctx, { embedded: false })
   const manager = new ConnectionsManager(createStore(ctx.credentials))
   const lifetime = new AbortController()
   ctx.effect(() => {

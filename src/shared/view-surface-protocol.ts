@@ -42,10 +42,13 @@ export function parseLocalPresentation(value: unknown): LocalPresentation {
   if (Object.keys(tokens).length > 512) throw new TypeError('Too many theme tokens')
   const accepted: Record<string, string> = {}
   for (const [key, value] of Object.entries(tokens)) {
-    if (!/^--dsw-[a-z0-9-]{1,110}$/.test(key)) throw new TypeError('Invalid theme token')
-    const token = text(value, 512)
+    // A third-party palette may contain an unsupported token. Keep the native
+    // remote fallback for that token instead of failing the whole document.
+    if (!/^--dsw-[a-z0-9-]{1,110}$/.test(key) || typeof value !== 'string'
+      || value.length > 512 || /[\x00-\x1f\x7f]/.test(value)) continue
+    const token = value
     // Native alias values are colors/lengths; no URL-fetching CSS crosses hosts.
-    if (/[;{}]|url\s*\(|@import/i.test(token)) throw new TypeError('Invalid theme value')
+    if (/[;{}]|url\s*\(|@import/i.test(token)) continue
     accepted[key] = token
   }
   const choice = <T extends string>(key: string, allowed: readonly T[]): T => {

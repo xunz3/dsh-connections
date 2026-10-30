@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "连接",
+    "description": "通过系统 OpenSSH 使用持续运行的远端 Harness 工作区。"
+  }
+}

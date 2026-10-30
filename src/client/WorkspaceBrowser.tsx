@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactElement } from 'react'
 import {
-  Menu, StateDot, Tooltip, relativeTime,
+  Button, Menu, Modal, StateDot, Tooltip, relativeTime,
   IconFolderCloseRegular, IconFolderOpenRegular, IconTriangleRightFillRegular,
   IconSearchOutlineRegular, IconSlidersTwoOutlineRegular, IconProjectAddOutlineRegular,
   IconNewChatOutlineRegular, IconPinFillRegular, IconCloseOutlineRegular, IconEllipsisOutlineRegular,
@@ -45,7 +45,19 @@ function Rename({ title, t, busy, disabled, onSave, onCancel }: {
   // An unsaved input draft and its DOM focus belong to the editor, not the Host catalog.
   const [value, setValue] = useState(title)
   const input = useRef<HTMLInputElement>(null)
-  useEffect(() => { input.current?.focus(); input.current?.select() }, [])
+  useEffect(() => {
+    const editor = input.current
+    const row = editor?.closest('li')
+    editor?.focus(); editor?.select()
+    return () => {
+      queueMicrotask(() => {
+        if (document.activeElement === document.body && row?.isConnected) {
+          const control = row.querySelector<HTMLButtonElement>('.dcw-action-trigger') ?? row.querySelector<HTMLButtonElement>('.dcw-open')
+          control?.focus({ preventScroll: true })
+        }
+      })
+    }
+  }, [])
   return <form className="dcw-rename" onSubmit={event => {
     event.preventDefault()
     if (!busy && !disabled && value.trim()) onSave(value.trim())
@@ -106,7 +118,31 @@ function SessionRow({ row, loose = false, source, state, vm, t, now, chinese }: 
   const busy = state.pending.has(key)
   const title = session.blank ? t('newChat') : session.title || t('untitled')
   const selected = state.selected?.sourceId === source.id && state.selected.sessionId === session.id
-  return <li className="dcw-session">
+  const archiveOpen = state.archiving === key
+  const element = useRef<HTMLLIElement>(null)
+  const previouslyOpen = useRef(false)
+  useEffect(() => {
+    const closed = previouslyOpen.current && !archiveOpen
+    previouslyOpen.current = archiveOpen
+    // The menu item that opened the Modal has already left its portal. Restore
+    // to the stable row trigger when native modal focus return has no live seat.
+    if (closed && document.activeElement === document.body) element.current?.querySelector<HTMLButtonElement>('.dcw-action-trigger')?.focus({ preventScroll: true })
+  }, [archiveOpen])
+  const confirmArchive = () => {
+    if (busy || source.phase !== 'connected') return
+    if (session.running) {
+      vm.confirmArchive(key)
+    } else void vm.archiveSession(source.id, session.id, true)
+  }
+  const closeArchive = () => { if (!busy) vm.confirmArchive(undefined) }
+  return <li ref={element} className="dcw-session">
+    {archiveOpen && <Modal open onClose={closeArchive} closeLabel={t('close')} title={t('archiveRunning')}
+      description={`${title} · ${source.name || t('title')}`} footer={<>
+        <Button variant="outline" disabled={busy} onClick={closeArchive}>{t('cancel')}</Button>
+        <Button variant="outline" disabled={busy || source.phase !== 'connected'} onClick={() => {
+          void vm.archiveSession(source.id, session.id, true, { stopActivity: true })
+        }}>{t('stopAndArchive')}</Button>
+      </>}><p>{t('archiveRunningHint')}</p>{state.error !== undefined && <p role="alert">{t('failed')}</p>}</Modal>}
     {state.editing === key
       ? <Rename title={session.title} busy={busy} disabled={source.phase !== 'connected'} t={t}
         onCancel={() => vm.edit(undefined)} onSave={title => void vm.renameSession(source.id, session.id, title)} />
@@ -131,7 +167,7 @@ function SessionRow({ row, loose = false, source, state, vm, t, now, chinese }: 
               : [
                 { id: 'rename', label: t('rename'), run: () => vm.edit(key) },
                 { id: 'pin', label: t(pinned ? 'unpin' : 'pin'), run: () => void vm.pinSession(source.id, session.id, !pinned) },
-                { id: 'archive', label: t('archive'), run: () => void vm.archiveSession(source.id, session.id, true) },
+                { id: 'archive', label: t('archive'), run: confirmArchive },
               ]} /></div>
         </div>
       </div>}
@@ -197,6 +233,8 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
   const now = useListClock(wide)
   const [filterOpen, setFilterOpen] = useState(false)
   const search = useRef<HTMLInputElement>(null)
+  const searchToggle = useRef<HTMLButtonElement>(null)
+  const searchId = useId()
 
   useEffect(() => {
     if (state.searchOpen && wide) search.current?.focus({ preventScroll: true })
@@ -211,7 +249,7 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
   const openSearch = () => { vm.setSearchOpen(true); props.expandSidebar?.() }
   if (!wide) return <section className="dcw dcw-rail" aria-label={t('title')}>
     <style>{workspaceBrowserCss}</style>
-    <Hint label={t('search')}><button className="dcw-icon" aria-label={t('search')} onClick={openSearch}><IconSearchOutlineRegular size={18} /></button></Hint>
+    <Hint label={t('search')}><button ref={searchToggle} className="dcw-icon" aria-label={t('search')} onClick={openSearch}><IconSearchOutlineRegular size={18} /></button></Hint>
     <Hint label={t('add')}><button className="dcw-icon" aria-label={t('add')} disabled={state.pending.has(WORKSPACE_ADD_KEY)}
       onClick={() => { props.expandSidebar?.(); void vm.addWorkspace() }}><IconProjectAddOutlineRegular size={18} /></button></Hint>
   </section>
@@ -219,7 +257,7 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
   return <section className="dcw" aria-label={t('title')}>
     <style>{workspaceBrowserCss}</style>
     <header className="dcw-header"><h2>{t('title')}</h2><div className="dcw-header-actions">
-      <Hint label={t('search')}><button className="dcw-icon" aria-label={t('search')} aria-expanded={state.searchOpen}
+      <Hint label={t('search')}><button ref={searchToggle} className="dcw-icon" aria-label={t('search')} aria-expanded={state.searchOpen} aria-controls={state.searchOpen ? searchId : undefined}
         onClick={() => vm.setSearchOpen(!state.searchOpen)}><IconSearchOutlineRegular size={16} /></button></Hint>
       <Menu open={filterOpen} onClose={() => setFilterOpen(false)} portal dense align="end" selectedId={state.filter}
         items={(['active', 'pinned', 'archived'] as const).map(id => ({ id, label: t(id) }))}
@@ -229,11 +267,11 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
       <Hint label={t('add')}><button className="dcw-icon" aria-label={t('add')} disabled={state.pending.has(WORKSPACE_ADD_KEY)}
         onClick={() => void vm.addWorkspace()}><IconProjectAddOutlineRegular size={16} /></button></Hint>
     </div></header>
-    {state.searchOpen && <div className="dcw-search"><input ref={search} type="search" aria-label={t('search')} placeholder={t('search')}
+    {state.searchOpen && <div id={searchId} className="dcw-search"><input ref={search} type="search" aria-label={t('search')} placeholder={t('search')}
       value={state.query} maxLength={500} onChange={event => vm.setQuery(event.target.value)}
-      onKeyDown={event => { if (event.key === 'Escape') vm.setSearchOpen(false) }} /></div>}
+      onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); vm.setSearchOpen(false); searchToggle.current?.focus({ preventScroll: true }) } }} /></div>}
     {state.error !== undefined && <div className="dcw-error" role="alert">
-      <span>{state.error instanceof Error ? state.error.message : t('failed')}</span>
+      <span>{t('failed')}</span>
       <button className="dcw-icon" aria-label={t('dismiss')} onClick={() => vm.dismissError()}><IconCloseOutlineRegular size={16} /></button>
     </div>}
     <div className="dcw-scroll">

@@ -17,7 +17,7 @@ function catalog(remote: boolean): WorkspaceCatalog {
   return {
     workspaces: [{ id: 'project', title: workspaceTitle, path: '/project', sessionIds: ['same', 'pinned', 'archived'] }],
     sessions: [
-      { id: 'same', title: sessionTitle, updatedAt: Date.now() - 120_000, blank: false, running: remote },
+      { id: 'same', title: sessionTitle, updatedAt: Date.now() - 120_000, blank: false, running: remote && !query.has('archiveRace') },
       { id: 'pinned', title: 'Plan release', updatedAt: 0, blank: false, running: false },
       { id: 'archived', title: 'Archived discussion', updatedAt: 0, blank: false, running: false },
     ],
@@ -44,7 +44,10 @@ function App() {
       onRenameWorkspace={(...args) => record('renameWorkspace', ...args)}
       onForgetWorkspace={(...args) => record('forgetWorkspace', ...args)}
       onRenameSession={(...args) => { record('renameSession', ...args); if (query.has('failRename')) throw new Error('The session is no longer available.') }}
-      onArchiveSession={(...args) => record('archiveSession', ...args)}
+      onArchiveSession={(sourceId, sessionId, archived, options) => {
+        record('archiveSession', sourceId, sessionId, archived, ...(options ? [options] : []))
+        if (query.has('archiveRace') && archived && !options?.stopActivity) throw Object.assign(new Error('private active-work diagnostic'), { code: 'SESSION_ACTIVE' })
+      }}
       onPinSession={(...args) => record('pinSession', ...args)}
     /></aside>
     <div className="fixture-content"><h1>Workspace browser fixture</h1><p>{selected ? `${selected.sourceId}: ${selected.sessionId ?? selected.workspaceId}` : 'Choose a chat from either computer.'}</p></div>

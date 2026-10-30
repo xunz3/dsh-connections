@@ -753,6 +753,7 @@ test('native slot delegation preserves the original leaf and follows its registr
     uiSession: { adapter: { current: observable({ key: 'reused-local-draft' }) } },
     get uiWorkspace(): never { throw new Error('uiWorkspace is not available outside its injection scope') },
     workspaces: {},
+    logger: { warn() {} },
     effect: (factory: () => (() => void)) => { effects.push(factory()) },
     ...localPresentationServices(),
     slots: {
@@ -795,6 +796,20 @@ test('native slot delegation preserves the original leaf and follows its registr
     await controller.open(first, { kind: 'session', id: 'chat' })
     assert.equal(controller.getSnapshot()?.phase, 'ready', 'geometry notifications must not cancel entering the remote panel')
     assert.equal(panels.getSnapshot().activePanelId, 'connections.workspace')
+    const foreign = () => null
+    const removeForeign = core.register({ name: 'sidebar.workspaces', priority: -1 }, foreign)
+    await nextTick()
+    assert.equal(core.entries('sidebar.workspaces').length, 1)
+    assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, foreign, 'an existing third-party provider must not be shadowed')
+    assert.equal(controller.getSnapshot(), undefined, 'ownership loss returns the active view to the local shell')
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(controller.getSnapshot()?.error, 'compositionUnavailable')
+    removeForeign()
+    await nextTick()
+    assert.equal(core.entries('sidebar.workspaces').length, 1)
+    assert.equal(core.entries('connections.local.sidebarDirectoryFlow')[0].component, original, 'native leaf delegation is restored with our slot')
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(controller.getSnapshot()?.phase, 'ready')
     await controller.navigate('local', { kind: 'newSession' })
     assert.deepEqual(localCalls.at(-1), ['newSession', undefined])
     assert.equal(controller.getSnapshot(), undefined)

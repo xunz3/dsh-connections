@@ -15,7 +15,7 @@ export interface WorkspaceBrowserModel {
   onRenameWorkspace(sourceId: string, workspaceId: string, title: string): Action
   onForgetWorkspace(sourceId: string, workspaceId: string): Action
   onRenameSession(sourceId: string, sessionId: string, title: string): Action
-  onArchiveSession(sourceId: string, sessionId: string, archived: boolean): Action
+  onArchiveSession(sourceId: string, sessionId: string, archived: boolean, options?: { stopActivity?: true }): Action
   onPinSession(sourceId: string, sessionId: string, pinned: boolean): Action
 }
 
@@ -27,6 +27,7 @@ export interface WorkspaceBrowserSnapshot {
   readonly collapsed: ReadonlySet<string>
   readonly editing?: string
   readonly forgetting?: string
+  readonly archiving?: string
   readonly pending: ReadonlySet<string>
   readonly error?: unknown
   readonly rows: CatalogSourcePage[]
@@ -86,6 +87,7 @@ export class WorkspaceBrowserViewModel {
   private searchCollapsed = new Set<string>()
   private editing?: string
   private forgetting?: string
+  private archiving?: string
   private editGeneration = 0
   private forgetGeneration = 0
   private error?: unknown
@@ -129,6 +131,7 @@ export class WorkspaceBrowserViewModel {
     this.reconcileSelection()
     if (this.editing && !this.exists(rowTarget(this.editing))) { this.editing = undefined; this.editGeneration++ }
     if (this.forgetting && !this.exists(rowTarget(this.forgetting))) { this.forgetting = undefined; this.forgetGeneration++ }
+    if (this.archiving && !this.canMutate(rowTarget(this.archiving))) this.archiving = undefined
     this.collapsed = new Set([...this.collapsed].filter(key => this.exists(rowTarget(key))))
     this.searchCollapsed = new Set([...this.searchCollapsed].filter(key => this.exists(rowTarget(key))))
     for (const [key, operation] of this.operations) {
@@ -182,6 +185,12 @@ export class WorkspaceBrowserViewModel {
     this.forgetGeneration++
     this.publish()
   }
+  confirmArchive(key: string | undefined): void {
+    const target = key === undefined ? undefined : rowTarget(key)
+    if (this.disposed || key !== undefined && (target?.kind !== 'session' || !this.canMutate(target))) return
+    this.archiving = key
+    this.publish()
+  }
   dismissError(): void {
     if (this.disposed) return
     this.dismissedThroughSequence = this.sequence
@@ -222,8 +231,23 @@ export class WorkspaceBrowserViewModel {
   pinSession(sourceId: string, id: string, pinned: boolean): Promise<void> {
     return this.runRow({ sourceId, kind: 'session', id }, true, () => this.model.onPinSession(sourceId, id, pinned))
   }
-  archiveSession(sourceId: string, id: string, archived: boolean): Promise<void> {
-    return this.runRow({ sourceId, kind: 'session', id }, true, () => this.model.onArchiveSession(sourceId, id, archived))
+  archiveSession(sourceId: string, id: string, archived: boolean, options?: { stopActivity?: true }): Promise<void> {
+    const key = workspaceRowKey(sourceId, 'session', id)
+    const lifetime = this.lifetime
+    const current = () => !this.disposed && lifetime === this.lifetime && this.canMutate({ sourceId, kind: 'session', id })
+    return this.runRow({ sourceId, kind: 'session', id }, true, async () => {
+      try {
+        if (options) await this.model.onArchiveSession(sourceId, id, archived, options)
+        else await this.model.onArchiveSession(sourceId, id, archived)
+        if (current() && this.archiving === key) this.archiving = undefined
+      } catch (error) {
+        // The native Host is authoritative: work can start after our catalog
+        // snapshot. A refusal opens confirmation without replaying the write.
+        if (archived && !options?.stopActivity && error && typeof error === 'object' && 'code' in error && error.code === 'SESSION_ACTIVE') {
+          if (current()) this.archiving = key
+        } else throw error
+      }
+    })
   }
 
   private source(id: string): WorkspaceSource | undefined { return this.model.sources.find(source => source.id === id) }
@@ -303,7 +327,7 @@ export class WorkspaceBrowserViewModel {
     const page = pageWorkspaceRows(rows, { limit: this.rowLimit, collapsed, selected: this.selected })
     this.snapshot = {
       selected: this.selected, query: this.query, searchOpen: this.searchOpen, filter: this.filter,
-      collapsed, editing: this.editing, forgetting: this.forgetting, error: this.error,
+      collapsed, editing: this.editing, forgetting: this.forgetting, archiving: this.archiving, error: this.error,
       pending: new Set(this.operations.keys()), ...page,
       totalCount: rows.reduce((count, source) => count + source.looseSessions.length + source.workspaces.reduce((count, workspace) => count + 1 + workspace.sessions.length, 0), 0),
     }

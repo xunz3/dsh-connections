@@ -19,6 +19,7 @@ import type { WorkspaceApi } from '../shared/workspace-rpc.js'
 import type { WorkspaceNavigationTarget } from '../shared/workspace-protocol.js'
 import { WorkspaceController, viewClientId } from './workspace-controller.js'
 import { WorkspaceBrowser } from './WorkspaceBrowser.js'
+import { scheduleVisiblePoll } from './connection-polling.js'
 import { workspaceUrl } from './workspace-surface.js'
 import { workspaceCommandResolver } from './workspace-shortcuts.js'
 import type { NativeCommandResolver } from './native-shortcuts.js'
@@ -125,14 +126,16 @@ export function RemoteWorkspace({ controller, t, bridge }: {
 /** Compose the native shell through public slots; remote content owns no local Session. */
 export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, _t: Translate, canRoute = () => true, onCommands?: (resolver: NativeCommandResolver) => () => void): WorkspaceController {
   const bridge = desktopBrowser()
+  let workspaceConflict = false
   let storage: Storage | undefined
   try { storage = window.localStorage } catch { /* Optional preference persistence. */ }
   let localNavigate: (target: WorkspaceNavigationTarget) => Promise<void> = async () => { throw new Error('Local workspace navigation is not ready.') }
   let sessionStorage: Storage | undefined
   try { sessionStorage = window.sessionStorage } catch { /* Optional per-tab leases. */ }
   const controller = new WorkspaceController(api, {
+    schedulePoll: task => scheduleVisiblePoll(document, task),
     clientId: viewClientId(sessionStorage, 'workspace'), storage, surface: localSurface(ctx), prepareUrl: url => {
-      if (!canRoute()) throw new Error('sidebar-composition-unavailable')
+      if (!canRoute() || workspaceConflict) throw new Error('sidebar-composition-unavailable')
       return workspaceUrl(url, window.location, bridge !== undefined)
     },
     localNavigate: target => localNavigate(target),
@@ -218,18 +221,41 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
             onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
             onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
             onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}
-            onArchiveSession={(id, sessionId, archived) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived })}
+            onArchiveSession={(id, sessionId, archived, options) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived, ...options })}
             onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned })} />
           {shortcutNote && <p className="dcw-command-note" role="status">{t('shortcutBlocked')} <button onClick={() => setShortcutNote(false)}>{t('cancel')}</button></p>}
           {error && <p role="alert">{t('failed')} <button onClick={() => setError(false)}>{t('cancel')}</button></p>}
           <HostChooser owner={owner} controller={controller} t={t} renderLocal={owner => props.renderSlot('connections.local.sidebarDirectoryFlow', owner, { fallback: <p role="alert">{t('localUnavailable')} <button onClick={owner.onCancel}>{t('cancel')}</button></p> })} />
         </>
       }
-      const remove = ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, locale: 'connections.workspace',
-        children: { 'connections.local.sidebarDirectoryFlow': { kind: 'single', scope: 'root' } },
-      }, Browser)
-      const stop = delegate('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow')
-      return () => { stop(); remove() }
+      let remove: (() => void) | undefined
+      let stopDelegate: (() => void) | undefined
+      let syncing = false
+      const sync = () => {
+        if (syncing) return
+        syncing = true
+        try {
+          const conflict = ctx.slots.entries('sidebar.workspaces').some(entry => entry.component !== Browser && (entry.options.priority ?? 0) < 0)
+          if (conflict) {
+            if (!workspaceConflict) ctx.logger.warn('Connections left sidebar.workspaces to another priority provider; remote workspace navigation is unavailable.')
+            workspaceConflict = true
+            stopDelegate?.(); stopDelegate = undefined
+            remove?.(); remove = undefined
+            if (controller.getSnapshot()) controller.close()
+          } else {
+            workspaceConflict = false
+            if (!remove) {
+              remove = ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, locale: 'connections.workspace',
+                children: { 'connections.local.sidebarDirectoryFlow': { kind: 'single', scope: 'root' } },
+              }, Browser)
+              stopDelegate = delegate('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow')
+            }
+          }
+        } finally { syncing = false }
+      }
+      const unsubscribe = ctx.slots.subscribe('sidebar.workspaces', sync)
+      sync()
+      return () => { unsubscribe(); stopDelegate?.(); remove?.() }
     })
     // The empty-state picker keeps its native adoption semantics for this computer.
     ctx.slots.inject('conversation.hero.workspace.directoryFlow', () => {
@@ -286,7 +312,7 @@ const workspaceCss = `
 .dc-workspace-chooser,.dc-remote-workspace{font:14px/1.5 system-ui,sans-serif;color:var(--dsw-alias-label-primary,#202124);background:var(--dsw-alias-bg-base,#fff)}
 .dc-workspace-chooser{max-height:calc(100dvh - 48px);overflow:auto;width:min(420px,calc(100vw - 48px));border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:14px;padding:24px;box-sizing:border-box;box-shadow:0 16px 70px #0002}.dc-workspace-chooser::backdrop{background:#0005}
 .dc-workspace-chooser h2{font-size:19px;margin:0 0 6px}.dc-workspace-chooser h3{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary,#666);margin:24px 0 8px}.dc-workspace-chooser p{color:var(--dsw-alias-label-secondary,#666);margin:0 0 18px}
-.dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1,#f4f4f4)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid #5785bc;outline-offset:2px}
+.dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1,#f4f4f4)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4670d9));outline-offset:2px}
 .dc-workspace-chooser .dc-host-search{box-sizing:border-box;width:100%;font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);padding:8px;border-radius:6px;margin-bottom:8px}.dc-workspace-chooser .dc-host-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;margin:6px 0;padding:12px}.dc-host-choice strong{font-weight:500}.dc-host-choice span{font-size:12px;color:var(--dsw-alias-label-secondary,#666);overflow:hidden;text-overflow:ellipsis}.dc-workspace-chooser-actions{display:flex;justify-content:flex-end;margin-top:22px}
 .dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--dsw-alias-bg-base,#fff);padding:32px;text-align:center}.dc-remote-loading p{color:var(--dsw-alias-label-secondary,#666)}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
 `

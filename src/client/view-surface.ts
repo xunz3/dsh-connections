@@ -34,7 +34,11 @@ export function bindViewSurfaceParent(options: LocalSurface & {
         for (const request of exchange.requests) {
           if (lifetime.signal.aborted) return
           let ok = completed.get(request.id)
-          if (ok === undefined) {
+          if (ok === undefined && completed.size >= 512) {
+            // The Host admits at most 512 actions per lease. Refuse any extra
+            // unknown ID without evicting a completed side effect's tombstone.
+            ok = false
+          } else if (ok === undefined) {
             ok = false
             // Re-read admission immediately before a side effect. A cancellation,
             // navigation or closed lease must not execute a queued login operation.
@@ -61,11 +65,12 @@ export function bindViewSurfaceParent(options: LocalSurface & {
 }
 
 /** Uses the existing owner-authenticated channel; never grants the child local RPC. */
-export function createViewSurfaceClient(channel: string, endpoint: SettingsHostEndpoint, intervalMs = 1000) {
+export function createViewSurfaceClient(channel: string, endpoint: SettingsHostEndpoint, intervalMs = 1000, bootstrapTimeoutMs = 30_000) {
   const lifetime = new AbortController(), listeners = new Set<() => void>()
   let snapshot: SurfaceSnapshot | undefined
   let readyResolve!: (value: SurfaceSnapshot) => void, readyReject!: (error: unknown) => void
   const ready = new Promise<SurfaceSnapshot>((resolve, reject) => { readyResolve = resolve; readyReject = reject })
+  const bootstrapDeadline = Date.now() + bootstrapTimeoutMs
   const run = async () => {
     while (!lifetime.signal.aborted) {
       try {
@@ -74,7 +79,9 @@ export function createViewSurfaceClient(channel: string, endpoint: SettingsHostE
         if (!value.presentation) throw new Error('Local presentation is unavailable')
         if (JSON.stringify(value) !== JSON.stringify(snapshot)) { snapshot = value; for (const listener of listeners) listener() }
         readyResolve(value)
-      } catch (error) { if (!snapshot || terminal(error)) { readyReject(error); lifetime.abort(); return } }
+      } catch (error) {
+        if (terminal(error) || !snapshot && Date.now() >= bootstrapDeadline) { readyReject(error); lifetime.abort(); return }
+      }
       await delay(intervalMs, lifetime.signal).catch(() => {})
     }
   }
