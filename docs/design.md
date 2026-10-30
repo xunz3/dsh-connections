@@ -69,7 +69,7 @@ The native Settings header selects the local Host or a remote connection. Models
 
 ## Native project and file UI
 
-Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using public services and native conversation/rightbar slots. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
+Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using native conversation/rightbar slots and a version-bound layout adapter. Layout service replacement is a private integration boundary, not a public multi-Host composition API. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
 
 The local native shortcut provider and Host configuration remain in place. A version-checked adapter wraps resolvers on the existing rc.3 command registry, follows registration changes and restores its own wrappers on disposal. Native dispatch and keybinding policy remain intact. This uses a narrow private registry contract until Harness exposes resolver middleware. Incompatibility closes or blocks remote surfaces while native local commands remain available; it never replaces the provider that the local layout depends on.
 

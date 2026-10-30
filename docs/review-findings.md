@@ -4,6 +4,76 @@ This document records the verified findings and maintenance decisions from the
 supplied reviews. The **2026-10-28** review identified further issues beyond the
 earlier fixes; its findings and the earlier review are recorded separately below.
 
+## 2026-10-30 review and Windows Host crash
+
+The supplied review was checked against the implementation and the installed
+Harness rc.3 contracts. The plugin's scope remains SSH access to a persistent
+remote Harness, with source-qualified workspace navigation. Device pairing,
+mobile entry points, delegated controller identities, API Peer event forwarding
+and a multi-device control plane require separate design and authorization
+work. They are not existing features repaired by this change.
+
+The original Windows Desktop crash report identifies rc.3, Electron 44.7.0 and
+Node 24.21.0. It records a fatal uncaught `spawn UNKNOWN` (`errno: -4094`) in
+Connections' loopback server callback. That callback called `spawn()` without a
+synchronous exception boundary. This confirms the process-crash path, separate
+from the historical shortcut-provider renderer failure. The report does not
+establish why Windows refused the process launch.
+
+| Review item | Verification and resulting behavior |
+| --- | --- |
+| HR-01 | A POSIX master now runs under a small local supervisor holding a private process group and a parent-liveness pipe. Parent exit, including SIGKILL, triggers cleanup of that master, its descendants and its private directory. Killing the supervisor itself or OS failure remains outside this guarantee. |
+| HR-02 | Drop-in-only units are refused before claiming the managed home, writing a unit, installing packages or reloading systemd. Existing installations are also checked before modification. |
+| HR-03 | Authentication distinguishes cancellation, protocol incompatibility, authorization rejection and transport failure. A stale Open result cannot invalidate a replacement connection; an incompatible response preserves its transport and reports the protocol remedy. |
+| HR-04 | Cleanup does not signal a numeric PID/PGID after Node has observed the leader exit. The persistent master supervisor keeps its owned group leader alive through termination. Unsupervised, already-orphaned descendants cannot safely be reclaimed by guessing an old PGID. |
+| HR-05 | The reported rollback-before-journal behavior was not present: preflight/staging are outside the rollback branch. Tests now explicitly verify that staging failure creates no transaction/backup and does not stop the old Host. |
+| HR-06/07 | A failed or malformed loginctl query has its own remedy; only a confirmed `Linger=no` suggests enabling it. SSH checks queue beyond four active requests, with a bounded total and an explicit busy error. Unload cancels queued checks. |
+| HR-08/09 | Reading a valid current credential removes its obsolete legacy copy, including a damaged copy at the same ID. Explicit removal clears both copies. Unrecognized legacy records without an authoritative current record are preserved. Atomic file/symlink replacement cleans temporary paths on failure. |
+| HR-10 / Windows crash | Synchronous SSH launch errors are caught inside the TCP callback. Asynchronous launch errors are handled as before. A failed stream after establishment closes that stream without closing the listener or unrelated HTTP/WebSocket streams; first-authentication failure still reports a connection error. Windows/macOS focused CI jobs were added. |
+| C3 | The build checks the actual native Models, permission and session-log slot registrations, in addition to versions and factory seams. A renamed/missing row fails the build. Existing rc.2 provider sources were also checked with these assertions. |
+| C4 | Invalid optional theme tokens are filtered within a bounded input; valid tokens and the rest of the presentation survive. A rejected first bootstrap request can be retried. Structural protocol validation remains strict. |
+| C5 | Native archive already refused running work with `SESSION_ACTIVE`; the previous UI lacked its confirmation flow. The UI now confirms before sending explicit `stopActivity: true`, including when activity began after the catalog snapshot. Cancel sends no stopping mutation. |
+| C6 | Workspace/settings controllers share visible-page polling timers and concurrent connection-list reads. Each owner independently releases its subscriptions; hidden pages pause polling. |
+| C8-C11/C15 | Web and Desktop use the authenticated view endpoint; action failures use translated summary copy; search, rename and archive dialogs restore keyboard focus; completed-navigation retention is bounded; the isolated uiWorkspace proxy forwards symbols, writes and native method receivers. |
+| Plugin metadata/config | Both artifacts export a runtime Schemastery Config and packaged English/Chinese metadata and icon. Local `embedded: true` is rejected: the separate remote artifact owns embedded mode. Direct native ModuleLoader dependencies are declared explicitly. |
+| RPC lifetime | No extra wrapper was added: Cordis Service construction and Typert registration already own and withdraw their effects. Real registration/unload tests verify removal of both service and descriptors. |
+
+### Integration boundaries retained
+
+The exact local rc.3 engine gate remains necessary for the native factory and
+shortcut adapters. Replacing it with a broad semver range would promise untested
+private contracts. Both artifacts now carry `NOTICE`, original licenses and
+`dist/native-inputs.json` with package versions, client SHA-512 inputs and adapter
+digests. These make the derivation reviewable; they do not turn those contracts
+into public APIs.
+
+The local bundle still replaces the sidebar deployment, and the dedicated
+remote profile still replaces layout/settings providers. Disabling only an
+individual entry cannot undo a bundle-level patch. RPC/data failures retain the
+native local shell, but failure of the entire client factory cannot guarantee
+automatic sidebar restoration. Disable the whole bundle to remove its patch.
+The source-aware workspace browser still lacks some native features such as
+fork, drag ordering and server-wide search; the preserved native shell is not a
+claim of complete workspace-browser parity.
+
+The embedded layout's sidebar toggle still has no parent-shell bridge, and its
+declared leading slot is not rendered. Third-party row contributions tied to
+the single-Host native workspace browser are not automatically projected into
+the source-aware list. These remain integration limitations.
+
+Competing negative-priority workspace providers are detected: Connections gives
+up its occupant and returns to local content instead of hiding another plugin.
+Rich remote content remains a separate native document, so focus, browser
+shortcut and notification boundaries still apply. The active resolved palette
+is projected through the native light/dark-pair API; the plugin does not invent
+an unobserved palette for the other theme.
+
+Current validation and platform limits are recorded in [development](development.md).
+
+The runtime schema and display resources follow the rc.3
+[plugin configuration contract](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.3/docs/user/develop/basic/config.md)
+and [plugin metadata contract](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.1-rc.3/docs/cookbook/adding-a-package.md#plugin-display-metadata).
+
 ## 2026-10-28 review
 
 | Item | Finding and correction |

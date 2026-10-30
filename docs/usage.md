@@ -2,7 +2,7 @@
 
 ## Requirements
 
-Install into the local Harness profile. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux uses OpenSSH ControlMaster; macOS follows the same path but is unverified. Windows uses an owned loopback listener with native OpenSSH stdio forwarding, verified against a real remote Harness from Desktop. Remote content uses the native Desktop guest bridge or a local HTTP browser.
+Install into the local Harness profile. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux uses OpenSSH ControlMaster; macOS follows the same path. Windows uses an owned loopback listener with native OpenSSH stdio forwarding. Historical Desktop checks and the current platform-specific acceptance limits are recorded in [development](development.md). Remote content uses the native Desktop guest bridge or a local HTTP browser.
 
 The local bundle composes Harness's native sidebar and routes workspace commands through the existing native shortcut service. Disable the whole Connections bundle to remove its sidebar patch and restore the original sidebar deployment; disabling only its individual plugin entry leaves the patch in place. From 0.1.6, Connections leaves the native shortcut provider and configuration in place. User keybindings remain in native storage. Keep `stopSequenceMs` on the native `shortcuts` deployment; if an earlier version required moving it into the Connections entry's `shortcuts` field, restore that override to the native deployment when upgrading.
 
@@ -23,6 +23,11 @@ These installation/update requirements are separate from reconnect: an already i
 Connections uses the Node on the remote noninteractive SSH PATH. Verify it with `ssh HOST node --version`; an interactive terminal may use a different runtime. Configure your account’s noninteractive environment when using a version manager such as nvm. Connections does not run login or interactive shell startup to discover a runtime. Existing managed services retain their recorded runtime and native-module ABI.
 
 On Windows, each local TCP connection uses a separate system `ssh -W` process; HTTP keepalive and WebSockets retain their stream. The listener is owned before use, and the native Harness authentication exchange must succeed before the connection is shown as connected. Idle listeners have no SSH process; the next stream authenticates again. Both transports preserve native SSH configuration and disable inherited port forwarding, agent forwarding and local commands.
+
+A failed stream after connection establishment closes that stream and leaves
+other streams available. An SSH process launch failure is contained by the
+plugin; it must not terminate the Harness Host. A failure during the first
+authentication exchange still reports a connection error.
 
 Workspace control requests reuse a bounded HTTP connection pool owned by their SSH transport. A pool retains at most two idle streams and admits eight active streams; idle streams expire after 30 seconds. Disconnect, reconnect and unload destroy it. Authentication exchanges remain separate, and an uncertain failed write is never replayed automatically.
 
@@ -50,7 +55,7 @@ The native brand/New Session controls and New Session keyboard command share the
 
 ## Closing and restoring
 
-**Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. Switching the connection off, choosing **Remove**, or closing local Harness closes its owned tunnel. None stops or uninstalls the remote service.
+**Selecting a local workspace/chat**, or cancelling a remote opening operation, closes the remote view. **New Session** keeps the selected computer. Switching the connection off, choosing **Remove**, or closing local Harness closes its owned tunnel. On POSIX, a small local process holds the master process group until cleanup completes; loss of its parent pipe also cleans up after an abruptly terminated Host. This cannot guarantee cleanup after killing that supervisor itself or an operating-system failure. None of these local actions stops or uninstalls the remote service.
 
 The switch enables a connection now and remembers it for the next Harness start. Switching off also cancels an in-progress connection; it closes only local access and does not stop remote work. A failed enabled connection keeps its switch on and offers **Retry**. Explicit connections from workspace navigation also enable this saved preference. Editing a name keeps the current transport; editing the destination or credential replaces access, and an enabled connection is reconnected to the edited destination. The edit form preserves a switch change made from another settings view.
 

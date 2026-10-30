@@ -4,6 +4,21 @@ The npm package is `@xunz03/dsh-connections`. The source repository is
 `xunz3/dsh-connections`; it is currently private. npm contains the built plugin,
 the remote content archive, declarations, license and usage documentation.
 
+## 0.1.7
+
+- Contain synchronous Windows OpenSSH launch failures, including `spawn UNKNOWN`, so they report a connection error instead of terminating the Host. Isolate later stdio channel failures from other HTTP/WebSocket streams.
+- Reclaim POSIX tunnel process groups after abrupt local Host exit, avoid signalling observed exited PIDs, and distinguish stale navigation, protocol and authentication failures.
+- Reject foreign systemd drop-ins before installation; improve linger diagnostics, bounded SSH checks, credential migration and temporary-file cleanup.
+- Confirm before stopping and archiving running work. Preserve valid theme tokens, native focus and third-party workspace providers; share polling without allowing slow tasks or old cleanup callbacks to block other owners.
+- Declare runtime configuration and plugin metadata, record native adapter inputs and licenses, and add Windows/macOS SSH CI alongside the existing Node, browser and installed two-Host checks.
+
+Local compatibility remains exactly Harness `0.2.1-rc.3`; remote content supports
+the verified rc.2/rc.3 releases. Saved records retain their storage format. This
+release fixes the uncaught Windows exception path; the underlying Win32 refusal
+reason and full Desktop UI acceptance remain separate from the verified
+Windows Node/OpenSSH regressions. See [review decisions](review-findings.md) and
+[validation boundaries](development.md#2026-10-30-review-corrections).
+
 ## 0.1.6
 
 - Preserve the running native shortcut provider and its configuration when enabling Connections. Route source-aware commands through a checked, reversible rc.3 registry adapter instead of replacing the service that the native layout depends on.
@@ -25,7 +40,7 @@ Local Harness compatibility remains exactly `0.2.1-rc.3`; remote content support
 
 1. Increase `version` in `package.json` using an exact semantic version.
 2. Commit the change and push to `main`.
-3. Watch the **Publish to npm** workflow. Node 22/24 checks, web browser tests and actual installation/browser acceptance
+3. Watch the **Publish to npm** workflow. Node 22/24 checks, Windows/macOS SSH checks, web browser tests and actual installation/browser acceptance
    on the declared local Harness version must pass before publication. The publish job downloads the exact archive
    checked on Node 24, verifies its hash and publishes it without running package
    lifecycle scripts again.

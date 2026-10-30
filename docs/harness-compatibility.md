@@ -1,8 +1,15 @@
 # Harness compatibility
 
-Reviewed against the published rc.2 and rc.3 packages on 2026-10-29. Connections
-0.1.6 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
+Reviewed against the published rc.2 and rc.3 packages on 2026-10-30. Connections
+0.1.7 targets local Harness `0.2.1-rc.3`; 0.1.0 remains available for local rc.2.
 The separate remote content archive supports both explicitly tested versions.
+
+The native factory and shortcut adapters still require exact tested inputs.
+`dist/native-inputs.json` records their versions and SHA-512 digests; `NOTICE`
+describes the derived code and its licenses. Build checks also verify the native
+Models, permission and session-log slot identities used by the remote settings
+adapter. Broadening the engine range requires reviewing these contracts and
+running native acceptance for each admitted version.
 
 Connections 0.1.3 separates workspace presentation and interaction state using
 MVVM, aligns its list with native icons and spacing, and fixes catalog snapshot

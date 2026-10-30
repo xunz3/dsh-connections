@@ -166,3 +166,44 @@ That Desktop profile also saved a temporary manual connection to a reserved `.in
 The complete local check passed 336 Node cases with both native OpenSSH and systemd checks enabled, without skips. The release gate then exposed an initial-readiness notification that cleared the saved remote selection during page startup. Routing now closes remote views only when an established capability is lost; initial and repeated unavailable notifications preserve restoration. The focused lifecycle regression and all five installed two-Host cases passed against the corrected archive, including hot enable/disable, unsent drafts, page reload, local Host restart and native Settings ownership. The final archive's first-enable, Add and disable/re-enable flow was also rechecked in a fresh Windows Desktop profile.
 
 Tests and reports must not print launch URLs, proxy settings or private logs. Test-only services and fixtures are removed after verification; remote user configuration and the default Harness home are not modified.
+
+## 2026-10-30 review corrections
+
+The original Windows crash log confirms an uncaught synchronous `spawn UNKNOWN`
+from the stdio listener, rather than a renderer-only failure. The new regression
+injects that exact error into the real TCP callback and verifies a contained
+connection error. A later channel failure leaves an established unrelated stream
+and subsequent connections usable. POSIX coverage also kills an owned parent
+process and verifies cleanup of its master, ProxyCommand descendants, port and
+private directory.
+
+The final Node run passed **360 tests**, with one Windows-only case skipped on
+Linux. Both `DSH_CONNECTIONS_TEST_SSHD=1` and
+`DSH_CONNECTIONS_TEST_SYSTEMD=1` were enabled, including real temporary OpenSSH
+and native systemd unit validation. TypeScript, production build and the
+47-file package/remote-archive check passed. The runtime Config's internal
+embedded-mode guard is validated but hidden from editable settings.
+
+Independent Windows execution passed three tests under Windows Node 26.5.0 and
+the system OpenSSH executable; one POSIX-only case was skipped. These runs use
+temporary standalone bundles, not the user's Desktop process or profile. They
+cover synchronous UNKNOWN, native refused-connection/missing-executable behavior
+and cleanup of an already exited process. They do not establish full Electron
+UI acceptance or identify the underlying Win32 reason for UNKNOWN on the
+reported Desktop's Node 24.21.0. The new Windows/macOS CI jobs have not been
+executed as part of this local run.
+
+All **50 Chromium fixture tests** passed, including explicit stop/archive
+confirmation, cancellation without a mutation, activity starting after the
+catalog snapshot, and focus restoration after search, rename and the archive
+dialog. Shared-poll regressions additionally verify that a stalled workspace
+read cannot delay Settings and that an old cleanup cannot delete a replacement
+polling group.
+
+All **five installed native two-Host cases** passed against the checked code in
+an immutable copy of the local tarball and its remote content archive. They
+cover embedded boot, independent stylesheet ownership, hot enable/disable with
+an unsent draft, local/SSH workspace switching, reload/restart restoration and
+Settings ownership. Installed Host/client hashes matched the built artifacts.
+The review's temporary Hosts and SSH listeners were stopped afterward; the
+user's running Desktop and managed remote Hosts were not restarted or upgraded.
