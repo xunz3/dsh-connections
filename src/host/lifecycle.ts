@@ -41,6 +41,7 @@ const messages = {
   version: `The existing remote Harness version is not supported by this Connections build. Explicitly update to one of: ${SUPPORTED_REMOTE_VERSIONS.join(', ')}.`,
   'update-version': 'The installed remote Harness version has not been validated by this Connections build. Update Connections before updating this Host; its current version was preserved.',
   linger: 'Enable persistent user services on the remote host: loginctl enable-linger "$USER". Then reconnect.',
+  'linger-check': 'Could not verify persistent user services on the remote host. Check loginctl show-user "$USER" --property=Linger and access to systemd-logind, then retry.',
   ownership: 'The remote Connections directory or service belongs to another installation. Resolve that conflict before connecting.',
   install: 'The remote Harness installation failed. Check the remote npm registry, disk space, and private install.log, then reconnect.',
   'plugin-activation': 'The remote Connections update could not be activated. Check the remote plugin status and private service.log, then reconnect. The Harness service was not restarted.',

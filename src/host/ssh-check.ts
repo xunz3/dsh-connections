@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { parseTarget } from '../shared/validation.js'
 import { sshProcessError, SshTunnelError, type SshTunnelOptions } from './ssh-common.js'
 import { terminateSshProcess } from './ssh-process.js'
@@ -27,10 +27,14 @@ export async function checkSshTarget(input: { target: string; signal?: AbortSign
     '--', target, command,
   ]
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(options.sshPath ?? 'ssh', args, {
+    let child: ChildProcessWithoutNullStreams
+    try { child = spawn(options.sshPath ?? 'ssh', args, {
       shell: false, detached: process.platform !== 'win32', windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'], env: options.env ?? process.env,
-    })
+    }) } catch (error) {
+      reject(sshProcessError('', { code: null, error: error instanceof Error ? error : new Error('SSH spawn failed.') }, 'SSH_FAILED'))
+      return
+    }
     let stdout = ''
     let stderr = ''
     let outputBytes = 0

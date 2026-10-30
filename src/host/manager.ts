@@ -5,7 +5,7 @@ import { connectTunnel, SshTunnelError, type Tunnel } from './ssh.js'
 import type { ConnectionStore } from './store.js'
 import { prepareHost, updateHost, RemoteHostError, type ManagedHost } from './lifecycle.js'
 import { discoverSshHosts } from './ssh-config.js'
-import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, requestWorkspace } from './harness-http.js'
+import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, HarnessProtocolError, requestWorkspace } from './harness-http.js'
 import { parseWorkspaceRequest } from '../shared/workspace-protocol.js'
 import { checkSshTarget } from './ssh-check.js'
 import { SSH_ERROR_MESSAGES } from './ssh-common.js'
@@ -59,6 +59,8 @@ export class ConnectionsManager implements ConnectionsApi {
   private readonly discoverHosts: () => Promise<string[]>
   private readonly checkTarget: typeof checkSshTarget
   private readonly sshChecks = new Map<string, { controller: AbortController; pending: Promise<SshCheckResult> }>()
+  private readonly sshCheckQueue: Array<() => void> = []
+  private activeSshChecks = 0
   private operations: Promise<unknown> = Promise.resolve()
   private disposed = false
   private disposal?: Promise<void>
@@ -85,21 +87,31 @@ export class ConnectionsManager implements ConnectionsApi {
     this.assertActive()
     const existing = this.sshChecks.get(target)
     if (existing) return existing.pending
-    if (this.sshChecks.size >= 4) return Promise.resolve({ ok: false, code: 'SSH_FAILED' })
+    if (this.sshChecks.size >= 32) throw new Error('Too many SSH checks are waiting. Wait for a check to finish, then retry.')
     const controller = new AbortController()
-    const pending = Promise.resolve().then(async (): Promise<SshCheckResult> => {
-      try {
-        controller.signal.throwIfAborted()
-        await this.checkTarget({ target, signal: controller.signal })
-        controller.signal.throwIfAborted()
-        return { ok: true }
-      } catch (error) {
-        return { ok: false, code: error instanceof SshTunnelError ? error.code : 'SSH_FAILED' }
-      }
+    const pending = new Promise<SshCheckResult>(resolve => {
+      this.sshCheckQueue.push(() => {
+        if (controller.signal.aborted) { resolve({ ok: false, code: 'SSH_FAILED' }); return }
+        ++this.activeSshChecks
+        void (async () => {
+          try {
+            await this.checkTarget({ target, signal: controller.signal })
+            controller.signal.throwIfAborted()
+            resolve({ ok: true })
+          } catch (error) {
+            resolve({ ok: false, code: error instanceof SshTunnelError ? error.code : 'SSH_FAILED' })
+          } finally { --this.activeSshChecks; this.drainSshChecks() }
+        })()
+      })
     })
     this.sshChecks.set(target, { controller, pending })
     void pending.then(() => { if (this.sshChecks.get(target)?.pending === pending) this.sshChecks.delete(target) })
+    this.drainSshChecks()
     return pending
+  }
+
+  private drainSshChecks(): void {
+    while (this.activeSshChecks < 4 && this.sshCheckQueue.length) this.sshCheckQueue.shift()!()
   }
 
   /** Restore transport access; the OS-managed remote Host has its own lifetime. */
@@ -382,8 +394,12 @@ export class ConnectionsManager implements ConnectionsApi {
       await lease.cookie
       if (this.disposed || lease.runtime.generation !== lease.generation || lease.controller.signal.aborted) throw new Error('Connection changed. Open the Host again.')
       return { url: `http://127.0.0.1:${lease.tunnel.port}/?token=${encodeURIComponent(lease.token)}` }
-    } catch {
-      await this.invalidate(lease.runtime, lease.generation, 'The remote Host could not be reached or its authorization changed. Reconnect to refresh access.')
+    } catch (error) {
+      if (this.disposed || lease.runtime.generation !== lease.generation || lease.controller.signal.aborted
+        || error instanceof Error && error.name === 'AbortError') throw new Error('Connection changed. Open the Host again.')
+      if (error instanceof HarnessProtocolError) throw error
+      const invalidated = await this.invalidate(lease.runtime, lease.generation, 'The remote Host could not be reached or its authorization changed. Reconnect to refresh access.')
+      if (!invalidated) throw new Error('Connection changed. Open the Host again.')
       throw new Error('The remote Host could not be reached or its authorization changed. Reconnect to refresh access.')
     }
   }
@@ -404,12 +420,13 @@ export class ConnectionsManager implements ConnectionsApi {
     return pending
   }
 
-  private invalidate(runtime: Runtime, generation: number, message: string): Promise<void> {
+  private invalidate(runtime: Runtime, generation: number, message: string): Promise<boolean> {
     return this.serialize(async () => {
-      if (this.disposed || runtime.generation !== generation) return
+      if (this.disposed || runtime.generation !== generation) return false
       await this.stop(runtime)
       runtime.phase = 'error'
       runtime.error = message
+      return true
     })
   }
 

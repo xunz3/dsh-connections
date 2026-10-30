@@ -136,6 +136,53 @@ test('disposal terminates proxy descendants even after the master exits', async 
   } finally { await f.dispose() }
 })
 
+test('Host SIGKILL releases its master, proxy descendants, forward and control directory', { skip: process.platform === 'win32', timeout: 10_000 }, async () => {
+  const f = await fixture({ TEST_SSH_DESCENDANT: '1' })
+  const owner = spawn(process.execPath, ['--import', 'tsx', fileURLToPath(new URL('./fixtures/tunnel-owner.mjs', import.meta.url))], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+    env: { ...f.options.env, NODE_TEST_CONTEXT: undefined, TEST_SSH_PATH: f.options.sshPath },
+  })
+  let stderr = ''
+  owner.stderr?.on('data', data => { stderr += data.toString() })
+  const exited = new Promise<void>(resolve => owner.once('close', () => resolve()))
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      owner.once('message', message => resolve((message as { port: number }).port))
+      owner.once('exit', () => reject(new Error(`Isolated Host exited before connecting: ${stderr}`)))
+    })
+    const calls = await f.calls()
+    const master = calls.find(call => call.args.includes('-M'))!
+    const directory = dirname(master.args[master.args.indexOf('-S') + 1]!)
+    assert.ok((await stat(directory)).isDirectory())
+    owner.kill('SIGKILL')
+    await exited
+    for (let attempt = 0; attempt < 300; attempt++) {
+      if (!await stat(directory).then(() => true, () => false)) break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    await assert.rejects(stat(directory), { code: 'ENOENT' })
+    for (const { pid } of calls) {
+      let stopped = false
+      for (let attempt = 0; attempt < 300; attempt++) {
+        try {
+          process.kill(pid, 0)
+          if (process.platform === 'linux' && /^\d+ \(.+\) Z /.test(await readFile(`/proc/${pid}/stat`, 'utf8'))) { stopped = true; break }
+        } catch { stopped = true; break }
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.ok(stopped, `Owned SSH process ${pid} must stop after its Host dies`)
+    }
+    const replacement = createServer()
+    try {
+      await new Promise<void>((resolve, reject) => { replacement.once('error', reject); replacement.listen(port, '127.0.0.1', resolve) })
+    } finally { await new Promise<void>(resolve => replacement.close(() => resolve())) }
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill('SIGKILL')
+    await exited
+    await f.dispose()
+  }
+})
+
 test('failed forwards never become connected and retries are bounded', async () => {
   const f = await fixture({ TEST_SSH_FORWARD_FAIL: '1' })
   try {

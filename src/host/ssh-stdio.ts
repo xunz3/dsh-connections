@@ -31,6 +31,7 @@ export async function connectStdioTunnel(input: TunnelInput, options: SshTunnelO
   let closeError: Error | undefined
   let cleanup: Promise<void> | undefined
   let port = 0
+  let forwardedData = false
   const server = createServer({ pauseOnConnect: true, allowHalfOpen: true })
 
   const stopChannel = (channel: Channel): Promise<void> => {
@@ -63,10 +64,18 @@ export async function connectStdioTunnel(input: TunnelInput, options: SshTunnelO
     return cleanup
   }
   const onAbort = () => { void stop(cancelled()).catch(() => {}) }
+  const failChannel = (socket: Socket, error: Error) => {
+    // Retain an initial authentication/launch failure for the manager's first
+    // probe. Once in use, each SSH process owns only its TCP stream; a later
+    // failed request must not tear down unrelated HTTP and WebSocket streams.
+    if (!forwardedData && channels.size === 0) void stop(error).catch(() => {})
+    socket.destroy()
+  }
 
   server.on('connection', socket => {
     if (closed || channels.size >= maximumChannels) { socket.destroy(); return }
-    const child = spawn(options.sshPath ?? 'ssh', [
+    let child: ChildProcessWithoutNullStreams
+    try { child = spawn(options.sshPath ?? 'ssh', [
       ...(options.configFile ? ['-F', options.configFile] : []),
       '-T', '-W', `127.0.0.1:${input.remotePort}`,
       '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no',
@@ -77,7 +86,13 @@ export async function connectStdioTunnel(input: TunnelInput, options: SshTunnelO
       '-o', 'IgnoreUnknown=ForkAfterAuthentication,StdinNull', '-o', 'ForkAfterAuthentication=no', '-o', 'StdinNull=no',
       '-o', `ConnectTimeout=${Math.max(1, Math.min(15, Math.ceil((options.startupTimeoutMs ?? 20_000) / 1_000)))}`,
       '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '--', input.target,
-    ], { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32', env: options.env ?? process.env })
+    ], { shell: false, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32', env: options.env ?? process.env }) }
+    catch (error) {
+      // Windows can throw synchronously (e.g. spawn UNKNOWN). This callback
+      // runs after connectTunnel resolves, outside its async error boundary.
+      failChannel(socket, sshProcessError('', { code: null, error: error instanceof Error ? error : new Error('SSH spawn failed.') }, 'SSH_FORWARD'))
+      return
+    }
     let stderr = ''
     let spawnError: Error | undefined
     let finish!: () => void
@@ -98,12 +113,12 @@ export async function connectStdioTunnel(input: TunnelInput, options: SshTunnelO
       if (channel.cancelled || closed) { socket.destroy(); return }
       const result: ProcessResult = { code, ...(spawnError ? { error: spawnError } : {}) }
       if (code !== 0 || spawnError) {
-        void stop(sshProcessError(stderr, result, 'SSH_FORWARD')).catch(() => {})
-        socket.destroy()
+        failChannel(socket, sshProcessError(stderr, result, 'SSH_FORWARD'))
       } else { socket.end(); socket.destroySoon() }
     })
     // Keep the socket open until SSH's exit is classified. Letting stdout EOF
     // close it first would misclassify an auth failure as a client cancellation.
+    child.stdout.on('data', (chunk: Buffer) => { if (chunk.length) forwardedData = true })
     child.stdout.pipe(socket, { end: false })
     socket.pipe(child.stdin)
     socket.resume()

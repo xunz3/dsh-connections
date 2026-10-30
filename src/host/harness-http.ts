@@ -10,7 +10,11 @@ import {
 export class HarnessConnectionError extends Error {}
 /** The Host rejected this request before invoking a workspace operation. */
 export class HarnessAuthorizationError extends HarnessConnectionError {}
+/** An incompatible exchange does not establish that the transport is unhealthy. */
+export class HarnessProtocolError extends Error {}
 const authenticationError = () => new HarnessConnectionError('Harness authentication failed. Check the running remote Host and update its launch URL.')
+const authenticationProtocolError = () => new HarnessProtocolError('The remote Host returned an incompatible authentication response. Check its Harness version before retrying.')
+const authenticationAborted = () => new DOMException('Connection cancelled.', 'AbortError')
 const unreachable = 'The remote workspace could not be reached. Reconnect and try again.'
 const invalidResponse = 'The remote Host returned an invalid workspace response.'
 const missingPlugin = 'This Host needs the Connections workspace plugin. Update its managed workspace support, or install the plugin in its dedicated profile.'
@@ -70,27 +74,34 @@ function ownerCookie(response: IncomingMessage, port: number): string | undefine
 
 /** Exchange a launch credential only with an acknowledged, owned loopback tunnel. Never follow redirects. */
 export async function authenticateHarness(port: number, token: string, signal: AbortSignal): Promise<string> {
-  if (!validPort(port) || !/^[A-Za-z0-9_-]{20,512}$/.test(token) || signal.aborted) throw authenticationError()
+  if (signal.aborted) throw authenticationAborted()
+  if (!validPort(port) || !/^[A-Za-z0-9_-]{20,512}$/.test(token)) throw authenticationProtocolError()
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
   return new Promise((resolve, reject) => {
     let settled = false
     let req: ClientRequest | undefined
-    const fail = () => {
+    const fail = (error: Error = signal.aborted ? authenticationAborted() : authenticationError()) => {
       if (settled) return
       settled = true
       req?.destroy()
-      reject(authenticationError())
+      reject(error)
     }
     try {
       req = request({ hostname: '127.0.0.1', port, method: 'GET', path: `/?token=${encodeURIComponent(token)}`,
         signal: bounded, agent: false, maxHeaderSize: 16_384 }, response => {
+        if (response.statusCode === 401 || response.statusCode === 403) {
+          response.destroy()
+          fail(new HarnessAuthorizationError('Harness authorization was rejected. Reconnect to refresh the remote Host credential.'))
+          return
+        }
+        if ((response.statusCode ?? 0) >= 500) { response.destroy(); fail(); return }
         const pair = response.statusCode === 303 && response.headers.location === './' ? ownerCookie(response, port) : undefined
-        if (!pair) { response.destroy(); fail(); return }
+        if (!pair) { response.destroy(); fail(authenticationProtocolError()); return }
         settled = true
         response.destroy()
         resolve(pair)
       })
-      req.once('error', fail)
+      req.once('error', () => fail())
       req.once('close', () => { if (!settled) fail() })
       req.end()
     } catch { fail() }

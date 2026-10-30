@@ -98,10 +98,24 @@ test('interrupted migrations retain the old credential and a current record wins
   provider.records.set(currentKey, updated)
   const store = createStore(provider)
   assert.deepEqual(await store.list(), [updated.payload])
+  assert.equal(provider.records.has(legacyKey), false, 'reading the authoritative record finishes obsolete-copy cleanup')
   await store.remove(id)
   assert.equal(provider.records.has(legacyKey), false)
   assert.equal(provider.records.has(currentKey), false)
   assert.deepEqual(await store.list(), [])
+})
+
+test('a valid destination and explicit removal clean damaged obsolete credentials', async () => {
+  const provider = credentials()
+  provider.records.set(currentKey, record)
+  provider.records.set(legacyKey, { kind: 'grant', payload: {} })
+  const store = createStore(provider)
+  assert.deepEqual(await store.read(id), record.payload)
+  assert.equal(provider.records.has(legacyKey), false)
+  provider.records.set(legacyKey, { kind: 'grant', payload: {} })
+  await store.remove(id)
+  assert.equal(provider.records.has(legacyKey), false)
+  assert.equal(provider.records.has(currentKey), false)
 })
 
 test('malformed keys and individual corrupt credentials cannot hide valid connections', async () => {

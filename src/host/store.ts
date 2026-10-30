@@ -53,7 +53,13 @@ export function createStore(credentials: Credentials): ConnectionStore {
   }
   const readCurrent: ConnectionStore['read'] = async id => {
     const record = await credentials.readRecord(key(id))
-    if (record !== undefined) return decode(record, id)
+    if (record !== undefined) {
+      const parsed = decode(record, id)
+      // A valid destination proves this id belongs to Connections. Finish an
+      // interrupted migration even when its obsolete copy became damaged.
+      if (await credentials.readRecord(legacyKey(id)) !== undefined) await credentials.deleteRecord(legacyKey(id))
+      return parsed
+    }
     const legacy = await credentials.readRecord(legacyKey(id))
     if (legacy === undefined) return undefined
     const parsed = decode(legacy, id)
@@ -122,13 +128,10 @@ export function createStore(credentials: Credentials): ConnectionStore {
     },
     async remove(id) {
       return serialize(id, async () => {
-        // Delete any recognized legacy copy first; otherwise it could reappear
+        // Explicit removal includes damaged legacy copies at this exact id.
+        // Delete the legacy copy first; otherwise it could reappear
         // when the current record is removed after an interrupted migration.
-        const legacy = await credentials.readRecord(legacyKey(id))
-        if (legacy !== undefined) {
-          try { decode(legacy, id); await credentials.deleteRecord(legacyKey(id)) }
-          catch (error) { if (!(error instanceof InvalidConnectionRecord)) throw error }
-        }
+        await credentials.deleteRecord(legacyKey(id))
         await credentials.deleteRecord(key(id))
       })
     },

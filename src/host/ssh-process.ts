@@ -1,5 +1,56 @@
-import { execFile, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
+import type { ProcessResult } from './ssh-common.js'
+
+// The group leader remains alive until the entire SSH group is disposed, so
+// its PGID cannot be recycled between TERM and KILL. The parent owns its stdin
+// and IPC pipe: even SIGKILL of the Host closes those pipes and starts cleanup.
+// This helper never connects to or manages the remote Harness lifecycle.
+const masterOwner = String.raw`
+const { spawn } = require('node:child_process');
+const { rm } = require('node:fs/promises');
+const [executable, argumentsJson, directory, grace] = process.argv.slice(1);
+let stopping = false;
+const stop = () => {
+  if (stopping) return;
+  stopping = true;
+  try { process.kill(-process.pid, 'SIGTERM'); } catch {}
+  void rm(directory, { recursive: true, force: true }).catch(() => {}).finally(() => {
+    setTimeout(() => { try { process.kill(-process.pid, 'SIGKILL'); } catch { process.exit(1); } }, Number(grace));
+  });
+};
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, stop);
+process.stdin.on('end', stop);
+process.stdin.on('error', stop);
+process.stdin.resume();
+process.on('disconnect', stop);
+const report = result => { if (process.connected) { try { process.send(result, () => {}); } catch {} } };
+try {
+  const ssh = spawn(executable, JSON.parse(argumentsJson), { shell: false, stdio: ['ignore', 'ignore', 'inherit'] });
+  ssh.once('error', error => { report({ code: null, error: { code: error.code } }); stop(); });
+  ssh.once('exit', code => { report({ code }); stop(); });
+} catch (error) { report({ code: null, error: { code: error.code } }); stop(); }
+`
+
+/** Own a POSIX OpenSSH master through a parent-liveness pipe and private group. */
+export function spawnSshMaster(executable: string, args: string[], directory: string, graceMs: number, env: NodeJS.ProcessEnv): { child: ChildProcess; result: Promise<ProcessResult> } {
+  const child = spawn(process.execPath, ['--input-type=commonjs', '-e', masterOwner, executable, JSON.stringify(args), directory, String(graceMs)], {
+    shell: false, detached: true, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
+    env: process.versions.electron ? { ...env, ELECTRON_RUN_AS_NODE: '1' } : env,
+  })
+  // The supervisor never consumes data; stdin is only an ownership lease.
+  child.stdin?.on('error', () => {})
+  let reported: ProcessResult | undefined
+  let spawnError: Error | undefined
+  child.on('message', message => {
+    const result = message as { code?: unknown; error?: { code?: string } }
+    if ((typeof result.code !== 'number' && result.code !== null) || reported) return
+    reported = { code: result.code, ...(result.error ? { error: Object.assign(new Error('SSH spawn failed.'), { code: result.error.code }) } : {}) }
+  })
+  child.on('error', error => { spawnError = error })
+  const result = new Promise<ProcessResult>(resolve => child.once('close', code => resolve(reported ?? { code, ...(spawnError ? { error: spawnError } : {}) })))
+  return { child, result }
+}
 
 async function bounded(done: Promise<unknown>, milliseconds: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -16,18 +67,19 @@ export async function terminateSshProcess(child: ChildProcess, done: Promise<unk
     if (alive()) {
       const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe')
       await new Promise<void>(resolve => {
-        execFile(taskkill, ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: Math.max(1_000, graceMs) }, () => resolve())
+        try { execFile(taskkill, ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: Math.max(1_000, graceMs) }, () => resolve()) }
+        catch { resolve() /* A failed cleanup launch must not become an unhandled rejection. */ }
       })
     }
-  } else if (child.pid) {
-    // ProxyCommand descendants can survive the leader's exit. The private
-    // group remains ours until its last descendant exits.
-    try { process.kill(-child.pid, 'SIGTERM') } catch { /* Already exited. */ }
+  } else if (alive()) {
+    // A numeric process-group ID is no longer an ownership token after the
+    // leader exits. Never signal it once Node has observed that exit.
+    try { process.kill(-child.pid!, 'SIGTERM') } catch { /* Already exited. */ }
   }
   await bounded(done, graceMs)
   try {
     if (process.platform === 'win32') { if (alive()) child.kill('SIGKILL') }
-    else if (child.pid) process.kill(-child.pid, 'SIGKILL')
+    else if (alive()) process.kill(-child.pid!, 'SIGKILL')
   } catch { /* Already exited. */ }
   child.stdin?.destroy()
   child.stdout?.destroy()

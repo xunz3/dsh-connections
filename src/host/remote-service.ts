@@ -26,9 +26,12 @@ async function privateDir(path) {
   await privatePath(path, true);
 }
 async function atomic(path, value) {
-  const temporary = path + '.tmp-' + process.pid;
-  await fs.writeFile(temporary, value, { mode: 0o600, flag: 'wx' });
-  await fs.rename(temporary, path);
+  const temporary = path + '.tmp-' + randomUUID();
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try {
+    try { await handle.writeFile(value); } finally { await handle.close(); }
+    await fs.rename(temporary, path);
+  } finally { await fs.rm(temporary, { force: true }); }
 }
 async function json(path) { await privatePath(path); return JSON.parse(await fs.readFile(path, 'utf8')); }
 async function run(command, args, { timeout = 120000, log, allowFailure = false, env = process.env } = {}) {
@@ -117,8 +120,11 @@ async function requireTools(commands) {
 async function installPreflight(update = false, context) {
   await npm(context, ['--version'], { timeout: 10000 });
   if (update) await requireTools(['tar']);
-  try { if ((await run('loginctl', ['show-user', String(process.getuid()), '--property=Linger', '--value'])).output.trim() !== 'yes') fail('linger'); }
-  catch (error) { if (error.code === 'linger') throw error; fail('linger'); }
+  let linger;
+  try { linger = (await run('loginctl', ['show-user', String(process.getuid()), '--property=Linger', '--value'])).output.trim(); }
+  catch { fail('linger-check'); }
+  if (linger === 'no') fail('linger');
+  if (linger !== 'yes') fail('linger-check');
 }
 async function initialize(input) {
   const root = input.root ?? join(homedir(), '.local/share/dsh-connections');
@@ -134,9 +140,13 @@ async function initialize(input) {
   const unitDirectory = input.unitDirectory ?? (previous ? dirname(previous.unitPath) : join(configHome, 'systemd/user'));
   if (resolve(unitDirectory) !== unitDirectory || /[%\x00-\x1f\x7f]/.test(unitDirectory)) fail('ownership');
   const unitPath = join(unitDirectory, unit);
+  // systemd can report not-found for a unit that has only drop-ins. Reject
+  // those before claiming the home or writing a fragment that activates them.
+  const current = await properties(unit);
+  if (current.DropInPaths || await exists(unitPath + '.d')) fail('ownership');
   await privateDir(root);
   if (!await exists(markerPath)) {
-    if ((await fs.readdir(root)).length || await exists(unitPath) || (await properties(unit)).LoadState !== 'not-found') fail('ownership');
+    if ((await fs.readdir(root)).length || await exists(unitPath) || current.LoadState !== 'not-found') fail('ownership');
     try { await fs.writeFile(markerPath, JSON.stringify({ schema: 1, owner, root, unit, unitPath, node: process.execPath }), { mode: 0o600, flag: 'wx' }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
   }
@@ -153,6 +163,7 @@ async function initialize(input) {
 async function verifyUnit(context) {
   const { root, unit, unitPath, marker } = context;
   const current = await properties(unit);
+  if (current.DropInPaths || await exists(unitPath + '.d')) fail('ownership');
   if (await exists(unitPath)) {
     await privatePath(unitPath);
     if (await fs.readFile(unitPath, 'utf8') !== unitText(root, marker.node)) fail('ownership');
@@ -176,9 +187,10 @@ async function currentRelease(root) {
   return metadata.version;
 }
 async function select(root, version) {
-  const path = join(root, 'current.tmp-' + process.pid);
+  const path = join(root, 'current.tmp-' + randomUUID());
   await fs.symlink('releases/' + version, path);
-  await fs.rename(path, join(root, 'current'));
+  try { await fs.rename(path, join(root, 'current')); }
+  finally { await fs.rm(path, { force: true }); }
 }
 async function stage(context, version) {
   const { root, marker } = context;
@@ -552,7 +564,7 @@ async function main(encoded) {
     if (!['prepare', 'update'].includes(input.action) || !/^0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) || !/^[0-9a-f-]{36}$/.test(input.operation)) fail('ownership');
     result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input, encoded);
   } catch (error) {
-    result = { error: ['unavailable', 'install-tools', 'linger', 'ownership', 'install', 'runtime', 'version', 'update-version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
+    result = { error: ['unavailable', 'install-tools', 'linger', 'linger-check', 'ownership', 'install', 'runtime', 'version', 'update-version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
   }
   if (process.argv[2] === '--worker') {
     const root = input.root ?? join(homedir(), '.local/share/dsh-connections');

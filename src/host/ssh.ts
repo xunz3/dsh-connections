@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { parseTarget } from '../shared/validation.js'
 import { SshTunnelError, sshProcessError, type ProcessResult, type SshTunnelOptions, type Tunnel, type TunnelInput } from './ssh-common.js'
 import { connectStdioTunnel } from './ssh-stdio.js'
+import { spawnSshMaster } from './ssh-process.js'
 export { SshTunnelError, type SshTunnelOptions, type Tunnel } from './ssh-common.js'
 
 interface OwnedProcess {
@@ -36,8 +37,8 @@ function processError(process: OwnedProcess, result: ProcessResult, fallback: 'S
   return sshProcessError(process.stderr, result, fallback)
 }
 
-function signalProcess(process: OwnedProcess, signal: NodeJS.Signals, includeDescendants = false): void {
-  if (!process.child.pid || (process.settled && (!includeDescendants || globalThis.process.platform === 'win32'))) return
+function signalProcess(process: OwnedProcess, signal: NodeJS.Signals): void {
+  if (!process.child.pid || process.settled || process.child.exitCode !== null || process.child.signalCode !== null) return
   try {
     // ProxyJump/ProxyCommand children belong to this private process group too.
     if (globalThis.process.platform !== 'win32') globalThis.process.kill(-process.child.pid, signal)
@@ -112,13 +113,11 @@ export async function connectTunnel(input: TunnelInput, options: SshTunnelOption
     input.signal?.removeEventListener('abort', onAbort)
     controller.abort(error ?? cancelled())
     cleanup = (async () => {
-      // A ProxyCommand descendant can outlive its master and close its stdio.
-      // Keep that owned process group addressable after the leader has exited.
       const processes = [...new Set([...children, ...(master ? [master] : [])])]
-      for (const child of processes) signalProcess(child, 'SIGTERM', child === master)
+      for (const child of processes) signalProcess(child, 'SIGTERM')
       const done = Promise.all(processes.map((child) => child.done))
       await Promise.race([done, delay(shutdownGraceMs)])
-      for (const child of processes) signalProcess(child, 'SIGKILL', child === master)
+      for (const child of processes) signalProcess(child, 'SIGKILL')
       await Promise.race([done, delay(shutdownGraceMs)])
       if (directory) await rm(directory, { recursive: true, force: true })
     })().finally(notify)
@@ -131,9 +130,10 @@ export async function connectTunnel(input: TunnelInput, options: SshTunnelOption
     void stop(new SshTunnelError('SSH_TIMEOUT', 'SSH connection timed out. Check the host, network and SSH config.')).catch(() => {})
   }, startupTimeoutMs)
 
-  const launch = (args: string[]): OwnedProcess => {
+  const launch = (args: string[], masterDirectory?: string): OwnedProcess => {
     controller.signal.throwIfAborted()
-    const child = spawn(options.sshPath ?? 'ssh', args, {
+    const supervised = masterDirectory && process.platform !== 'win32' ? spawnSshMaster(options.sshPath ?? 'ssh', args, masterDirectory, shutdownGraceMs, options.env ?? process.env) : undefined
+    const child = supervised?.child ?? spawn(options.sshPath ?? 'ssh', args, {
       shell: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
       detached: process.platform !== 'win32', env: options.env ?? process.env,
     })
@@ -145,7 +145,8 @@ export async function connectTunnel(input: TunnelInput, options: SshTunnelOption
       child.once('close', (code) => {
         owned.settled = true
         children.delete(owned)
-        resolve({ code, ...(spawnError ? { error: spawnError } : {}) })
+        if (supervised) void supervised.result.then(resolve)
+        else resolve({ code, ...(spawnError ? { error: spawnError } : {}) })
       })
     })
     children.add(owned)
@@ -193,7 +194,7 @@ export async function connectTunnel(input: TunnelInput, options: SshTunnelOption
       '-o', `ConnectTimeout=${Math.max(1, Math.min(15, Math.ceil(startupTimeoutMs / 1_000)))}`,
       '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '--', target,
     ]
-    master = launch(masterArgs)
+    master = launch(masterArgs, directory)
     const ownedMaster = master
     void ownedMaster.done.then((result) => {
       if (!closed) void stop(processError(ownedMaster, result, 'SSH_CLOSED')).catch(() => {})

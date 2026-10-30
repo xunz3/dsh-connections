@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import test from 'node:test'
-import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, HarnessConnectionError, requestWorkspace } from '../src/host/harness-http.js'
+import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, HarnessConnectionError, HarnessProtocolError, requestWorkspace } from '../src/host/harness-http.js'
 import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL, WORKSPACE_ERRORS, WORKSPACE_RESPONSE_LIMIT, WorkspaceProtocolError } from '../src/shared/workspace-protocol.js'
 
 const token = 'private-launch-token-never-in-an-error'
@@ -83,12 +83,36 @@ test('native owner authentication accepts only its authority cookie and never fo
     assert.match(cookie, /^dsh-auth-[A-Za-z0-9_-]{43}=v1\./)
     assert.equal(cookie.includes(';'), false)
     for (mode of ['wrong-name', 'wrong-audience', 'non-owner', 'fake-payload', 'bad-times', 'wrong-path', 'domain', 'secure', 'not-http-only', 'not-strict', 'duplicate-attribute', 'expired', 'duplicate-cookie', 'unauthorized', 'redirect']) {
-      await assert.rejects(authenticateHarness(listener.port, token, signal()), safeFailure, mode)
+      await assert.rejects(authenticateHarness(listener.port, token, signal()), error => {
+        safeFailure(error)
+        assert.ok(mode === 'unauthorized' ? error instanceof HarnessAuthorizationError : error instanceof HarnessProtocolError)
+        return true
+      }, mode)
     }
     assert.equal(destinationHits, 0)
     assert.equal(requests.length, 16)
     assert.ok(requests.every(row => row.method === 'GET' && row.path === `/?token=${token}` && row.host === `127.0.0.1:${listener.port}`))
   } finally { await listener.close(); await destination.close() }
+})
+
+test('authentication distinguishes cancellation, unavailable transport and incompatible responses', async () => {
+  const controller = new AbortController()
+  const entered = deferred()
+  const listener = await server((_request, _response) => { entered.resolve() })
+  try {
+    const pending = authenticateHarness(listener.port, token, controller.signal)
+    const rejected = assert.rejects(pending, { name: 'AbortError' })
+    await entered.promise
+    controller.abort()
+    await rejected
+    await assert.rejects(authenticateHarness(listener.port, token, controller.signal), { name: 'AbortError' })
+  } finally { await listener.close() }
+  await assert.rejects(authenticateHarness(listener.port, token, signal()), error => {
+    safeFailure(error)
+    assert.ok(error instanceof HarnessConnectionError)
+    assert.ok(!(error instanceof HarnessAuthorizationError))
+    return true
+  })
 })
 
 test('workspace transport sends only a validated request to its fixed route and strips response extras', async () => {

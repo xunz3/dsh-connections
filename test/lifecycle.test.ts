@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import test from 'node:test'
 import { prepareHost, updateHost, RemoteHostError, type RemoteHostOptions } from '../src/host/lifecycle.js'
 import { LATEST_SUPPORTED_REMOTE_VERSION } from '../src/shared/validation.js'
+import { REMOTE_SERVICE_SCRIPT } from '../src/host/remote-service.js'
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const token = 'private-launch-credential-1234567890'
@@ -381,13 +382,44 @@ test('readiness refuses release metadata that disagrees with the installed nativ
 })
 
 test('missing native service prerequisites leave no installation behind', async () => {
-  for (const [environment, code] of [[{ DSH_FIXTURE_NO_MANAGER: '1' }, 'unavailable'], [{ DSH_FIXTURE_NO_LINGER: '1' }, 'linger']] as const) {
+  for (const [environment, code] of [
+    [{ DSH_FIXTURE_NO_MANAGER: '1' }, 'unavailable'], [{ DSH_FIXTURE_NO_LINGER: '1' }, 'linger'],
+    [{ DSH_FIXTURE_LOGINCTL_FAIL: '1' }, 'linger-check'], [{ DSH_FIXTURE_LINGER_VALUE: 'unknown' }, 'linger-check'],
+  ] as const) {
     const f = await fixture(environment)
     try {
       await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code })
       await assert.rejects(stat(f.options.remoteRoot!), { code: 'ENOENT' })
     } finally { await f.dispose() }
   }
+})
+
+test('a drop-in without a unit is rejected before claiming or installing a service', async () => {
+  const f = await fixture()
+  try {
+    const unitPath = join(f.directory, 'units/dsh-connections-fixture.service')
+    await mkdir(unitPath + '.d')
+    const override = join(unitPath + '.d', 'override.conf')
+    await writeFile(override, '[Service]\nExecStart=/foreign\n')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'ownership' })
+    await assert.rejects(stat(unitPath), { code: 'ENOENT' })
+    await assert.rejects(stat(join(f.options.remoteRoot!, 'owner.json')), { code: 'ENOENT' })
+    assert.equal(await readFile(override, 'utf8'), '[Service]\nExecStart=/foreign\n')
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.ok(!commands.some(row => row.command === 'systemctl' && row.args.includes('daemon-reload')))
+    assert.ok(!commands.some(row => row.command === 'npm' && row.args.includes('install')))
+  } finally { await f.dispose() }
+})
+
+test('atomic writes remove their private temporary file after write and rename failures', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-atomic-test-'))
+  try {
+    const destination = join(directory, 'destination')
+    await mkdir(destination)
+    const source = REMOTE_SERVICE_SCRIPT + `\nfor (const value of [undefined, 'content']) { try { await atomic(${JSON.stringify(destination)}, value); throw new Error('Expected failure'); } catch (error) { if (error.message === 'Expected failure') throw error; } }\n`
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source])
+    assert.deepEqual(await readdir(directory), ['destination'])
+  } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
 test('startup activation is verified and reconnect repairs disabled and missing entries', { timeout: 40_000 }, async () => {
@@ -508,6 +540,10 @@ test('failed staging preserves the running process and failed startup restores v
     await writeFile(statePath, 'previous compatible state', { mode: 0o600 })
     await assert.rejects(updateHost({ target: 'dev', version: '0.2.97' }, f.options), { code: 'install' })
     assert.equal((await f.state()).pid, first.pid)
+    await assert.rejects(stat(join(f.options.remoteRoot!, 'transaction.json')), { code: 'ENOENT' })
+    await assert.rejects(stat(join(f.options.remoteRoot!, 'rollback.tar')), { code: 'ENOENT' })
+    const stagedCommands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.ok(!stagedCommands.some(row => row.command === 'systemctl' && row.args.includes('stop')), 'failed staging must not enter rollback or stop the serving Host')
     await assert.rejects(updateHost({ target: 'dev', version: '0.2.98' }, f.options), { code: 'rollback' })
     const restored = await prepareHost({ target: 'dev' }, f.options)
     assert.equal(restored.version, first.version)

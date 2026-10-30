@@ -162,3 +162,49 @@ test('stdio browser cancellation only disposes its stream and leaves the bridge 
     await assertStopped(await f.calls())
   } finally { await tunnel.close(); await f.dispose() }
 })
+
+test('a later SSH channel failure preserves an active stream and accepts subsequent streams', async () => {
+  const f = await fixture()
+  const remote = createServer(socket => {
+    socket.write('ready')
+    socket.on('data', data => socket.write(data))
+  })
+  const tunnel = await connectTunnel({ target: 'dev', remotePort: await listen(remote) }, f.options)
+  const persistent = createConnection({ host: '127.0.0.1', port: tunnel.port })
+  persistent.on('error', () => {})
+  let closes = 0
+  tunnel.onClose(() => { closes++ })
+  const read = (socket: ReturnType<typeof createConnection>) => new Promise<string>((resolve, reject) => {
+    socket.once('data', data => resolve(data.toString()))
+    socket.once('error', reject)
+  })
+  try {
+    assert.equal(await read(persistent), 'ready')
+    f.options.env!.TEST_SSH_STDIO_ERROR = 'Permission denied (publickey).'
+    const failed = createConnection({ host: '127.0.0.1', port: tunnel.port })
+    failed.on('error', () => {})
+    await new Promise<void>(resolve => failed.once('close', () => resolve()))
+    assert.equal(closes, 0)
+    const response = read(persistent)
+    persistent.write('still connected')
+    assert.equal(await response, 'still connected')
+    delete f.options.env!.TEST_SSH_STDIO_ERROR
+    const sshPath = f.options.sshPath
+    f.options.sshPath = '\0'
+    const invalidLaunch = createConnection({ host: '127.0.0.1', port: tunnel.port })
+    invalidLaunch.on('error', () => {})
+    await new Promise<void>(resolve => invalidLaunch.once('close', () => resolve()))
+    f.options.sshPath = sshPath
+    assert.equal(closes, 0, 'a synchronous launch failure only closes its own stream')
+    const recovered = createConnection({ host: '127.0.0.1', port: tunnel.port })
+    recovered.on('error', () => {})
+    assert.equal(await read(recovered), 'ready')
+    recovered.destroy()
+    assert.equal(closes, 0)
+  } finally {
+    persistent.destroy()
+    await tunnel.close()
+    await new Promise<void>(resolve => remote.close(() => resolve()))
+    await f.dispose()
+  }
+})

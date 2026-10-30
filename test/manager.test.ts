@@ -8,6 +8,7 @@ import { ConnectionsManager, probeHarness } from '../src/host/manager.js'
 import { createStore } from '../src/host/store.js'
 import { SshTunnelError, type Tunnel } from '../src/host/ssh.js'
 import { LATEST_SUPPORTED_REMOTE_VERSION } from '../src/shared/validation.js'
+import { HarnessAuthorizationError, HarnessConnectionError, HarnessProtocolError } from '../src/host/harness-http.js'
 
 const PROBE_COOKIE = 'private-test-owner-cookie'
 const TOKEN = 'private-launch-token-never-in-status'
@@ -162,12 +163,72 @@ test('an open health probe can be cancelled without blocking connection manageme
   try {
     const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
     await manager.connect(saved.id)
-    const opening = assert.rejects(manager.open(saved.id), /Reconnect/)
+    const opening = assert.rejects(manager.open(saved.id), /Connection changed/)
     await entered.promise
     assert.equal((await manager.disconnect(saved.id)).phase, 'disconnected')
     await opening
     assert.equal((await manager.list())[0]?.phase, 'disconnected')
   } finally { await manager.dispose() }
+})
+
+test('an open protocol failure preserves its healthy transport and a later probe can succeed', async () => {
+  const tunnel = fakeTunnel()
+  let probes = 0
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    connectTunnel: async () => tunnel,
+    probe: async () => { if (++probes === 2) throw new HarnessProtocolError('The remote Host returned an incompatible authentication response.'); return PROBE_COOKIE },
+  })
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+    const connected = await manager.connect(saved.id)
+    await assert.rejects(manager.open(saved.id), HarnessProtocolError)
+    assert.deepEqual((await manager.list())[0], connected)
+    assert.equal(tunnel.closes, 0)
+    assert.equal((await manager.open(saved.id)).url, `http://127.0.0.1:${tunnel.port}/?token=${TOKEN}`)
+  } finally { await manager.dispose() }
+})
+
+test('an old open completion cannot invalidate a replacement connection', async () => {
+  const entered = deferred<void>(), release = deferred<void>()
+  let probes = 0
+  const tunnels = [fakeTunnel(), fakeTunnel(41381)]
+  let attempts = 0
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    connectTunnel: async () => tunnels[attempts++]!,
+    probe: async () => {
+      if (++probes === 2) { entered.resolve(); await release.promise; throw new HarnessConnectionError('Old probe failed.') }
+      return PROBE_COOKIE
+    },
+  })
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+    await manager.connect(saved.id)
+    const opening = assert.rejects(manager.open(saved.id), /Connection changed/)
+    await entered.promise
+    const connected = await manager.reconnect(saved.id)
+    release.resolve()
+    await opening
+    assert.deepEqual((await manager.list())[0], connected)
+    assert.equal(tunnels[1]!.closes, 0)
+  } finally { release.resolve(); await manager.dispose() }
+})
+
+test('an open transport or authorization failure invalidates only its current lease', async () => {
+  for (const failure of [new HarnessAuthorizationError('Private authorization detail'), new HarnessConnectionError('Private network detail')]) {
+    const tunnel = fakeTunnel()
+    let probes = 0
+    const manager = new ConnectionsManager(createStore(credentials()), {
+      connectTunnel: async () => tunnel,
+      probe: async () => { if (++probes === 2) throw failure; return PROBE_COOKIE },
+    })
+    try {
+      const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+      await manager.connect(saved.id)
+      await assert.rejects(manager.open(saved.id), error => error instanceof Error && /Reconnect/.test(error.message) && !error.message.includes('Private'))
+      assert.equal((await manager.list())[0]?.phase, 'error')
+      assert.equal(tunnel.closes, 1)
+    } finally { await manager.dispose() }
+  }
 })
 
 test('metadata edits preserve an in-flight preparation and its latest public name', async () => {
@@ -624,14 +685,33 @@ test('SSH preflight bounds active checks, sanitizes errors and cancels them on u
     assert.deepEqual(await manager.checkSsh('failed'), { ok: false, code: 'SSH_FAILED' })
     const checks = [1, 2, 3, 4].map(index => manager.checkSsh(`dev${index}`))
     await started.promise
-    assert.deepEqual(await manager.checkSsh('dev5'), { ok: false, code: 'SSH_FAILED' })
+    checks.push(manager.checkSsh('dev5'))
     assert.equal(active, 4)
+    for (let index = 6; index <= 32; index++) checks.push(manager.checkSsh(`dev${index}`))
+    assert.throws(() => manager.checkSsh('dev33'), /Too many SSH checks are waiting/)
     await manager.dispose()
     assert.equal(cancelled, 4)
-    assert.deepEqual(await Promise.all(checks), Array.from({ length: 4 }, () => ({ ok: false, code: 'SSH_FAILED' })))
+    assert.deepEqual(await Promise.all(checks), Array.from({ length: 32 }, () => ({ ok: false, code: 'SSH_FAILED' })))
     assert.equal(provider.records.size, 0)
     assert.throws(() => manager.checkSsh('dev1'), /unloaded/)
   } finally { await manager.dispose() }
+})
+
+test('a fifth SSH preflight waits for a slot and reports its real result', async () => {
+  const gates = Array.from({ length: 5 }, () => deferred<void>())
+  const started: string[] = []
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    checkSshTarget: async ({ target }) => { started.push(target); await gates[Number(target.slice(3)) - 1]!.promise },
+  })
+  const checks = [1, 2, 3, 4, 5].map(index => manager.checkSsh(`dev${index}`))
+  try {
+    assert.deepEqual(started, ['dev1', 'dev2', 'dev3', 'dev4'])
+    gates[1]!.resolve()
+    await checks[1]
+    assert.deepEqual(started, ['dev1', 'dev2', 'dev3', 'dev4', 'dev5'])
+    gates.forEach(gate => gate.resolve())
+    assert.deepEqual(await Promise.all(checks), Array.from({ length: 5 }, () => ({ ok: true })))
+  } finally { gates.forEach(gate => gate.resolve()); await manager.dispose() }
 })
 
 test('explicit connection intent survives failure, disconnect and Host reload', async () => {

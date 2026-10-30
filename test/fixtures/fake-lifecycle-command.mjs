@@ -25,7 +25,11 @@ await appendFile(join(directory, 'commands.jsonl'), JSON.stringify({ command, ac
 
 if (command === 'npm' && await exists(join(directory, 'npm-unavailable'))) process.exit(1)
 if (args.includes('--version')) { console.log('test command 1'); process.exit(0) }
-if (command === 'loginctl') { console.log(process.env.DSH_FIXTURE_NO_LINGER ? 'no' : 'yes'); process.exit(0) }
+if (command === 'loginctl') {
+  if (process.env.DSH_FIXTURE_LOGINCTL_FAIL) { console.error('Private logind failure detail'); process.exit(1) }
+  console.log(process.env.DSH_FIXTURE_LINGER_VALUE ?? (process.env.DSH_FIXTURE_NO_LINGER ? 'no' : 'yes'))
+  process.exit(0)
+}
 
 if (command === 'npm') {
   const prefix = args[args.indexOf('--prefix') + 1]
