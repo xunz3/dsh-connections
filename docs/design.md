@@ -1,6 +1,6 @@
 # Connections design
 
-Source review: 2026-10-29. Local sidebar and command-routing baseline: exactly `0.2.1-rc.3`. The separate remote bundle supports the explicitly tested `0.2.1-rc.2` and `0.2.1-rc.3` Hosts; updates reject versions outside that list.
+Source review: 2026-11-01. The local runtime/shortcut baseline remains exactly `0.2.1-rc.5`; the native sidebar is no longer copied or disabled. The separate remote bundle supports reviewed `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5` Hosts. See [review follow-up](<review-followup.md>) for current changes and validation limits.
 
 The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
 
@@ -13,12 +13,12 @@ The client presents local and remote projects in one Workspaces list. See [Unifi
 | glob 13.0.6 | Expand Include file patterns with brace, extglob and recursive globstar expansion disabled |
 | Node >=22.12 locally | Child processes, sockets, native HTTP checks and validation |
 | Remote Linux, Node 22.19+ or >=24, npm, systemd, flock, tar | Native Harness installation, persistent user service, maintenance locking and rollback snapshot |
-| Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.3 | Plugin lifecycle, existing private records and authenticated owner RPC |
+| Cordis 4.0.5; Harness credentials and Typert 0.2.1-rc.5 | Plugin lifecycle, existing private records and authenticated owner RPC |
 | Harness api-remotes, settings, slots, renderer, locale, workspace, layout | Existing client services and extension points; build-time dependencies |
 | Harness sidebar-browser bridge types | Desktop guest lease and isolation; no Electron runtime dependency |
 | React 18, TypeScript 5.9, esbuild, tsx, Playwright | Compilation and transport, lifecycle and UI verification |
 
-The added production packages handle config parsing and Include file matching. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, process supervisor, automation engine or cloud relay is introduced.
+The added production packages handle config parsing and Include file matching. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, remote process supervisor, automation engine or cloud relay is introduced. A small local Node supervisor owns each POSIX OpenSSH master and cleans up after loss of its Host parent; systemd still exclusively owns the remote Harness lifecycle.
 
 ## Why not just enable official SSH plugins?
 
@@ -34,15 +34,17 @@ A saved connection contains a name, SSH target, mode, auto-connect preference an
 
 Public views expose status, address and runtime version, never launch credentials. The owner-only Open operation returns the authenticated local URL. The UI remembers only the selected connection ID and native session identity. Projects and session identities remain native Harness data.
 
+One Host `connectionOperations` service wraps the single manager/store with input/output validation and fixed safe failures. The owner RPC and optional `connections` Agent tool share it. Tool changes request native approval inside execution, capture the saved destination before waiting, and pass a Host-only revision to the manager's serial mutation boundary. Credential provisioning, new trust and damaged-record confirmations remain user-only; no tokenized Open result is returned to a model. Optional tool registration is an owned child effect, and the exact rc.5 SDK is type-only, not a new mandatory runtime import.
+
 Adding a connection opens a native dialog in the existing settings section. It lists unsaved SSH aliases for multi-selection, with refresh, search for long lists and a manual form for custom targets or existing services. Discovery does not connect. Submitting saves each selection and immediately initiates its connection; SSH preparation continues in the list, where the user can cancel it. Partial save failures retain only unsaved selections. The owner-only discovery RPC returns aliases from the Harness Host's configuration, not configuration contents. It bounds file size, Include traversal and result count; it never runs `ssh -G`, `Match exec` or configuration commands. OpenSSH resolves the chosen alias when connecting.
 
 The list switch expresses persistent connection intent using the existing `autoConnect` field. Explicit connect/reconnect atomically enables it, and explicit disconnect disables it before stopping the local transport. A failed connection remains enabled and offers Retry. Internal cleanup, updates and startup restore preserve the saved intent. The storage operation changes only this field, so another view's metadata edit or deletion is not overwritten. Workspace buttons delegate to the existing native picker and navigation controller after closing Settings.
 
-Connection dialogs use the browser's modal focus containment and Harness's shared `useModalLayer` stack. Escape and application Close belong to the foreground dialog; the parent Settings remains open. Browser modal cleanup runs before the shared layer restores focus to the invoking control. Row menus and action icons use the native primitives.
+Connection dialogs use the browser's modal focus containment with Connections-owned foreground, Escape and focus-return coordination. Menu, Modal, Tooltip, state dots, relative time, icons and snapshot stores are owned source, not runtime imports of Harness Client packages. The native private modal WeakMap is not shared: DOM foreground checks yield to newer native dialogs/menus, and the existing native Close resolver consults a checked owned-layer capability before its normal route. Browser modal cleanup runs before focus return. Tests compare these interactions with the actual rc.5 native primitives; they do not claim access to native private programmatic helpers.
 
 Settings and remote content use the same surface capability check: a supported native Desktop guest bridge or a local HTTP localhost/127.0.0.1 browser. Desktop is identified by its versioned guest capabilities, not a protocol-name exception. Browser origin limits preserve same-site loopback cookies and do not apply to native isolated guests.
 
-The original Connections SVG is shared by the panel and the packaged `assets/logo.svg`. Harness rc.3 exposes no settings-section icon option, so a lifecycle-scoped adapter follows the sorted native slot registry and adds a CSS mask only to the matching navigation row. Guards on row count and shape retain the host's icon if the shell changes. It does not observe the whole document, match localized labels or rewrite host elements; disposal removes its style and subscription.
+The original Connections SVG is shared by the panel and the packaged `assets/logo.svg`. Native Settings keeps its own navigation icon: the former CSS mask based on private row order/DOM structure has been removed. Plugin-owned controls insert their theme-token stylesheet at view boundaries, not once per row.
 
 ```text
 Local native project picker → Connections host chooser
@@ -71,9 +73,9 @@ The native Settings header selects the local Host or a remote connection. Models
 
 Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using native conversation/rightbar slots and a version-bound layout adapter. Layout service replacement is a private integration boundary, not a public multi-Host composition API. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
 
-The local native shortcut provider and Host configuration remain in place. A version-checked adapter wraps resolvers on the existing rc.3 command registry, follows registration changes and restores its own wrappers on disposal. Native dispatch and keybinding policy remain intact. This uses a narrow private registry contract until Harness exposes resolver middleware. Incompatibility closes or blocks remote surfaces while native local commands remain available; it never replaces the provider that the local layout depends on.
+The local native shortcut provider and Host configuration remain in place. A version-checked adapter wraps only content-namespace and Settings resolvers on the existing rc.5 command registry, follows registration changes and restores its own wrappers on disposal. Unrelated application/third-party commands, including immutable definitions, are not inspected or rewritten. Native dispatch and keybinding policy remain intact. This uses a narrow private registry contract until Harness exposes resolver middleware. Incompatibility closes or blocks remote surfaces while native local commands remain available; it never replaces the provider that the local layout depends on.
 
-Native owner controllers supply catalogs and mutations. A revisioned view channel carries navigation and actual selected-session acknowledgements. Credentials and destination resolution remain Host-side. The child document uses native transport for all conversation, files, media and approvals. Local selection closes only the remote view. The existing SSH port preference preserves browser origin when available; native workspace/session state remains independent of that origin.
+Native owner controllers supply catalogs and mutations. Catalog pages retain the transport identity that supplied their rows; business mutations carry it in the local RPC envelope and the manager verifies it before authentication/forwarding, so an old row cannot mutate an edited/reconnected Host with overlapping native IDs. This is a transport/destination precondition, not an owner authorization replacement or a cross-process credential transaction. A revisioned view channel carries navigation and actual selected-session acknowledgements. Credentials and destination resolution remain Host-side. The child document uses native transport for all conversation, files, media and approvals. Local selection closes only the remote view. The existing SSH port preference preserves browser origin when available; native workspace/session state remains independent of that origin.
 
 ## Transport boundaries
 

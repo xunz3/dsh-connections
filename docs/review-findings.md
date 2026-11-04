@@ -4,7 +4,11 @@ This document records the verified findings and maintenance decisions from the
 supplied reviews. The **2026-10-28** review identified further issues beyond the
 earlier fixes; its findings and the earlier review are recorded separately below.
 
-## 2026-10-30 follow-up: performance and rc.5
+## Current source follow-up after the 0.1.8 baseline
+
+The [implementation follow-up](<review-followup.md>) is authoritative for the current working tree. It records native-shell fail-open (without copying or disabling the sidebar), the deliberate local-brand/source-aware-keyboard tradeoff, fixed SSH classification, guarded diagnostics, surface visibility/backoff, required-contract negotiation and remaining upstream/product work. Historical records below describe what their referenced releases did; in particular their Proxy/sidebar replacement and unpaused-bridge descriptions no longer describe this source.
+
+## Historical 0.1.8 baseline: performance and rc.5
 
 The 0.1.7 changes resolve C6's duplicated scheduling and concurrent list reads.
 They do not remove the separate native remote document, persistent surface

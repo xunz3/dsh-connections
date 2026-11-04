@@ -39,9 +39,7 @@ The tests cover:
   settings page, without a duplicate native sidebar deployment.
 - Both the sidebar and conversation workspace picker offering local and remote
   computers, with native directory selection, cancellation and switching.
-- The global New Session action reusing the selected computer's native blank
-  session and preserving its unsent draft on rc.3 and rc.5, with requests reaching only
-  that computer. The native More menu remains available.
+- The source-aware New Session shortcut reusing the selected computer's native blank and draft, with requests reaching only that Host. The independently retained native top button returns to local semantics; the native More menu remains available.
 - The loading overlay remaining until the remote native document acknowledges
   that its directory picker or content is presented.
 - Native file trees, text previews, file upload and relative Markdown images.
@@ -79,6 +77,27 @@ node test/integration/native-fixture.mjs stop /tmp/dsh-connections-unified-qa
 ```
 
 Temporary logs, keys and project files remain under the fixture directory.
+
+After the native suite has initialized both project rows, profile only that
+disposable fixture (keep other test/benchmark runs idle during measurement):
+
+```sh
+node scripts/profile-native.mjs /tmp/dsh-connections-unified-qa
+```
+
+The script verifies recorded process identities and installed artifact hashes,
+opens a dedicated Chromium context, samples local content, remote workspace and
+remote Settings for 15 seconds each, and measures 20 local-to-remote navigations.
+`DSH_PROFILE_SAMPLE_MS` and `DSH_PROFILE_REPETITIONS` adjust these bounded counts.
+The sanitized `performance.json` stays inside the fixture directory; it contains
+build hashes and numeric measurements, not launch URLs, cookies or request bodies.
+CPU comes from Linux process counters; RSS and main-target JS heap are sampled,
+not exact peaks. HTTP completion bytes and WebSocket payload bytes are not SSH
+wire bytes. A hidden-tab sample runs only if the actual browser visibility changes;
+headless browsers that keep tabs visible record an explicit omission. An installed
+headed Chromium/display can be selected with `DSH_PROFILE_HEADED=1`.
+Stop the fixture with the existing `stop` command after profiling. See
+`docs/performance.md` for the current baseline and remaining acceptance gaps.
 Without `DSH_QA_UNIFIED=1`, the helper retains its single local Host mode for the
 connection-settings smoke test in `test/browser/native.spec.ts`; it then owns no
 remote Host and `stop` closes only its local Host and SSH listener.

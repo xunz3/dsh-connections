@@ -13,6 +13,8 @@ dialog, without an additional outer settings window or explanatory toolbar.
 Ownership follows the destination Host's native homes/profile, not the saved
 connection name: two connections to the same Host see the same configuration.
 
+If another negative-priority provider owns the Settings header, or its native header has an unsupported child structure, Connections withdraws its wrapper instead of hiding that provider. The dependent remote Settings view closes; native Settings and connection management remain available. SlotCore still rejects a later registration at the exact same priority before plugins can arbitrate it; this is not a general provider-replacement primitive.
+
 ## Ownership
 
 | Resource | Local Host | Remote Host |
@@ -26,7 +28,7 @@ connection name: two connections to the same Host see the same configuration.
 | Sessions, workspaces, attachments and files | Local native stores/filesystem | Remote native stores/filesystem |
 | Saved SSH connections and the unified sidebar | Owned by Connections on the local Host | Not copied to the remote content bundle |
 
-Changing the Settings Host does not change the application's language or theme.
+Changing the Settings Host does not change the application's language or theme. The surface explicitly declares a mirrored resolved palette: the remote uses its light/dark preference and cannot independently switch to an unobserved palette; it does not claim two independently sourced palettes.
 Remote content also follows local work-detail visibility, automatic collapse,
 performance/usage detail, link-opening preference, busy-Enter behavior and
 developer-tools visibility. These preferences are read without saving them in
@@ -118,7 +120,7 @@ the current iframe, origin and view lease. Desktop guests exchange the same smal
 metadata through the authenticated remote view endpoint, bound to the current
 Settings navigation revision; a host selection consumes that operation once.
 Changing or closing the view revokes the capability. Local interface preferences
-and the native sign-in dialog's open-link/copy-link requests use the authenticated
+and the Connections-owned sign-in presenter's open-link/copy-link requests use the authenticated
 view endpoint too. They do not expose a general local command or RPC service.
 The local parent retains connection operations and credentials; opening a remote
 account's sign-in link on this computer still authenticates that remote account.

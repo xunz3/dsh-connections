@@ -18,8 +18,10 @@ describe improved thinking-content display; this source comparison and native
 acceptance, rather than the notes alone, determine admission.
 
 All Harness development and peer inputs now target exact rc.5. The build also
-checks separately installed rc.2/rc.3 Settings and Account sources against rc.5
-before sharing their factory. Native preference tests execute all three
+checks separately installed rc.2/rc.3 Settings sources against rc.5 before
+sharing the one retained ConfigForms constructor adapter. Account uses its
+independently deployed native plugin and checked public slot injection, not a
+copied factory. Native preference tests execute all three
 matching Settings, locale and theme runtimes. A changed implementation fails
 the build and needs a separate reviewed adapter. rc.4 and 0.2.2-alpha.2 remain
 unadmitted; a compatible-looking neighboring version is not sufficient evidence.
@@ -28,12 +30,26 @@ Existing remote Hosts retain their version. Explicit Update defaults to the
 latest admitted rc.5; new managed installations retain the original rc.2
 baseline. This admission does not silently migrate existing services.
 
-The native factory and shortcut adapters still require exact tested inputs.
-`dist/native-inputs.json` records their versions and SHA-512 digests; `NOTICE`
-describes the derived code and its licenses. Build checks also verify the native
+The remaining Settings constructor and shortcut adapters still require exact
+tested inputs. `dist/native-inputs.json` records their versions, SHA-512 digests
+and boundary inventory; `NOTICE` describes the adapted Settings bootstrap and
+owned control behavior with their licenses. Both browser artifacts reject all
+Harness Client runtime module imports; native Service/Slot type contracts remain
+development inputs. Build checks also verify the native
 Models, permission and session-log slot identities used by the remote settings
 adapter. Broadening the engine range requires reviewing these contracts and
 running native acceptance for each admitted version.
+
+The local rc.5 navigation observer waits for the published first-main binding,
+not a private `UiWorkspaceService` field: automatic native blank restoration
+also calls `beginNavigation`. Saved remote restoration loads catalogs in parallel
+but waits to commit its panel until that binding or a ready empty workspace
+baseline, with a 30-second fallback for stalled native startup. That fallback
+is not proof of native startup completion. Trusted local input cancels only an
+unexpanded cold automatic restore; its temporary listeners neither intercept nor
+reroute native input and are removed on completion/unload. Regression tests
+execute the published native implementation for both completion orders and
+blank reuse.
 
 Connections 0.1.3 separates workspace presentation and interaction state using
 MVVM, aligns its list with native icons and spacing, and fixes catalog snapshot
@@ -49,21 +65,11 @@ new Connections release. The build input version, installed-version admission
 and CI's actually tested versions are separate facts; a passing matrix should
 not itself become an installation allowlist.
 
-That policy is not yet safe for the current local bundle. Its profile patch
-unconditionally disables the native sidebar before the Connections client
-factory loads. A later capability check cannot undo that patch if an upstream
-change prevents this factory from loading. Shortcut guards withdraw remote
-routing, but cannot restore a sidebar lost at that earlier boundary. A bare
-`>=` engine would therefore remove the existing protection without supplying
-that fallback. The exact 0.1.8 local gate is a temporary integration limitation,
-not the desired long-term versioning model.
+The current source now completes the fail-open prerequisite: its local patch no longer disables the native sidebar, and no copied native factory/Proxy is deployed. Import/factory/entry failures leave native navigation independently available. Source-aware keyboard/list New Session remains; the native brand button deliberately stays local.
 
-Broad admission first needs a conditional native provider extension/replacement
-with ownership and failure recovery, or a public source-aware navigation API.
-Capabilities can then be checked before enabling remote content; a failed check
-must preserve native navigation, retain basic connection management and explain
-which capability is unavailable. Builds can still pin their derivation inputs,
-while runtime admission uses the reviewed contract range and known exclusions.
+This is necessary, not sufficient, for broader admission. The private shortcut registry, remaining Settings constructor and Account slot-injection contracts still need reviewed inputs. A bare `>=` would promise future prerelease/private APIs that this plugin cannot verify. The exact local rc.5 gate is retained.
+
+The [contract inventory](<../dist/contracts.json>) and openView handshake now check the required plugin-owned workspace/surface/settings/account revisions before enabling remote content. Failure preserves native navigation, basic connection management and an update remedy. This is not a public platform capability negotiation: build inputs remain pinned, the remaining Settings constructor is still reviewed per runtime, and automatic admission of an unchanged future rc.6 remains outstanding. A public source-aware navigation/module/provider seam would remove more private adapters.
 
 Harness's current evaluator uses semver with `includePrerelease: true`. A lower
 bound alone also admits future alpha releases and incompatible major versions.
@@ -83,8 +89,9 @@ does not enable Desktop support. Ordinary browsers still require HTTP localhost
 or 127.0.0.1 on the local Harness computer.
 
 Version 0.1.6 retains the running native `ShortcutsService`, its provider and
-Host configuration. A version-checked adapter wraps only the registered command
-objects' resolvers in the tested private `registry.commands` map. Native code retains
+Host configuration. A version-checked adapter wraps only content-namespace and settings.open command
+resolvers in the tested private `registry.commands` map. Unrelated application
+and third-party commands, including immutable objects, stay outside that seam. Native code retains
 keybindings, conflicts, revisions, repeat handling, keyboard/menu dispatch and
 disposal. The adapter follows command registration changes and restores its own
 wrappers when disposed. The command guard lives with the view controller,
@@ -98,16 +105,21 @@ to the reviewed rc.5 contract. If it cannot attach safely, remote views close or
 cannot open; the native local shortcut service remains available. A future
 public command-resolver hook would let Connections remove this private adapter.
 
-The remote bundle additionally composes the released native settings and account
-factories. The settings adapter extends the public ConfigForms accessor for an
-explicit set of local UI preferences; native remote schemas and write queues
-remain intact. Account composition adapts browser opening/copying and stylesheet
-ownership while retaining native authorization logic. The build verifies the
-exact package versions and constructor/capability sites before composing them.
-The currently supported rc.2/rc.3/rc.5 factory implementations are deduplicated only
-after a source comparison that permits the native account release label to
-differ. A changed implementation must be reviewed separately rather than
-silently inheriting this compatibility claim.
+The remote bundle retains one version-checked Settings bootstrap. It extends the
+ConfigForms accessor for five local UI preference namespaces and explicitly
+injects an owned snapshot-store dependency; native schemas, describe mirror and
+execution-setting write queues remain intact. Account keeps its native provider,
+components and CSS. Public slot delegation adapts only its sign-in presentation
+and browser open/copy operations, leaving native account state, credentials and
+authorization attempts on the destination Host.
+
+Removing the remaining constructor requires a real upstream pre-consumer form
+projection seam. Runtime method wrapping cannot notify consumers that already
+cached the original subscription, and Host Loader isolation is not carried into
+the Client boot graph. Connections does not invent a mirror revision, globally
+replace those native consumers, or claim these mechanisms are public middleware.
+The rc.2/rc.3/rc.5 Settings inputs are still compared before sharing this adapter;
+a changed implementation fails the build and needs review.
 
 ### Updating an open rc.3 Desktop
 
@@ -139,7 +151,11 @@ previous version required moving `stopSequenceMs` into the Connections entry's
 `shortcuts` field, restore that override to the native deployment when upgrading.
 The adapter does not migrate or duplicate native configuration.
 
-## Desktop sidebar stylesheet ownership
+## Historical sidebar adapter (released 0.1.2–0.1.8)
+
+The following describes the previously released implementation. The current source removes that adapter entirely and keeps native stylesheet/provider identity unchanged; it ships no copied-sidebar license or factory. Entry/bundle disable no longer requires native sidebar restoration. Save drafts when upgrading an old active patch; a running loader may still need one refresh to retire the old composition.
+
+### Desktop stylesheet ownership in that historical adapter
 
 Connections 0.1.2 fixes missing native sidebar styling on Desktop. The rc.3
 Desktop and npm sidebar builds use different generated CSS class names but the
@@ -177,7 +193,7 @@ creation action supplies the `cordis` preset and appends a prompt through its ow
 Host's `uiWorkspace`. Connections does not rewrite that action into a generic
 remote New Session request or discard its preset/draft options.
 
-## Changes adopted
+## Historical rc.3 changes adopted
 
 - Build the native sidebar factory and typecheck against rc.3, with matching
   credential and Typert peers. Preserve the new child slot and original menu
