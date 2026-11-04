@@ -8,8 +8,7 @@ import { EmbeddedLayoutController, EmbeddedThemePresentation, applyEmbeddedLayou
 
 test('embedded layout preserves native panel selection and cancels superseded navigation', () => {
   const settings = 'settings' as MainPanelId
-  let revealed = 0
-  const layout = new EmbeddedLayoutController(id => id === settings, () => revealed++, 1000)
+  const layout = new EmbeddedLayoutController(id => id === settings, 1000)
   const first = layout.beginNavigation()
   const second = layout.beginNavigation()
   assert.equal(first.aborted, true)
@@ -21,8 +20,6 @@ test('embedded layout preserves native panel selection and cancels superseded na
   assert.equal(layout.panelInfo.getSnapshot().activePanelId, settings)
   layout.selectPanel(null)
   assert.equal(layout.panelInfo.getSnapshot().activePanelId, null)
-  layout.toggleSidebar()
-  assert.equal(revealed, 1)
   const pending = layout.beginNavigation()
   layout.dispose()
   assert.equal(pending.aborted, true)
@@ -30,7 +27,7 @@ test('embedded layout preserves native panel selection and cancels superseded na
 })
 
 test('rightbar geometry protects the conversation and preserves user width across viewport changes', () => {
-  const layout = new EmbeddedLayoutController(() => true, undefined, 1200)
+  const layout = new EmbeddedLayoutController(() => true, 1200)
   layout.resize(640)
   assert.equal(embeddedColumns(1200, layout.state.getSnapshot().preferredWidth).rightbar, 640)
   layout.measure(800)
@@ -142,7 +139,7 @@ test('embedded registration exposes native content and overlay slots while requi
   const layout = applyEmbeddedLayout(context as never, { document: document as unknown as Document })
   assert.equal(provided, layout)
   assert.deepEqual(hooks, { hooks: { panelInfo: layout.panelInfo } })
-  assert.deepEqual(Object.keys(registrations[0].children).sort(), ['main', 'rightbar', 'shell.bottom', 'shell.leading', 'shell.overlay', 'sidebar'])
+  assert.deepEqual(Object.keys(registrations[0].children).sort(), ['main', 'rightbar', 'shell.bottom', 'shell.overlay', 'sidebar'])
   assert.equal(registrations[0].name, 'root')
   layout.showSettings(true)
   assert.equal(document.body.style.getPropertyValue('background-color'), 'transparent')
@@ -162,7 +159,7 @@ test('unbridged sidebar toggle is explicitly unavailable instead of silently suc
   assert.doesNotThrow(() => layout.toggleSidebar(), 'a disposed provider cannot invoke or revive a navigation bridge')
 })
 
-test('the declared leading slot renders in the top-leading seat for content and settings without a dead sidebar command', t => {
+test('embedded content and settings leave sidebar and new-session chrome to the outer shell', t => {
   const document = { documentElement: element(), body: element() }
   let Frame!: ComponentType<Record<string, unknown>>
   const effects: Array<() => void> = []
@@ -190,9 +187,10 @@ test('the declared leading slot renders in the top-leading seat for content and 
       renderSlot: (name: string) => { rendered.push(name); return createElement('span', { 'data-slot': name }, name) },
       measure: layout.measure, resize: layout.resize, resizeLabel: 'Resize',
     }))
-    assert.equal(rendered.filter(name => name === 'shell.leading').length, 1)
-    assert.match(markup, /class="dc-embedded-leading" data-shell-leading="true"><span data-slot="shell.leading"/)
+    assert.equal(rendered.includes('shell.leading'), false, 'native HeaderLeadingControls must not mount inside remote content')
+    assert.doesNotMatch(markup, /data-shell-leading/)
     assert.equal(rendered.includes('shell.overlay'), true)
+    assert.equal(rendered.includes('sidebar'), settings, 'the hidden native sidebar is needed only to host settings')
     if (!settings) for (const name of ['main', 'rightbar', 'shell.bottom']) assert.equal(rendered.includes(name), true)
   }
   assert.equal(warnings.every(args => String(args[0]).includes('useLayoutEffect')), true, 'only the expected SSR layout-effect warning may be suppressed')

@@ -11,6 +11,12 @@ type Surface = Page | FrameLocator
 const fixturePath = process.env.DSH_UNIFIED_FIXTURE
 const connectionName = 'Unified native SSH'
 
+async function expectContentOnlyShell(surface: Surface): Promise<void> {
+  await expect(surface.locator('[data-shell-leading]')).toHaveCount(0)
+  await expect(surface.getByRole('button', { name: 'Open sidebar', exact: true })).toHaveCount(0)
+  await expect(surface.getByRole('button', { name: 'New session', exact: true })).toHaveCount(0)
+}
+
 async function launch(path: string): Promise<string> {
   const value = (await readFile(path, 'utf8')).match(/dsh web: (http[^\s]+)/)?.[1]
   if (!value) throw new Error('The isolated Host has no startup URL.')
@@ -375,6 +381,7 @@ test('dedicated remote profile boots its public embedded layout without a second
   await expect(page.getByText('Open this remote workspace from Connections on your computer.', { exact: true })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Workspaces', exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Account menu', exact: true })).toHaveCount(0)
+  await expectContentOnlyShell(page)
   await expect(page.getByText('Failed to load plugins', { exact: true })).toHaveCount(0)
   expect(errors).toEqual([])
   await page.screenshot({ path: info.outputPath('embedded-direct-visit.png'), fullPage: true })
@@ -584,6 +591,7 @@ test('one native sidebar switches local and SSH projects while remote content st
   await expect(localProject).toBeVisible()
   await expect(remote.getByRole('region', { name: 'Workspaces', exact: true })).toHaveCount(0)
   await expect(remote.getByRole('button', { name: 'Account menu', exact: true })).toHaveCount(0)
+  await expectContentOnlyShell(remote)
   await verifyRemoteUpload(page, remote)
   await verifyRemoteMedia(page, remote)
   await verifyNewSession(page, 'remote')
@@ -736,6 +744,7 @@ test('native settings keep models and plugins remote while General and presentat
   await expect(page.locator('.dcs-panel')).toHaveCount(0)
   await expect(settings.locator('iframe')).toBeVisible()
   await expect(remote.locator('.dc-embedded-main, .dc-embedded-right, [data-shell-bottom]')).toHaveCount(0)
+  await expectContentOnlyShell(remote)
   expect(await remote.locator('body').evaluate(body => [getComputedStyle(document.documentElement).backgroundColor, getComputedStyle(body).backgroundColor])).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)'])
   // A fresh remote Host may run its native first-use flow. It remains inside
   // the visible remote document, and dismissal exposes the settings launcher.
