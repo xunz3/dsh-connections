@@ -1,8 +1,10 @@
 # Connections design
 
-Source review: 2026-11-01. The local runtime/shortcut baseline remains exactly `0.2.1-rc.5`; the native sidebar is no longer copied or disabled. The separate remote bundle supports reviewed `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5` Hosts. See [review follow-up](<review-followup.md>) for current changes and validation limits.
-
-The client presents local and remote projects in one Workspaces list. See [Unified Workspaces](unified-workspaces.md) for the supported plugin composition, navigation protocol and boundaries, and the [Codex source review](codex-reference.md) for the reference architecture.
+Connections manages SSH access to independent Harness Hosts. Each Host owns its
+sessions, workspaces, files, models and plugins; the local client supplies one
+source-aware navigation surface. See [unified workspaces](unified-workspaces.md)
+for UI/protocol details and [compatibility](harness-compatibility.md) for native
+adapter boundaries.
 
 ## Dependency decision
 
@@ -10,6 +12,7 @@ The client presents local and remote projects in one Workspaces list. See [Unifi
 | --- | --- |
 | System OpenSSH | SSH config, key/agent authentication, host trust, jump hosts and encrypted forwarding |
 | ssh-config 5.3.0 | Parse existing SSH config for a read-only list of host aliases; no transitive runtime dependencies |
+| Schemastery 3.18.5 | Runtime configuration and Standard Schema validation |
 | glob 13.0.6 | Expand Include file patterns with brace, extglob and recursive globstar expansion disabled |
 | Node >=22.12 locally | Child processes, sockets, native HTTP checks and validation |
 | Remote Linux, Node 22.19+ or >=24, npm, systemd, flock, tar | Native Harness installation, persistent user service, maintenance locking and rollback snapshot |
@@ -18,7 +21,7 @@ The client presents local and remote projects in one Workspaces list. See [Unifi
 | Harness sidebar-browser bridge types | Desktop guest lease and isolation; no Electron runtime dependency |
 | React 18, TypeScript 5.9, esbuild, tsx, Playwright | Compilation and transport, lifecycle and UI verification |
 
-The added production packages handle config parsing and Include file matching. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, remote process supervisor, automation engine or cloud relay is introduced. A small local Node supervisor owns each POSIX OpenSSH master and cleans up after loss of its Host parent; systemd still exclusively owns the remote Harness lifecycle.
+The added production packages handle config parsing, Include file matching and runtime configuration validation. Harness supplies peer dependencies and the client ModuleLoader. No new SSH/SFTP implementation, session database, file API, remote process supervisor, automation engine or cloud relay is introduced. A small local Node supervisor owns each POSIX OpenSSH master and cleans up after loss of its Host parent; systemd still exclusively owns the remote Harness lifecycle.
 
 ## Why not just enable official SSH plugins?
 
@@ -36,15 +39,13 @@ Public views expose status, address and runtime version, never launch credential
 
 One Host `connectionOperations` service wraps the single manager/store with input/output validation and fixed safe failures. The owner RPC and optional `connections` Agent tool share it. Tool changes request native approval inside execution, capture the saved destination before waiting, and pass a Host-only revision to the manager's serial mutation boundary. Credential provisioning, new trust and damaged-record confirmations remain user-only; no tokenized Open result is returned to a model. Optional tool registration is an owned child effect, and the exact rc.5 SDK is type-only, not a new mandatory runtime import.
 
-Adding a connection opens a native dialog in the existing settings section. It lists unsaved SSH aliases for multi-selection, with refresh, search for long lists and a manual form for custom targets or existing services. Discovery does not connect. Submitting saves each selection and immediately initiates its connection; SSH preparation continues in the list, where the user can cancel it. Partial save failures retain only unsaved selections. The owner-only discovery RPC returns aliases from the Harness Host's configuration, not configuration contents. It bounds file size, Include traversal and result count; it never runs `ssh -G`, `Match exec` or configuration commands. OpenSSH resolves the chosen alias when connecting.
-
-The list switch expresses persistent connection intent using the existing `autoConnect` field. Explicit connect/reconnect atomically enables it, and explicit disconnect disables it before stopping the local transport. A failed connection remains enabled and offers Retry. Internal cleanup, updates and startup restore preserve the saved intent. The storage operation changes only this field, so another view's metadata edit or deletion is not overwritten. Workspace buttons delegate to the existing native picker and navigation controller after closing Settings.
-
-Connection dialogs use the browser's modal focus containment with Connections-owned foreground, Escape and focus-return coordination. Menu, Modal, Tooltip, state dots, relative time, icons and snapshot stores are owned source, not runtime imports of Harness Client packages. The native private modal WeakMap is not shared: DOM foreground checks yield to newer native dialogs/menus, and the existing native Close resolver consults a checked owned-layer capability before its normal route. Browser modal cleanup runs before focus return. Tests compare these interactions with the actual rc.5 native primitives; they do not claim access to native private programmatic helpers.
+SSH discovery returns a bounded list of aliases from the Host's configuration.
+It never runs configuration commands or connects to candidates. OpenSSH resolves
+the selected alias when connecting. The saved `autoConnect` field expresses
+persistent intent: connect enables it, disconnect disables it, and internal
+cleanup preserves it. Name or auto-connect edits do not replace a healthy transport.
 
 Settings and remote content use the same surface capability check: a supported native Desktop guest bridge or a local HTTP localhost/127.0.0.1 browser. Desktop is identified by its versioned guest capabilities, not a protocol-name exception. Browser origin limits preserve same-site loopback cookies and do not apply to native isolated guests.
-
-The original Connections SVG is shared by the panel and the packaged `assets/logo.svg`. Native Settings keeps its own navigation icon: the former CSS mask based on private row order/DOM structure has been removed. Plugin-owned controls insert their theme-token stylesheet at view boundaries, not once per row.
 
 ```text
 Local native project picker → Connections host chooser
@@ -73,7 +74,9 @@ The native Settings header selects the local Host or a remote connection. Models
 
 Connections contributes a source-aware `sidebar.workspaces` occupant and a remote main panel. A dedicated remote profile disables native `ui-layout` through its bundle patch; the plugin provides a small content layout using native conversation/rightbar slots and a version-bound layout adapter. Layout service replacement is a private integration boundary, not a public multi-Host composition API. See [Unified Workspaces](unified-workspaces.md) for the complete contract.
 
-The local native shortcut provider and Host configuration remain in place. A version-checked adapter wraps only content-namespace and Settings resolvers on the existing rc.5 command registry, follows registration changes and restores its own wrappers on disposal. Unrelated application/third-party commands, including immutable definitions, are not inspected or rewritten. Native dispatch and keybinding policy remain intact. This uses a narrow private registry contract until Harness exposes resolver middleware. Incompatibility closes or blocks remote surfaces while native local commands remain available; it never replaces the provider that the local layout depends on.
+Local command dispatch remains owned by the native shortcut provider; the
+[checked resolver adapter](harness-compatibility.md#desktop-remote-content-and-commands)
+routes commands that require a selected Host.
 
 Native owner controllers supply catalogs and mutations. Catalog pages retain the transport identity that supplied their rows; business mutations carry it in the local RPC envelope and the manager verifies it before authentication/forwarding, so an old row cannot mutate an edited/reconnected Host with overlapping native IDs. This is a transport/destination precondition, not an owner authorization replacement or a cross-process credential transaction. A revisioned view channel carries navigation and actual selected-session acknowledgements. Credentials and destination resolution remain Host-side. The child document uses native transport for all conversation, files, media and approvals. Local selection closes only the remote view. The existing SSH port preference preserves browser origin when available; native workspace/session state remains independent of that origin.
 
@@ -92,6 +95,6 @@ Native owner controllers supply catalogs and mutations. Catalog pages retain the
 - [Harness source, 687f282e](https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317): public client slots, credentials, native workspace/files and SSH providers.
 - [flymysql/dsh-remote, 03ba582d](https://github.com/flymysql/dsh-remote/blob/03ba582d0001c9eecdc6114d119fbbc4027c7b64/lib/web-attach.js): native Web attach reference; its broader file tools/mirroring are outside this scope. Current native launch tokens are process-lifetime credentials, not one-time tokens.
 - [UynajGI/dsh-ssh](https://github.com/UynajGI/dsh-ssh/tree/5b7b451477f61d9b5444d3a02b8773abaeb56ba9), [dsh-ssh/dsh-ssh](https://github.com/dsh-ssh/dsh-ssh/tree/17764146e474b44222d12a95c585b5de782f9daa): remote execution/tool alternatives; no replacement tools are needed here.
-- [Codex Connections](https://learn.chatgpt.com/docs/remote-connections) and [public daemon source](https://github.com/openai/codex/blob/2839ed763bd3f404398e1f0c95bf4e2d172213c0/codex-rs/app-server-daemon/README.md): separate transport, session and process lifetimes. ChatGPT relay authorization is not reusable for Harness.
+- [Codex public app-server/TUI source](https://github.com/openai/codex/tree/f970f4be6783428af0d39527102917a5305c71d7/codex-rs): reference for source-qualified identity and separate transport/session lifetimes; not evidence of the closed-source Desktop implementation.
 
 No reference-project source is vendored into this plugin.

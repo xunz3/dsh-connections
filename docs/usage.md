@@ -2,11 +2,11 @@
 
 ## Requirements
 
-Install into the local Harness profile. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux uses OpenSSH ControlMaster; macOS follows the same path. Windows uses an owned loopback listener with native OpenSSH stdio forwarding. Historical Desktop checks and the current platform-specific acceptance limits are recorded in [development](development.md). Remote content uses the native Desktop guest bridge or a local HTTP browser.
+Install into the local Harness profile. Managed mode installs the remote content plugin automatically. Existing-service mode requires the remote bundle described below. Linux uses OpenSSH ControlMaster; macOS follows the same path. Windows uses an owned loopback listener with native OpenSSH stdio forwarding. Platform-specific acceptance limits are recorded in [development](development.md#acceptance-boundaries). Remote content uses the native Desktop guest bridge or a local HTTP browser.
 
-The current source keeps Harness's native sidebar independently deployed. Connections contributes only its source-aware workspace list and settings header; failure or disabling either its entry or whole bundle does not remove the native navigation shell. The list/header withdraw when another negative-priority provider owns their slot. The native shortcut provider and configuration remain in place. User keybindings remain in native storage. Keep `stopSequenceMs` on the native `shortcuts` deployment; restore it there if an old installation moved it into Connections. See [review follow-up](<review-followup.md>) for the changed New Session tradeoff and migration boundary.
-
-Installing and first enabling 0.1.5 could blank an open rc.3 Desktop renderer. Version 0.1.6 removes the shortcut-provider replacement responsible for the reproduced failure. Migrating an active 0.1.5 installation may still need one renderer reload as its old provider retires. Save unsent drafts before migration; Connections never reloads automatically. See [Desktop migration details](harness-compatibility.md#updating-an-open-rc3-desktop).
+Local requirements are Harness `0.2.1-rc.5`, Node.js ≥22.12 and system OpenSSH.
+For older Connections installations and shortcut configuration migration, see
+[compatibility](harness-compatibility.md#updating-an-open-rc3-desktop).
 
 Configure SSH normally and verify `ssh devbox` in a terminal first. Connections uses noninteractive key/agent authentication and existing `known_hosts`. Password prompts and first-use host trust are handled in the terminal. Ports, IPv6 targets, jump hosts and other settings belong in SSH config.
 
@@ -66,13 +66,13 @@ The service has `Restart=on-failure` and is enabled for the user's systemd targe
 
 When Connections refreshes its own remote content bundle, it asks the native plugin manager to apply that change without restarting the Host. It records success only after native activation succeeds. If Harness reports that a restart is required, Connections reports that requirement and leaves the Host running.
 
-The connection list shows the actual preparation, tunnel and authentication stages while connecting or updating. Startup restore runs at most four hosts concurrently and starts the next as soon as a slot is free. Manually disconnecting or editing a queued host takes precedence. The settings list pauses automatic polling in a hidden page and refreshes when it becomes visible again. These changes do not enable automatic retries after an unexpected disconnection; use **Reconnect** to restore access.
+The connection list shows the actual preparation, tunnel and authentication stages while connecting or updating. The settings list pauses automatic polling in a hidden page and refreshes when it becomes visible again. These changes do not enable automatic retries after an unexpected disconnection; use **Reconnect** to restore access.
 
 ## Explicit updates
 
 Enable the connection, then open **More actions → Update remote Harness**. The dialog defaults to the **latest compatible version**, currently `0.2.1-rc.5`, and shows the exact target without a version input. Choose **Update** to proceed or **Cancel** to leave it unchanged. Updating an already current Host does not restart it. Ordinary connect never upgrades the installed version.
 
-“Latest compatible” means the newest version verified for the bundled remote content, not an unvalidated npm dist-tag. The npm `latest` tag observed on 2026-10-29 still pointed to rc.2, while `next` pointed to rc.4; installing `@latest` blindly could downgrade rc.3. If a managed installation already uses a version outside this plugin's verified list, a default update stops and asks you to update Connections rather than replacing that installation. The typed update API retains explicit exact-version selection for deliberate recovery; unknown versions and ranges are rejected. Local runtime compatibility remains exactly rc.5 while the private shortcut and remote settings/account contracts are version-reviewed.
+“Latest compatible” means the newest version verified for the bundled remote content, not an unvalidated npm dist-tag. If a managed installation already uses a version outside this plugin's verified list, a default update stops and asks you to update Connections rather than replacing that installation. The typed update API retains explicit exact-version selection for deliberate recovery; unknown versions and ranges are rejected. Local runtime compatibility remains exactly rc.5 while the private shortcut and remote settings/account contracts are version-reviewed.
 
 Let running tasks finish before submitting: updating restarts the remote Host. The new package is installed and validated first. The updater then snapshots the managed Harness home and agents directory while stopped, switches release, and checks native authentication. Failed startup rolls back the previous release and managed state. It does not snapshot or revert project files outside those directories. A rollback failure preserves the recovery snapshot and reports the error.
 
@@ -129,7 +129,7 @@ Adding a target, provisioning a launch credential, opening a content view and co
 
 Open **Settings → Connections → Review damaged saved records** to list damaged recognized current/legacy records. This is an explicit read, not another background poll. Export downloads a **redacted diagnostic, not a recoverable credential backup**. To delete, first export, stop other writers and explicitly acknowledge permanent loss and the process-local concurrency boundary. A changed/expired receipt, a now-valid record or an unsafe-to-fingerprint payload refuses cleanup; refresh and inspect rather than replaying deletion.
 
-Native credentials has no compare-and-delete: the guard only serializes Connections operations sharing the same provider object in one process. It cannot exclude another process/caller between its reread and exact-key delete. Unknown scopes/invalid keys are never claimed. See [diagnostic limits](<review-followup.md#诊断导出不是凭据备份>).
+Native credentials has no compare-and-delete: the guard only serializes Connections operations sharing the same provider object in one process. It cannot exclude another process/caller between its reread and exact-key delete. Unknown scopes/invalid keys are never claimed.
 
 ## Troubleshooting
 

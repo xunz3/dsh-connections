@@ -1,17 +1,15 @@
 # Performance and remaining costs
 
-The 2026-10-30 source follow-up removes a sequential duplicate connection-list
-read, pauses the view bridges while hidden, and replaces one whole-catalog
-string allocation with bounded-array hash batches. These are specific measured
-or regression-tested changes, not a claim that a multi-document remote client
-has become a single lightweight renderer. See [review follow-up](<review-followup.md>).
+This document separates deterministic scheduling limits from dated measurements.
+The samples below are small-workload baselines, not a portable performance budget
+or a whole-application before/after comparison.
 
 ## Scheduling and deterministic budgets
 
 Workspace and Settings share one visible-page timer (nominal 2.5 seconds, ±10%
 jitter). Each subscriber has its own in-flight guard, so a slow catalog does not
 stall Settings. Concurrent connection-list reads coalesce; mutations invalidate
-the sample. A catalog refresh now reuses its one list for its own view check.
+the sample. A catalog refresh reuses its one list for its own view check.
 Standalone navigation/checks still obtain fresh authority. Capturing the view
 generation before that list prevents a slow catalog from checking a new lease
 against old transport rows.
@@ -42,9 +40,7 @@ durable cross-renderer exactly-once store.
 Changed catalogs remain below 256 KiB per page, including split workspace
 membership. Unchanged revisions omit row payload; client identity remains the
 same. Snapshot expiry/LRU remains eight revisions/64 MiB of history, retaining
-the current snapshot even if it alone exceeds the budget. The unchanged path
-already skipped pagination before this follow-up; that is not claimed as a new
-optimization.
+the current snapshot even if it alone exceeds the budget. Unchanged reads skip pagination, but still enumerate and project native data.
 
 The revision hashes exactly the previous projected JSON bytes, including paths,
 optional fields, membership, archive/pin state and all native array order.
@@ -64,51 +60,24 @@ navigation walks only currently mounted visible rows.
 node --expose-gc --import tsx scripts/benchmark-catalog.ts
 ```
 
-One local run on 2026-10-30, Node v26.5.0, 5 warmups and 30 measured iterations:
+A 2026-11-03 run used Node v26.5.0, 5 warmups and 30 measured iterations:
 
-| Sessions | Projected bytes | Whole JSON hash p50 / p95 ms | Batched hash p50 / p95 ms |
-| --- | ---: | ---: | ---: |
-| 1,000 | 130,513 | 0.750 / 0.987 | 0.738 / 1.348 |
-| 20,000 | 2,731,713 | 20.401 / 28.281 | 12.669 / 13.700 |
+| Sessions | Whole JSON hash p50 / p95 ms | Batched hash p50 / p95 ms |
+| --- | ---: | ---: |
+| 1,000 | 0.775 / 0.989 | 0.891 / 1.230 |
+| 20,000 | 21.763 / 39.733 | 12.632 / 15.022 |
 
-The small-case p95 did not improve in this sample. The script emits GC-sensitive
-heap deltas for investigation; they are not peak-heap measurements or a portable
-memory budget. A per-row streaming prototype was measurably slower and was
-replaced by batches before adoption. These numbers measure **projected hashing
-only**, not native Host scan time, renderer CPU, network throughput, or navigation
-latency, and should be rerun on the target platform.
-
-A 2026-11-03 rerun with the same runtime, warmups and iteration counts measured
-whole/batched p50–p95 of **0.775–0.989 / 0.891–1.230 ms** at 1,000 sessions and
-**21.763–39.733 / 12.632–15.022 ms** at 20,000 sessions. The small case was slower
-with batching; the larger hash-only case improved. This benchmark was not run
-concurrently with the final native resource sample below.
+The small case was slower with batching; the larger hash-only case improved.
+These numbers measure projected hashing only, not native enumeration, renderer
+CPU, network throughput or navigation. The script's GC-sensitive heap deltas
+are not peak-heap measurements. Rerun on the target platform, separately from
+native resource sampling.
 
 ## Agent tool prompt/output budget — 2026-10-31
 
 The optional local Host tool is one combined `connections` action schema, with no additional system-prompt section. Its added first-turn schema contribution was measured with the installed DSH token-meter `estimateToolsTokens` fixed-density heuristic (rc.3): **0 → 829 estimated tokens**, one tool, **3,304 UTF-8 JSON bytes**. This compares this plugin's absent/present tool contribution, not the complete session prompt; it is not a provider tokenizer or billing count. No model request was submitted. The runtime tool authoring/registry contract is checked against the exact rc.5 SDK, not inferred from this estimator's version.
 
 List/catalog responses default to 20 and cap at 50 rows; catalog paths cap at 1,024 characters with a truncation flag, and large workspace membership is a count. These bounds protect model context, not the cost of collecting the native catalog: each catalog action still consumes a complete immutable catalog through the existing paged protocol. There is no new session index, mirrored log or claimed O(1) server search. Mutations stay exclusive, because even a list can reconcile a stale transport or migrate credential keys.
-
-## Dependency-convergence artifact sizes — 2026-11-01
-
-Compared with the checked 2026-10-31 SSH-completion candidate, using the same
-non-minified production build format:
-
-| Artifact | Previous bytes | Current bytes |
-| --- | ---: | ---: |
-| Local Client JavaScript | 338,907 | 367,080 |
-| Nested remote content archive (`dist/remote-plugin.tgz`) | 2,524,170 | 60,823 |
-
-The local bundle grows because its controls/stores are now owned source instead
-of imports of Harness Client runtime modules. The remote package no longer
-contains the native Account factory, its embedded assets or copied CSS. Native
-Account is still supplied by the destination Harness: this archive reduction is
-**not** a measurement of total page downloads, renderer memory, CPU, first paint
-or navigation p95. The retained Settings store updates only a shallow snapshot
-and does not add a recursive equality scan of the complete settings document.
-A 100-row browser regression checks one owned control stylesheet at the View
-boundary rather than a complete duplicate per row.
 
 ## Native resource sampling — 2026-11-03
 

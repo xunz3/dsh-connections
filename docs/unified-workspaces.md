@@ -1,6 +1,6 @@
 # Unified Workspaces
 
-Connections supplies one local navigation surface for workspaces owned by different Harness Hosts. Local runtime admission remains exact `0.2.1-rc.5`, with reviewed remote rc.2/rc.3/rc.5 content. No Harness source fork is required. Current changes and incomplete review items are tracked in the [review follow-up](<review-followup.md>).
+Connections supplies one local navigation surface for workspaces owned by different Harness Hosts. Local runtime admission remains exact `0.2.1-rc.5`, with reviewed remote rc.2/rc.3/rc.5 content. No Harness source fork is required. Remaining capabilities are listed in the [roadmap](roadmap.md).
 
 ## Interaction
 
@@ -22,7 +22,11 @@ No native sidebar factory or copied CSS is built into Connections. A client fact
 
 The managed remote Host installs a separately built content bundle with its own explicit compatibility list. Its patch disables native `ui-layout` and `ui-settings`, keeps the native Account deployment, and enables Connections with `embedded: true`. Connections supplies the public `ILayout` contract and declares the native main, rightbar, bottom and overlay slots. Conversation, files and the plugin manager keep their native components without a second visible sidebar. A separate settings view reuses the remote native settings shell when selected from the local Settings header.
 
-Before providing the embedded layout, the remote bootstrap obtains the surrounding application's interface preferences through its authenticated view lease. A version-checked native `ui-settings` factory retains the original ConfigForms service, extending only its public `get` method for the explicit UI preference namespaces. Every model/provider, permission and privacy form keeps its native remote write queue; the remote schema directory is unchanged. The original locale/theme plugins consume these forms normally. The remaining Settings bootstrap explicitly receives a Connections-owned snapshot-store dependency, so it imports no Harness Client runtime module. Account keeps its independently deployed native plugin, account stream and remote operations; public slot delegation replaces only the sign-in presenter and browser open/copy capabilities. No Account factory or stylesheet is copied. The Settings constructor seam remains version-checked because existing Client APIs cannot install a form projection before all native consumers without that bootstrap. The content-only artifact owns this embedded profile; the local Host configuration rejects embedded mode. See [settings ownership](host-settings.md) for the exact preference boundary.
+Remote bootstrap obtains the surrounding application's presentation preferences
+before native consumers activate. A checked Settings constructor projects those
+preferences; execution forms and Account remain destination-owned. See
+[compatibility](harness-compatibility.md) for adapter checks and
+[settings ownership](host-settings.md) for the preference boundary.
 
 Web renders that content in a same-site loopback iframe. Desktop renders through Harness's existing isolated guest lease API. A checked, reversible resolver adapter on the existing native shortcut service resolves workspace command ownership before dispatch; Connections does not replace that service or its configuration. Separate documents preserve native session binding, media and upload origins, keyboard handlers, approvals and scoped file capabilities. No remote SessionReference is passed to the local session controller. The native ModuleLoader still builds and loads the normal plugin graph; Connections does not alter that graph in the browser.
 
@@ -53,14 +57,6 @@ Explicit Reconnect creates a new transport generation, re-runs managed preparati
 Opening content creates a random view channel. Its fragment identifier is passed to the remote document; it carries no launch credential or executable instruction. The parent sends a typed navigation intent through its authenticated local RPC. The child polls its same-origin endpoint and invokes native navigation, including native `startSession` for new chats. It reports presentation readiness separately from the completed selection: a mounted directory picker is ready to interact with before a directory is chosen. Revisions reject stale reports; request IDs make navigation delivery idempotent. Channels have expiry, capacity limits and explicit disposal. A per-tab, per-surface client identity rotates the old server channel on reload; copied active tab storage receives a new identity. Settings and workspace channels are independent. Active catalog page reads renew snapshot expiry; historical snapshots use bounded LRU retention (up to eight revisions and 64 MiB, keeping the current revision), with one clean retry after eviction. The HTTP rendezvous works in browser frames and Desktop guests. Desktop Settings also uses its settings navigation revision to exchange the host-menu metadata and a single validated host selection.
 
 Prompts, logs, tools, uploads and approval responses use the original remote Harness transport. The bridge does not mirror or replay them. Closing a view expires that presentation channel, not the native session or remote service.
-
-## References and choices
-
-The [Codex source review](codex-reference.md) informed source ownership and the separation between transport and session lifetime. Public Codex code covers app-server/TUI behavior; its desktop Projects implementation is not part of that repository.
-
-[Golden-Pigeon/dsh-remote](https://github.com/Golden-Pigeon/dsh-remote/tree/30554c99d25688134afce8c87929ffa9cffef8a1) already integrates remote work into the native sidebar. It creates local Workspace/Session mirrors and an Agent facade, then coordinates log projections, approvals, files and terminal routing. It also intercepts native navigation and DOM events. Connections borrows the source-labelled navigation idea, while keeping all remote session state and content execution at its original Host. This keeps the integration focused on connections and avoids maintaining a second session projection.
-
-[flymysql/dsh-remote](https://github.com/flymysql/dsh-remote) provides file mirroring and a full native Web attachment flow. [blank-dsh-remote](https://github.com/Blank-not-black/dsh-Remote) is a separate remote access application. Neither is a dependency of this plugin. No reference source is vendored.
 
 ## Verification and limits
 
