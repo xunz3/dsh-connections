@@ -4,7 +4,7 @@
 
 | Component | Admitted Harness versions |
 | --- | --- |
-| Connections 0.1.9 on the local Host | Exactly `0.2.1-rc.5` |
+| Connections 0.1.10 on the local Host | Exactly `0.2.1-rc.5` |
 | Remote content bundle | `0.2.1-rc.2`, `0.2.1-rc.3`, `0.2.1-rc.5` |
 | New managed installation | Starts with `0.2.1-rc.2` |
 | Explicit remote update default | Latest admitted version, `0.2.1-rc.5` |
@@ -54,6 +54,12 @@ Remote workspaces and Settings use Harness's native version-1 guest lease bridge
 with acquisition, release and popup subscription. Browser access requires HTTP
 localhost/127.0.0.1 on the local Harness computer; a custom URL scheme alone does
 not establish Desktop support.
+
+The embedded layout does not declare or mount `shell.leading`: its sidebar and
+New Session buttons belong to the outer application. Native content, rightbar,
+bottom and overlay slots remain available; Settings mounts the native sidebar
+under a hidden container to retain its dialog and slot lifecycle. A declared
+slot is not an instruction to display window chrome unconditionally.
 
 The list's New Session action and keyboard command follow the selected Host;
 the native top New Session button returns to the local Host. Search/add use the

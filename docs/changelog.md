@@ -2,6 +2,18 @@
 
 Selected changes from 0.1.6 onward. Runtime requirements and migration instructions are maintained in [Harness compatibility](harness-compatibility.md).
 
+## 0.1.10
+
+- Remove the remote embedded `shell.leading` seat that duplicated the outer
+  Desktop sidebar and New Session controls. Remote workspaces and Settings keep
+  their native content and dialogs; window navigation stays with the outer shell.
+- Remove the unused embedded sidebar callback and workspace translation argument.
+  Require the native startup source and panel transaction in the navigation guard
+  instead of retaining its obsolete ungated path.
+- Replace the historical failure-only test with the existing startup regressions;
+  consolidate duplicate chrome assertions, extend native theme-token validation
+  to embedded views, and remove stale test mocks and source-import checks.
+
 ## 0.1.9
 
 - Preserve the native sidebar and independently deployed Account provider. Remove
