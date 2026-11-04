@@ -2,6 +2,27 @@
 
 Current source behavior and partial/unimplemented review items are recorded in the [review follow-up](<review-followup.md>). The latest verification is below; older dated entries describe their historical archives, not the current working tree.
 
+## 0.1.9 release validation — 2026-11-04
+
+TypeScript and the production build passed. The 54-file npm package and its
+remote archive passed export, input-integrity, contract and documentation-link
+checks. All **100 Chromium fixture tests** passed with
+`DSH_DESKTOP_CONTRACT=1`, including the six native-theme cases. These fixture
+checks complement the packaged Windows/WSL evidence below.
+
+The first full Node pass exposed a stale hand-written theme-token allowlist:
+the corrected primary-button tokens existed in rc.5 but were absent from the
+list. The contract test now checks definitions in the installed native theme,
+and its seven focused UI/theme regressions pass. No production styling was
+changed during release preparation. The subsequent full run passed **541 tests**,
+with **one Windows-only test skipped** on Linux and no failures. Both real
+OpenSSH and systemd validation opt-ins were enabled.
+
+The previously observed remote-reopen presentation timeout remains unresolved;
+publication does not turn the earlier partial native acceptance into a clean
+full-suite result. GitHub Actions runs the installed local/remote runtime matrix
+against its checked release archive before npm publication.
+
 ## Windows Desktop and WSL acceptance — 2026-11-04
 
 The checked candidate was loaded into a separate instance of the **packaged

@@ -1,6 +1,6 @@
 # Harness compatibility
 
-Connections 0.1.8 targets local Harness `0.2.1-rc.5`. Remote content explicitly
+Connections 0.1.9 targets local Harness `0.2.1-rc.5`. Remote content explicitly
 admits `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.5`. The local engine remains
 exact: use Connections 0.1.7 for local rc.3, or 0.1.0 for local rc.2.
 Published 0.1.7 is rejected by Harness rc.5's native compatibility evaluator;

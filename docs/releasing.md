@@ -4,6 +4,28 @@ The npm package is `@xunz03/dsh-connections`. The source repository is
 `xunz3/dsh-connections`; it is currently private. npm contains the built plugin,
 the remote content archive, declarations, license and usage documentation.
 
+## 0.1.9
+
+- Preserve the native sidebar and independently deployed Account provider. Remove
+  Harness Client runtime imports and the copied sidebar/Account factories;
+  retain checked Settings-constructor and shortcut-resolver adapters.
+- Use owned, theme-aware controls with keyboard/focus handling, native modal/menu
+  coexistence and corrected rc.5 hover/status tokens. Add keyboard workspace
+  navigation and safe redacted connection diagnostics.
+- Bind remote actions, authentication and presentation to transport generations;
+  recover managed-Host reconnects and native startup navigation, bound SSH
+  lifecycle output and cleanup, and share validated operations with the optional
+  owner-authorized `connections` tool.
+- Bound catalog revision work and suspend hidden catalog reads. Record resource
+  baselines and Windows Desktop/WSL acceptance without claiming a measured
+  before/after speedup or closing the observed remote-reopen timeout.
+
+Local Harness remains exactly `0.2.1-rc.5`; admitted remote versions remain rc.2,
+rc.3 and rc.5. Settings/Account content contracts advance to revision 2: older
+remote content must be updated and reopened. Installing this package does not
+upgrade a running remote Harness service. See [compatibility](harness-compatibility.md),
+[review boundaries](review-followup.md) and [validation evidence](development.md).
+
 ## 0.1.8
 
 - Target exact local Harness rc.5 and admit remote rc.5 alongside rc.2/rc.3.

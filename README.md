@@ -23,7 +23,7 @@ dsh plugin --profile web add @xunz03/dsh-connections
 
 在运行本地 Harness 的同一台电脑上，通过原生 Desktop 或 HTTP 浏览器打开远端工作区。在设置页选择本地或某个远端，管理该电脑的模型账号；API 凭据与插件均不自动共享，详见[设置与插件归属](docs/host-settings.md)。托管模式自动安装远端内容插件；已有服务需安装随包提供的远端插件包，见使用文档。
 
-0.1.8 适配 Harness rc.5，远端保留 rc.2/rc.3 并新增 rc.5。详见[兼容性说明](docs/harness-compatibility.md)。
+0.1.9 保持 Harness rc.5 本机适配与 rc.2/rc.3/rc.5 远端兼容，保留原生侧栏与 Account，并改进主题、导航和 SSH 生命周期。详见[兼容性说明](docs/harness-compatibility.md)。
 
 0.1.7 捕获 Windows SSH 子进程启动异常，避免因此终止 Host；同时改善通道隔离、连接清理、归档确认和轮询稳定性。详见[版本说明](docs/releasing.md#017)。
 
