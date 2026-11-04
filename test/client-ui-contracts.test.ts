@@ -27,9 +27,11 @@ test('row atoms do not duplicate the full control stylesheet and use only inspec
   assert.equal((html.match(/<style/g) ?? []).length, 1)
   assert.equal((html.match(/data-state="ongoing"/g) ?? []).length, 200)
   const tokens = new Set([...uiStyles.matchAll(/var\((--[a-z0-9-]+)/g)].map(match => match[1]))
-  const allowed = new Set(['bg-base', 'bg-layer-1', 'bg-layer-2', 'bg-overlay', 'border-l1', 'border-l2', 'brand-primary',
-    'label-primary', 'label-secondary', 'state-error-primary', 'state-idle-primary', 'state-success-primary', 'state-warn-primary'].map(name => `--dsw-alias-${name}`))
-  assert.ok([...tokens].every(token => allowed.has(token)), [...tokens].join(', '))
+  const nativeTheme = readFileSync(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-theme/client')), 'utf8')
+  const defined = new Set([...nativeTheme.matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)].map(match => match[1]))
+  assert.ok(defined.size > 0, 'The installed native theme must expose its token definitions')
+  const missing = [...tokens].filter(token => !defined.has(token))
+  assert.deepEqual(missing, [], `Undefined native theme tokens: ${missing.join(', ')}`)
   assert.equal(/#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\(/i.test(uiStyles), false)
 })
 
