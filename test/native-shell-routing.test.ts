@@ -326,7 +326,7 @@ test('canRoute requires native discovery and shortcut readiness, and only readin
   let workspaceAllowed!: () => boolean, settingsAllowed!: () => boolean
   provideData(f)
   const owner = f.ctx.plugin(loadRoot({
-    './workspaces.js': { installWorkspaces(_ctx: unknown, _api: unknown, _t: unknown, canRoute: () => boolean) { workspaceAllowed = canRoute; return workspace } },
+    './workspaces.js': { installWorkspaces(_ctx: unknown, _api: unknown, canRoute: () => boolean) { workspaceAllowed = canRoute; return workspace } },
     './host-settings.js': { installHostSettings(_ctx: unknown, _api: unknown, canRoute: () => boolean) { settingsAllowed = canRoute; return settings } },
     './native-shortcuts.js': { installNativeShortcuts(_ctx: unknown, _resolve: unknown, onReady: typeof ready) { ready = onReady; ready(false) } },
   }))
@@ -439,7 +439,7 @@ test('navigation transactions nest and rearm the native guard even after a synch
   const f = fixture(), remote = remoteHandle(), transaction = routing.createNavigationTransaction()
   const stop = routing.watchNativeNavigation(f.layout, {
     getSnapshot: remote.hasNavigationIntent, subscribe: remote.subscribe, close: remote.close,
-  }, transaction)
+  }, transaction, f.ctx.uiSession.adapter.current)
   try {
     assert.equal(f.navigations, 0)
     remote.set({ id: 'remote' })
@@ -467,7 +467,7 @@ test('the root passes one internal panel transaction to its workspace installer 
     await f.ctx.plugin(nativeSidebar)
     provideData(f)
     const owner = f.ctx.plugin(loadRoot({
-      './workspaces.js': { installWorkspaces(_ctx: unknown, _api: unknown, _t: unknown, _canRoute: unknown, _commands: unknown, internal: typeof navigatePanel) {
+      './workspaces.js': { installWorkspaces(_ctx: unknown, _api: unknown, _canRoute: unknown, _commands: unknown, internal: typeof navigatePanel) {
         navigatePanel = internal; return workspace
       } },
       './host-settings.js': { installHostSettings: () => settings },

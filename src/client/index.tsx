@@ -92,7 +92,7 @@ function installShell(ctx: Context, routing: {
         const api = createApi(connection)
         const canRoute = () => routed && routing.canRoute()
         const navigation = createNavigationTransaction()
-        const workspaces = installWorkspaces(connection, api, t, canRoute, routing.setCommands, navigation.run)
+        const workspaces = installWorkspaces(connection, api, canRoute, routing.setCommands, navigation.run)
         const hostSettings = installHostSettings(connection, api, canRoute)
         const close = () => { try { workspaces.close() } finally { hostSettings.close() } }
         closeRemote = close

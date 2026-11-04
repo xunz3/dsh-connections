@@ -9,7 +9,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type { ConnectionsApi, ConnectionView } from '../shared/types.js'
-import type { Translate } from './messages.js'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
@@ -125,7 +124,7 @@ export function RemoteWorkspace({ controller, t, bridge }: {
 }
 
 /** Compose the native shell through public slots; remote content owns no local Session. */
-export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, _t: Translate, canRoute = () => true, onCommands?: (resolver: NativeCommandResolver) => () => void, navigatePanel: (action: () => void) => void = action => action()): WorkspaceController {
+export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, canRoute = () => true, onCommands?: (resolver: NativeCommandResolver) => () => void, navigatePanel: (action: () => void) => void = action => action()): WorkspaceController {
   const bridge = desktopBrowser()
   let workspaceReady = false
   let ownsWorkspaces = () => false

@@ -24,7 +24,6 @@ function fixture() {
   } } } }
   runInNewContext(compiled, { module, exports: module.exports,
     require(name: string) {
-      if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Menu: () => null, IconEllipsisOutlineRegular: () => null }
       if (name !== 'react') return nativeRequire(name)
       return { ...nativeRequire('react'),
         useState: () => [state, (value: unknown) => { state = value }],

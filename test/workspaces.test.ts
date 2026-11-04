@@ -834,7 +834,7 @@ async function workspaceNavigationFixture(prepare?: (f: ReturnType<typeof fixtur
   }
   const settings = new WorkspaceController(f.api, { catalogs: false })
   const transaction = createNavigationTransaction()
-  const workspace = installWorkspaces(context as never, f.api as never, () => '', () => true, undefined, transaction.run)
+  const workspace = installWorkspaces(context as never, f.api as never, () => true, undefined, transaction.run)
   const stop = watchNativeNavigation(layout, {
     getSnapshot: () => workspace.hasNavigationIntent() || settings.getSnapshot() !== undefined,
     subscribe(listener) { const offWorkspace = workspace.subscribe(listener), offSettings = settings.subscribe(listener); return () => { offWorkspace(); offSettings() } },
@@ -1061,7 +1061,7 @@ test('production workspace installation opens native desktop views through the v
       inject(_slot: string, install: () => () => void) { effects.push(install()) } },
   }
   let resolveCommand: import('../src/client/native-shortcuts.js').NativeCommandResolver | undefined
-  const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '', () => true, resolve => {
+  const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => true, resolve => {
     resolveCommand = resolve; return () => { resolveCommand = undefined }
   })
   try {
@@ -1134,7 +1134,7 @@ test('native slot delegation preserves the original leaf and follows its registr
   }
   try {
     const f = fixture()
-    const controller = installWorkspaces(context as never, f.api as never, () => '')
+    const controller = installWorkspaces(context as never, f.api as never)
     assert.equal(controller.getCatalogs().selected.sessionId, 'reused-local-draft', 'already restored native sessions are sampled without a change event')
     assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, earlyForeign, 'a preexisting -1 provider is never replaced')
     await controller.open(first, { kind: 'session', id: 'chat' })
@@ -1240,7 +1240,7 @@ test('missing list dependencies and shadow factory failure cannot authorize a re
       },
     }
     try {
-      const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '')
+      const f = fixture(), controller = installWorkspaces(context as never, f.api as never)
       await controller.open(first, { kind: 'session', id: 'chat' })
       assert.equal(controller.getSnapshot()?.error, 'compositionUnavailable')
       assert.equal(f.views.size, 0)
@@ -1376,7 +1376,7 @@ test('production workspace installation revokes tab callbacks with its Cordis ow
     inject() {},
     effect(factory: () => () => void) { effects.push(factory()) },
   }
-  const controller = installWorkspaces(context as never, f.api as never, () => '')
+  const controller = installWorkspaces(context as never, f.api as never)
   try {
     assert.equal(getEventListeners(window, 'pagehide').length, 1)
     assert.equal(getEventListeners(window, 'pageshow').length, 1)

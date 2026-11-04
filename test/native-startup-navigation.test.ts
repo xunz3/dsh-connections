@@ -130,8 +130,8 @@ function fixture(deferRemote = false) {
     get currentPublications() { return currentPublications },
     nativeReady() { workspaces.set({ ...workspaces.getSnapshot(), phase: 'ready' }); sessions.set({ ...sessions.getSnapshot(), phase: 'ready' }) },
     completeNative() { nativeGate.resolve() }, completeRemote() { remoteGate.resolve() },
-    mount(withReadiness = true) {
-      stop = withReadiness ? watchNativeNavigation(layout, source, transaction, current) : watchNativeNavigation(layout, source, transaction)
+    mount() {
+      stop = watchNativeNavigation(layout, source, transaction, current)
       return () => { stop?.(); stop = undefined }
     },
     async dispose() {
@@ -139,22 +139,6 @@ function fixture(deferRemote = false) {
     },
   }
 }
-
-test('published rc.5 automatic blank restoration reproduces destructive legacy guard cancellation without a readiness source', async t => {
-  const f = fixture()
-  t.after(() => f.dispose())
-  await f.controller.restore(); await settled()
-  assert.equal(f.controller.getSnapshot()?.phase, 'ready')
-  f.mount(false)
-  assert.equal(f.begins, 1)
-  f.nativeReady()
-  assert.equal(f.closed, 1, 'this close comes from the actual native startup beginNavigation, not a simulated click')
-  assert.equal(f.controller.getSnapshot(), undefined)
-  assert.equal(f.storage.has(savedKey), false)
-  assert.ok(f.removed.includes(savedKey))
-  f.completeNative(); await settled()
-  assert.deepEqual(f.nativeCreates, [{ workspaceId: localWorkspace, sessionId: localBlank }])
-})
 
 for (const deferRemote of [false, true]) {
   test(`public first-main readiness preserves ${deferRemote ? 'pending' : 'already-open'} remote restoration through actual native blank startup`, async t => {

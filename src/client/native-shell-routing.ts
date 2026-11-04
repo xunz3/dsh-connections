@@ -104,9 +104,9 @@ export function waitForNativeStartup(session: NativeSessionSource, workspaces: {
  * has committed. Afterwards latch readiness: explicit New Session may reuse
  * the same blank/key/panel and must still supersede pending remote intent.
  */
-export function watchNativeNavigation(layout: Pick<ILayout, 'beginNavigation'>, source: RemoteNavigationSource, transaction?: NavigationTransaction, session?: NativeSessionSource): () => void {
+export function watchNativeNavigation(layout: Pick<ILayout, 'beginNavigation'>, source: RemoteNavigationSource, transaction: NavigationTransaction, session: NativeSessionSource): () => void {
   let active = true
-  let ready = session === undefined || session.getSnapshot().key !== undefined
+  let ready = session.getSnapshot().key !== undefined
   let queued = false
   let closing = false
   let signal: AbortSignal | undefined
@@ -118,20 +118,20 @@ export function watchNativeNavigation(layout: Pick<ILayout, 'beginNavigation'>, 
   }
   const sync = () => {
     if (!active || closing) return
-    if (!ready || transaction?.getSnapshot() || !source.getSnapshot()) { clear(); return }
+    if (!ready || transaction.getSnapshot() || !source.getSnapshot()) { clear(); return }
     if (signal !== undefined) return
     const next = layout.beginNavigation()
     // Superseding an older native navigation may synchronously update state.
-    if (!active || transaction?.getSnapshot() || !source.getSnapshot()) return
+    if (!active || transaction.getSnapshot() || !source.getSnapshot()) return
     signal = next
     next.addEventListener('abort', navigate, { once: true })
     if (next.aborted) navigate()
   }
   // Withdraw the old abort listener before our own panel actions and rearm only
   // after the complete synchronous transaction (including nested actions) ends.
-  const offTransaction = transaction?.subscribe(sync)
+  const offTransaction = transaction.subscribe(sync)
   const unsubscribe = source.subscribe(sync)
-  const offSession = session?.subscribe(() => {
+  const offSession = session.subscribe(() => {
     if (ready || queued || session.getSnapshot().key === undefined) return
     queued = true
     // retain() may publish the binding before native replaceMain checks its
@@ -144,5 +144,5 @@ export function watchNativeNavigation(layout: Pick<ILayout, 'beginNavigation'>, 
     })
   })
   sync()
-  return () => { active = false; unsubscribe(); offSession?.(); offTransaction?.(); clear() }
+  return () => { active = false; unsubscribe(); offSession(); offTransaction(); clear() }
 }

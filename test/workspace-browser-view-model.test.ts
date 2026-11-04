@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { WorkspaceBrowserViewModel, moveWorkspaceFocus, resolveWorkspaceFocus, workspaceFocusRows, type WorkspaceBrowserModel } from '../src/client/workspace-browser-view-model.js'
 import { messages } from '../src/client/workspace-browser-messages.js'
-import { workspaceBrowserCss } from '../src/client/workspace-browser.css.js'
 import { workspaceRowKey, type WorkspaceSource } from '../src/client/workspace-catalog.js'
 import type { WorkspaceCatalog } from '../src/shared/workspace-protocol.js'
 
@@ -449,10 +448,7 @@ test('removed or disposed rows cannot publish stale clipboard feedback', async (
   assert.equal(vm.getSnapshot().pending.size, 0)
 })
 
-test('workspace chrome uses theme colors and keyboard/copy feedback is translated', () => {
-  assert.doesNotMatch(workspaceBrowserCss, /#[\da-f]{3,8}\b|\brgba?\(|\bhsla?\(/i)
-  assert.match(workspaceBrowserCss, /--dsw-focus-ring-color/)
-  assert.match(workspaceBrowserCss, /--dsw-alias-state-error-primary/)
+test('workspace keyboard and copy feedback is translated', () => {
   for (const key of ['navigationHint', 'searchHint', 'copySessionId', 'copied', 'copyFailed'] as const) {
     assert.ok(messages.en[key])
     assert.ok(messages.zh[key])

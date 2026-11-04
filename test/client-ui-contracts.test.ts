@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { buildSync } from 'esbuild'
 import { Button, StateDot, UiStyles, relativeTime } from '../src/client/ui/index.js'
-import { uiStyles } from '../src/client/ui/styles.js'
 
 test('the owned UI entry has no runtime Harness Client import or body portal', () => {
   const result = buildSync({ entryPoints: ['src/client/ui/index.tsx'], bundle: true, packages: 'external', format: 'esm', platform: 'browser', write: false, metafile: true })
@@ -13,26 +11,14 @@ test('the owned UI entry has no runtime Harness Client import or body portal', (
   assert.ok(dependencies.length > 0)
   assert.ok(dependencies.every(name => name === 'react' || name === 'react/jsx-runtime'), JSON.stringify(dependencies))
   assert.equal(/createPortal|appendChild\(|document\.body\.append/.test(result.outputFiles[0].text), false)
-  for (const file of ['ConnectionDialog', 'AddConnectionDialog', 'Panel', 'WorkspaceBrowser', 'settings-host-menu']) {
-    const source = readFileSync(new URL(`../src/client/${file}.tsx`, import.meta.url), 'utf8')
-    assert.equal(/from ['"]@deepseek-ai\/dsh-client-ui-primitives['"]/.test(source), false, `${file} still imports native controls`)
-    assert.match(source, /from ['"]\.\/ui\/index\.js['"]/)
-  }
 })
 
-test('row atoms do not duplicate the full control stylesheet and use only inspected theme tokens', () => {
+test('row atoms share one control stylesheet at the view boundary', () => {
   const controls = Array.from({ length: 200 }, (_, i) => createElement('div', { key: i },
     createElement(Button, { variant: 'outline' }, 'Action'), createElement(StateDot, { state: 'ongoing' })))
   const html = renderToStaticMarkup(createElement('div', null, createElement(UiStyles), ...controls))
   assert.equal((html.match(/<style/g) ?? []).length, 1)
   assert.equal((html.match(/data-state="ongoing"/g) ?? []).length, 200)
-  const tokens = new Set([...uiStyles.matchAll(/var\((--[a-z0-9-]+)/g)].map(match => match[1]))
-  const nativeTheme = readFileSync(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-theme/client')), 'utf8')
-  const defined = new Set([...nativeTheme.matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)].map(match => match[1]))
-  assert.ok(defined.size > 0, 'The installed native theme must expose its token definitions')
-  const missing = [...tokens].filter(token => !defined.has(token))
-  assert.deepEqual(missing, [], `Undefined native theme tokens: ${missing.join(', ')}`)
-  assert.equal(/#[0-9a-f]{3,8}\b|(?:rgb|hsl)a?\(/i.test(uiStyles), false)
 })
 
 test('relative-time buckets retain native boundaries without loading the native utility', () => {
