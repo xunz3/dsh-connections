@@ -2,50 +2,73 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-typert-registry'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { RPC_NAMESPACE, RPC_PACKAGE, rpcContribution } from '../shared/rpc.js'
-import { parseId, parseOpenResult, parseSave, parseSshCheck, parseSshHosts, parseTarget, parseUpdate, parseView, parseViews } from '../shared/validation.js'
-import type { ConnectionsApi, SaveConnection, UpdateConnection } from '../shared/types.js'
-import { parseWorkspaceCall, type WorkspaceCall } from '../shared/workspace-rpc.js'
-import { parseWorkspaceResponse, WorkspaceProtocolError, WORKSPACE_ERRORS } from '../shared/workspace-protocol.js'
-
-export type WorkspaceHandler = (input: WorkspaceCall) => Promise<unknown>
+import { parseDeleteDiagnostic, parseDiagnosticDeleteResult, parseDiagnosticExportResult, parseDiagnosticList, parseDiagnosticRef } from '../shared/validation.js'
+import type { ConnectionDiagnosticRef, ConnectionsApi, DeleteConnectionDiagnostic, SaveConnection, UpdateConnection } from '../shared/types.js'
+import type { WorkspaceCall } from '../shared/workspace-rpc.js'
+import { ConnectionOperationError, ConnectionsOperations, type CONNECTION_OPERATION_ERRORS, type WorkspaceHandler } from './operations.js'
+export type { WorkspaceHandler } from './operations.js'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
-  interface RemoteErrorDetailsMap { 'connections/owner-required': Record<string, never> }
+  interface RemoteErrorDetailsMap {
+    'connections/owner-required': Record<string, never>
+    'connections/operation-failed': { code: keyof typeof CONNECTION_OPERATION_ERRORS }
+  }
 }
 
-/** Every operation, including reads and launch URL access, requires the authenticated owner. */
+/** Remote authentication is independent from the shared, same-process business core. */
 export class ConnectionsRpc extends TypertRemoteService {
-  constructor(ctx: Context, private readonly api: ConnectionsApi, private readonly workspaceHandler?: WorkspaceHandler) { super(ctx, RPC_NAMESPACE) }
+  private readonly api: ConnectionsOperations
+  constructor(ctx: Context, api: ConnectionsApi, workspaceHandler?: WorkspaceHandler) {
+    super(ctx, RPC_NAMESPACE)
+    this.api = api instanceof ConnectionsOperations ? api : new ConnectionsOperations(ctx, api, workspaceHandler)
+  }
   private owner(): void {
     if (this.ctx.invocation?.peer.principal.kind !== 'owner') {
       throw new RemoteError('connections/owner-required', 'Only the Harness owner can manage connections.', {})
     }
   }
-  async list() { this.owner(); return parseViews(await this.api.list()) }
-  async sshHosts() { this.owner(); return parseSshHosts(await this.api.sshHosts()) }
-  async checkSsh(target: string) { this.owner(); return parseSshCheck(await this.api.checkSsh(parseTarget(target))) }
-  async save(input: SaveConnection) { this.owner(); return parseView(await this.api.save(parseSave(input))) }
-  async forget(id: string) { this.owner(); await this.api.remove(parseId(id)) }
-  async connect(id: string) { this.owner(); return parseView(await this.api.connect(parseId(id))) }
-  async reconnect(id: string) { this.owner(); return parseView(await this.api.reconnect(parseId(id))) }
-  async disconnect(id: string) { this.owner(); return parseView(await this.api.disconnect(parseId(id))) }
-  async update(input: UpdateConnection) { this.owner(); return parseView(await this.api.update(parseUpdate(input))) }
-  async open(id: string) { this.owner(); return parseOpenResult(await this.api.open(parseId(id))) }
-  async workspace(value: WorkspaceCall) {
+  private async call<T>(operation: () => Promise<T>): Promise<T> {
     this.owner()
-    const input = parseWorkspaceCall(value)
-    if (!this.workspaceHandler) throw new Error('The workspace service is unavailable.')
-    try {
-      return { request: input.request, response: parseWorkspaceResponse(input.request.op, await this.workspaceHandler(input)) }
-    } catch (error) {
-      // Keep compatibility failures in the typed envelope. Typert intentionally
-      // redacts unknown thrown errors, which would otherwise erase this code.
-      if (!(error instanceof WorkspaceProtocolError)) throw error
-      return { request: input.request, response: parseWorkspaceResponse(input.request.op, {
-        ok: false, error: { code: error.code, message: WORKSPACE_ERRORS[error.code] },
-      }) }
+    try { return await operation() }
+    catch (error) {
+      if (error instanceof ConnectionOperationError) throw new RemoteError('connections/operation-failed', error.message, { code: error.code })
+      throw error
     }
   }
+  list() { return this.call(() => this.api.list()) }
+  async diagnosticRecords() {
+    this.owner()
+    try {
+      if (!this.api.diagnostics) throw new Error()
+      return parseDiagnosticList(await this.api.diagnostics.list())
+    } catch { throw new Error('Connection record diagnostics are unavailable.') }
+  }
+  async exportDiagnostic(value: ConnectionDiagnosticRef) {
+    this.owner()
+    const input = parseDiagnosticRef(value)
+    try {
+      if (!this.api.diagnostics) throw new Error()
+      return parseDiagnosticExportResult(await this.api.diagnostics.export(input))
+    } catch { return parseDiagnosticExportResult({ ok: false, code: 'UNAVAILABLE' }) }
+  }
+  async deleteDiagnostic(value: DeleteConnectionDiagnostic) {
+    this.owner()
+    const input = parseDeleteDiagnostic(value)
+    try {
+      if (!this.api.diagnostics) throw new Error()
+      return parseDiagnosticDeleteResult(await this.api.diagnostics.remove(input))
+    } catch { return parseDiagnosticDeleteResult({ ok: false, code: 'UNAVAILABLE' }) }
+  }
+  sshHosts() { return this.call(() => this.api.sshHosts()) }
+  checkSsh(target: string) { return this.call(() => this.api.checkSsh(target)) }
+  save(input: SaveConnection) { return this.call(() => this.api.save(input)) }
+  forget(id: string) { return this.call(() => this.api.remove(id)) }
+  connect(id: string) { return this.call(() => this.api.connect(id)) }
+  reconnect(id: string) { return this.call(() => this.api.reconnect(id)) }
+  disconnect(id: string) { return this.call(() => this.api.disconnect(id)) }
+  update(input: UpdateConnection) { return this.call(() => this.api.update(input)) }
+  open(id: string) { return this.call(() => this.api.open(id)) }
+  workspace(value: WorkspaceCall) { return this.call(() => this.api.workspace(value)) }
 }
 
 export function mountRpc(ctx: Context, api: ConnectionsApi, workspaceHandler?: WorkspaceHandler): void {

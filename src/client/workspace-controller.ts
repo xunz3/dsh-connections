@@ -1,9 +1,10 @@
 import { bindViewSurfaceParent, type LocalSurface } from './view-surface.js'
+import { CONNECTION_CONTRACTS, matchingConnectionContracts } from '../shared/contracts.js'
 import type { ConnectionsApi, ConnectionView } from '../shared/types.js'
 import { readWorkspaceCatalog, type WorkspaceCatalogSnapshot, type WorkspaceApi } from '../shared/workspace-rpc.js'
-import { WORKSPACE_PROTOCOL, parseWorkspaceId, type WorkspaceNavigationTarget, type WorkspaceRequest } from '../shared/workspace-protocol.js'
+import { WORKSPACE_PROTOCOL, WorkspaceProtocolError, parseWorkspaceId, type WorkspaceNavigationTarget, type WorkspaceRequest } from '../shared/workspace-protocol.js'
 import type { WorkspaceSelection, WorkspaceSource } from './workspace-catalog.js'
-import { parseId, parseOpenResult } from '../shared/validation.js'
+import { parseId, parseOpenResult, parseTransportId } from '../shared/validation.js'
 
 export interface WorkspaceState {
   id: string
@@ -54,6 +55,7 @@ export class WorkspaceController {
   private refreshing?: Promise<void>
   private refreshAgain = false
   private visible = true
+  private visibilityEpoch = 0
   private readonly catalogCache = new Map<string, WorkspaceCatalogSnapshot>()
   private readonly catalogPolls = new Map<string, { next: number; failures: number }>()
   private readonly catalogGenerations = new Map<string, number>()
@@ -61,15 +63,19 @@ export class WorkspaceController {
   private stopPoll?: () => void
   private presentationTimer?: ReturnType<typeof setTimeout>
   private presentationDeadline?: ReturnType<typeof setTimeout>
+  private presentationWatch?: { version: number; remaining: number; started?: number }
+  private presentationEpoch = 0
   private readonly allocating = new Map<string, Promise<unknown>>()
   private readonly clientId: string
   private checkFailures = 0
-  private checking?: Promise<void>
+  private checking?: { version: number; visibilityEpoch: number; promise: Promise<void> }
   private target?: WorkspaceNavigationTarget
   private surfaceChannel?: string
   private stopSurface?: () => void
   private readonly listeners = new Set<() => void>()
   readonly getSnapshot = () => this.state
+  /** Remote navigation ownership includes validated startup restoration before a view exists. */
+  readonly hasNavigationIntent = () => !this.disposed && (this.state !== undefined || this.restoring === this.version)
   readonly getCatalogs = () => this.catalogs
   readonly subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   constructor(readonly api: Api, private readonly options: WorkspaceOptions = {}) {
@@ -100,9 +106,8 @@ export class WorkspaceController {
       else this.options.storage?.setItem(STORAGE_KEY, JSON.stringify(selected))
     } catch { /* Optional preference, never a credential or mirrored session. */ }
   }
-  async restore(): Promise<void> {
+  async restore(nativeStartup?: () => Promise<void>): Promise<void> {
     const version = this.version
-    this.restoring = version
     try {
       // Native local-session restoration can arrive while catalog requests are pending.
       // Capture the preference first; only explicit navigation may supersede it.
@@ -114,14 +119,17 @@ export class WorkspaceController {
       if (selected.sessionId !== undefined) parseWorkspaceId(selected.sessionId)
       if (selected.workspaceId !== undefined) parseWorkspaceId(selected.workspaceId)
       if (selected.sessionId !== undefined && selected.workspaceId !== undefined) throw new Error('invalid-selection')
-      await this.refresh()
+      this.restoring = version
+      this.emit()
+      if (this.disposed || version !== this.version) return
+      await Promise.all([this.refresh(), nativeStartup?.()])
       if (this.disposed || version !== this.version) return
       const row = this.rows.find(row => row.id === selected.sourceId)
       if (!row) { this.remember({ sourceId: 'local' }); return }
       if (row.autoConnect === false && row.phase !== 'connected') return
       await this.open(selected.sourceId, selectionTarget(selected))
     } catch { if (!this.disposed && version === this.version) this.remember({ sourceId: 'local' }) }
-    finally { if (this.restoring === version) this.restoring = undefined }
+    finally { if (this.restoring === version) { this.restoring = undefined; this.emit() } }
   }
   start(): void {
     if (this.disposed || this.started) return
@@ -136,7 +144,12 @@ export class WorkspaceController {
   setVisible(visible: boolean): void {
     const changed = this.visible !== visible
     this.visible = visible
-    if (changed && visible && this.started) void this.refresh()
+    if (changed) {
+      this.visibilityEpoch++
+      if (visible) this.resumePresentationWatch()
+      else this.pausePresentationWatch()
+      if (visible && this.started) void this.refresh()
+    }
   }
   refresh(force = true): Promise<void> {
     if (this.disposed) return Promise.resolve()
@@ -159,6 +172,9 @@ export class WorkspaceController {
     this.catalogPolls.delete(id)
   }
   private async readCatalogs(force: boolean): Promise<void> {
+    // This list is also the authority sample for the view health check. Never
+    // apply it to a view opened while these (potentially slow) catalogs load.
+    const viewVersion = this.version
     try {
       const rows = await this.api.list()
       if (this.disposed) return
@@ -195,10 +211,18 @@ export class WorkspaceController {
             continue
           }
           try {
-            const snapshot = await readWorkspaceCatalog(this.api, source.id, this.catalogCache.get(source.id))
+            const transportId = rows.find(row => row.id === source.id)?.transportId
+            // Every page belongs to the same captured authority. A replacement
+            // transport must not supply a new catalog under the old identity.
+            const reader: WorkspaceApi = source.id === 'local' ? this.api : {
+              workspace: (id, request) => this.api.workspace(id, request, transportId),
+            }
+            const snapshot = await readWorkspaceCatalog(reader, source.id, this.catalogCache.get(source.id))
             if (!current(source.id)) continue
             this.catalogCache.set(source.id, snapshot)
-            source.catalog = snapshot.catalog; delete source.catalogError
+            source.catalog = snapshot.catalog
+            source.info = source.id === 'local' ? undefined : { transportId }
+            delete source.catalogError
             this.catalogPolls.set(source.id, { failures: 0, next: Date.now() + (source.id === this.catalogs.selected.sourceId ? 5000 : 30000) })
           } catch (error) {
             if (!current(source.id)) continue
@@ -212,17 +236,21 @@ export class WorkspaceController {
       await Promise.all(Array.from({ length: Math.min(3, pending.length) }, worker))
       if (this.disposed) return
       publish()
-      await this.check()
+      if (this.visible) await this.checkCurrent(rows, viewVersion)
     } catch { /* Retain the previous catalog while the local transport recovers. */ }
   }
-  async mutate(id: string, request: WorkspaceRequest): Promise<void> {
+  async mutate(id: string, request: WorkspaceRequest, expectedTransportId?: string): Promise<void> {
     if (this.disposed) return
     if (id !== 'local') {
+      // The rendered catalog supplies authority. Never acquire it from this fresh
+      // list: equal native IDs can already refer to a different remote Host.
+      if (expectedTransportId === undefined) throw new Error('This connection changed. Select the workspace again.')
+      parseTransportId(expectedTransportId)
       const known = this.rows.find(row => row.id === id)
       const current = (await this.api.list()).find(row => row.id === id)
-      if (!current || current.phase !== 'connected' || (known && !sameDestination(known, current))) throw new Error('This connection changed. Select the workspace again.')
+      if (!current || current.phase !== 'connected' || current.transportId !== expectedTransportId || (known && !sameDestination(known, current))) throw new Error('This connection changed. Select the workspace again.')
     }
-    await this.api.workspace(id, request)
+    await this.api.workspace(id, request, id === 'local' ? undefined : expectedTransportId)
     // An earlier catalog request may have read before this mutation committed.
     if (this.refreshing) await this.refreshing
     await this.refresh()
@@ -299,7 +327,12 @@ export class WorkspaceController {
         // A stale allocation must not rotate the channel of a newer navigation.
         const allocation = (this.allocating.get(id) ?? Promise.resolve()).then(() => {
           if (!current()) throw new Error('navigation-cancelled')
-          return this.api.workspace(id, { op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: `${this.clientId}.${id}`, ...(this.options.surface ? { presentation: this.options.surface.getPresentation() } : {}) })
+          return this.api.workspace(id, { op: 'openView', protocol: WORKSPACE_PROTOCOL, contracts: { ...CONNECTION_CONTRACTS }, clientId: `${this.clientId}.${id}`, ...(this.options.surface ? { presentation: this.options.surface.getPresentation() } : {}) }).catch(error => {
+            // Pre-negotiation v3 endpoints reject the added request field. This
+            // is an updateable capability failure, not an SSH/auth failure.
+            if (error && typeof error === 'object' && 'code' in error && error.code === 'BAD_REQUEST') throw new WorkspaceProtocolError('INCOMPATIBLE_PROTOCOL')
+            throw error
+          })
         })
         const settled = allocation.catch(() => {})
         this.allocating.set(id, settled)
@@ -308,6 +341,7 @@ export class WorkspaceController {
         channel = opened.channel
         acquired = true
         if (!current()) { this.release({ id, name: '', phase: 'ready', channel }); return }
+        if (!matchingConnectionContracts(opened.contracts)) throw new WorkspaceProtocolError('INCOMPATIBLE_PROTOCOL')
         const result = parseOpenResult(await this.api.open(id))
         const latest = (await this.api.list()).find(row => row.id === id)
         if (!current()) { this.release({ id, name: '', phase: 'ready', channel }); return }
@@ -337,20 +371,42 @@ export class WorkspaceController {
   private release(state?: WorkspaceState): void {
     if (state?.channel) void this.api.workspace(state.id, { op: 'closeView', channel: state.channel }).catch(() => {})
   }
-  private stopPresentationWatch(): void {
+  private pausePresentationWatch(): void {
+    this.presentationEpoch++
     clearTimeout(this.presentationTimer); clearTimeout(this.presentationDeadline)
+    this.presentationTimer = undefined; this.presentationDeadline = undefined
+    const watch = this.presentationWatch
+    if (watch?.started !== undefined) {
+      watch.remaining = Math.max(0, watch.remaining - (Date.now() - watch.started))
+      delete watch.started
+    }
+  }
+  private stopPresentationWatch(): void {
+    this.pausePresentationWatch()
+    this.presentationWatch = undefined
   }
   private watchPresentation(version: number): void {
-    const pending = () => !this.disposed && version === this.version && this.state?.phase === 'ready' && this.state.presented !== true
+    this.stopPresentationWatch()
+    if (this.disposed || version !== this.version || this.state?.phase !== 'ready' || this.state.presented === true) return
+    this.presentationWatch = { version, remaining: this.options.presentationTimeoutMs ?? 30_000 }
+    this.resumePresentationWatch()
+  }
+  private resumePresentationWatch(): void {
+    const watch = this.presentationWatch
+    if (!watch || !this.visible || watch.started !== undefined) return
+    const epoch = this.presentationEpoch
+    const pending = () => !this.disposed && this.visible && epoch === this.presentationEpoch && watch === this.presentationWatch
+      && watch.version === this.version && this.state?.phase === 'ready' && this.state.presented !== true
     if (!pending()) return
-    // A navigable HTTP address is not proof that the native document loaded.
-    // Keep this deadline independent of slow catalog or HTTP health requests.
+    watch.started = Date.now()
+    // The visible-time deadline remains independent of slow catalog/HTTP reads.
+    // A child intentionally paused while hidden cannot present native content.
     this.presentationDeadline = setTimeout(() => {
       if (!pending()) return
       const state = this.state!
       this.stopPresentationWatch(); this.release(state); this.destination = undefined
       this.publish({ id: state.id, name: state.name, phase: 'error', error: 'timeout' })
-    }, this.options.presentationTimeoutMs ?? 30_000)
+    }, watch.remaining)
     const poll = async () => {
       if (!pending()) return
       await this.check()
@@ -360,7 +416,7 @@ export class WorkspaceController {
   }
   /** Closing the view never stops a connection, native session or running task. */
   close(): void {
-    this.version++; this.stopPresentationWatch()
+    this.version++; this.restoring = undefined; this.stopPresentationWatch()
     const previous = this.state, stopSurface = this.stopSurface
     this.state = undefined; this.destination = undefined; this.target = undefined; this.pickFallback = undefined
     this.stopSurface = undefined; this.surfaceChannel = undefined
@@ -370,16 +426,22 @@ export class WorkspaceController {
     stopSurface?.(); this.release(previous)
     this.remember({ sourceId: 'local' }); this.emit()
   }
-  check(): Promise<void> {
-    return this.checking ??= this.checkView().finally(() => { this.checking = undefined })
+  check(): Promise<void> { return this.checkCurrent() }
+  private checkCurrent(rows?: readonly ConnectionView[], version = this.version): Promise<void> {
+    if (!this.visible || version !== this.version) return Promise.resolve()
+    const visibilityEpoch = this.visibilityEpoch
+    if (this.checking?.version === version && this.checking.visibilityEpoch === visibilityEpoch) return this.checking.promise
+    const promise = this.checkView(rows).finally(() => { if (this.checking?.promise === promise) this.checking = undefined })
+    this.checking = { version, visibilityEpoch, promise }
+    return promise
   }
-  private async checkView(): Promise<void> {
+  private async checkView(rows?: readonly ConnectionView[]): Promise<void> {
     const state = this.state
-    if (!state || state.phase !== 'ready' || this.navigating === this.version) return
-    const version = this.version
-    const current = () => !this.disposed && version === this.version && this.state === state
+    if (!this.visible || !state || state.phase !== 'ready' || this.navigating === this.version) return
+    const version = this.version, visibilityEpoch = this.visibilityEpoch
+    const current = () => !this.disposed && this.visible && visibilityEpoch === this.visibilityEpoch && version === this.version && this.state === state
     try {
-      const row = (await this.api.list()).find(row => row.id === state.id)
+      const row = (rows ?? await this.api.list()).find(row => row.id === state.id)
       if (!current()) return
       if (!row || !sameAuthority(this.destination, row)) throw new Error('disconnected')
       const view = await this.api.workspace(state.id, { op: 'viewState', channel: state.channel! })
@@ -434,6 +496,7 @@ export function viewClientId(
   storage: Pick<Storage, 'getItem' | 'setItem'> | undefined,
   surface: 'workspace' | 'settings',
   lifecycle: Pick<Window, 'addEventListener'> | undefined = globalThis.window,
+  ownerSignal?: AbortSignal,
 ): string {
   const key = `@xunz/dsh-connections/view-client/${surface}`
   let id: string | undefined
@@ -452,7 +515,10 @@ export function viewClientId(
   const owned = () => {
     try { return JSON.parse(storage?.getItem(key) ?? 'null')?.id === ownedId } catch { return false }
   }
-  lifecycle?.addEventListener?.('pagehide', () => { if (owned()) write(true) })
-  lifecycle?.addEventListener?.('pageshow', () => { if (owned()) write(false) })
+  // The tab lifecycle outlives a plugin entry. Its owner must revoke callbacks
+  // when unloaded, otherwise an obsolete ID can still write later preferences.
+  const listenerOptions = ownerSignal ? { signal: ownerSignal } : undefined
+  lifecycle?.addEventListener?.('pagehide', () => { if (owned()) write(true) }, listenerOptions)
+  lifecycle?.addEventListener?.('pageshow', () => { if (owned()) write(false) }, listenerOptions)
   return id
 }

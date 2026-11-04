@@ -8,11 +8,20 @@ export type NativeCommandResolver = (
 
 type OwnedResolver = { original: ShortcutCommand['resolve']; wrapper: ShortcutCommand['resolve']; enabled: boolean }
 
+/** Only commands capable of targeting retained content cross this private seam. */
+export function isContentCommand(id: string): boolean {
+  return id.startsWith('session.') || id.startsWith('workspace.')
+    || id.startsWith('page.') || id.startsWith('pane.') || id.startsWith('terminal.')
+    || id.startsWith('browser.') || id === 'sidebar.right.toggle'
+}
+const routedCommand = (id: string) => isContentCommand(id) || id === 'settings.open'
+
 /**
- * rc.3 has no public resolver middleware. Its registry retains each registered
- * command by identity in both the menu and binding tables. Adapt only that
- * object's resolver, keeping the live native provider and its dependents intact.
- * The build and runtime both check this deliberately narrow private contract.
+ * rc.5 has no public resolver middleware. Keep this as one explicitly private,
+ * exact-version-checked compatibility boundary, not a replacement provider or a
+ * claim that register() is middleware. The registry retains commands by identity
+ * in menu and binding tables. Only content/Settings resolvers are adapted;
+ * unrelated commands (including immutable third-party commands) stay untouched.
  */
 export function mountNativeCommandRouting(shortcuts: Shortcuts, resolve: NativeCommandResolver, onReady: (ready: boolean) => void): () => void {
   let active = true
@@ -43,6 +52,7 @@ export function mountNativeCommandRouting(shortcuts: Shortcuts, resolve: NativeC
       const commands = Map.prototype.entries.call(registry.commands) as MapIterator<[string, ShortcutCommand]>
       const current = new Set<ShortcutCommand>()
       for (const [id, command] of commands) {
+        if (!routedCommand(id)) continue
         const descriptor = Object.getOwnPropertyDescriptor(command, 'resolve')
         if (command.id !== id || typeof descriptor?.value !== 'function' || descriptor.writable !== true) throw new Error('Unsupported shortcut resolver')
         const entry = owned.get(command)

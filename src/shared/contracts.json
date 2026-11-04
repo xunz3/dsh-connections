@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "sidebarAdapter": 0,
+  "shortcutRegistry": 1,
+  "settingsFactory": 2,
+  "accountFactory": 2,
+  "workspaceProtocol": 3,
+  "viewSurfaceProtocol": 1,
+  "remoteEventProtocol": 0
+}

@@ -1,5 +1,5 @@
 import type { ShortcutCommand, ShortcutContext } from '@deepseek-ai/dsh-client-shortcuts/client'
-import type { NativeCommandResolver } from './native-shortcuts.js'
+import { isContentCommand, type NativeCommandResolver } from './native-shortcuts.js'
 type ShortcutResolution = ReturnType<ShortcutCommand['resolve']>
 
 export interface WorkspaceShortcutCallbacks {
@@ -14,15 +14,12 @@ export interface WorkspaceShortcutCallbacks {
 
 const handled = (run: () => void): ShortcutResolution => ({ status: 'handled', run })
 const blocked = (): ShortcutResolution => ({ status: 'blocked', reason: 'remote-content-owner' })
-const contentCommand = (id: string) => id.startsWith('session.') || id.startsWith('workspace.')
-  || id.startsWith('page.') || id.startsWith('pane.') || id.startsWith('terminal.')
-  || id.startsWith('browser.') || id === 'sidebar.right.toggle'
 
 /** Native dispatch continues to own gestures, conflicts, repeats, menus and user bindings. */
 export function workspaceCommandResolver(callbacks: WorkspaceShortcutCallbacks): NativeCommandResolver {
   return (command, context) => {
     const id = command.id, source = callbacks.getRemoteSourceId()
-    if (!contentCommand(id)) return
+    if (!isContentCommand(id)) return
     // Native commands retain local modal policy. Above remote content only native
     // Close may dismiss the local dialog; other commands must not act behind it.
     if (context.modal !== null) return source === undefined || id === 'page.close' ? undefined : blocked()
@@ -42,7 +39,7 @@ export function workspaceCommandResolver(callbacks: WorkspaceShortcutCallbacks):
 /** A settings guest has its own native forms and must not navigate the retained workspace. */
 export function remoteSettingsCommand(command: ShortcutCommand, context: ShortcutContext, close: () => void): ShortcutResolution | undefined {
   if (command.id === 'settings.open') return blocked()
-  if (!contentCommand(command.id)) return
+  if (!isContentCommand(command.id)) return
   if (context.modal !== null && context.modal !== 'settings') return command.id === 'page.close' ? undefined : blocked()
   return command.id === 'page.close' ? handled(close) : blocked()
 }

@@ -1,4 +1,4 @@
-import type { ConnectionMode, ConnectionRecord, ConnectionView, SaveConnection, SshCheckResult, SshFailureCode, UpdateConnection } from './types.js'
+import type { ConnectionDiagnostic, ConnectionDiagnosticExport, ConnectionDiagnosticFailure, ConnectionDiagnosticList, ConnectionDiagnosticRef, ConnectionDiagnosticResult, ConnectionDiagnosticScope, ConnectionMode, ConnectionRecord, ConnectionView, DeleteConnectionDiagnostic, SaveConnection, SshCheckResult, SshFailureCode, UpdateConnection } from './types.js'
 import harnessVersions from './harness-versions.json' with { type: 'json' }
 
 export const SUPPORTED_REMOTE_VERSIONS: readonly string[] = Object.freeze(harnessVersions.remote)
@@ -19,6 +19,11 @@ export function parseId(value: unknown): string {
   const id = text(value, 64)
   if (!/^connection-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new TypeError('Invalid connection identifier.')
   return id
+}
+
+export function parseTransportId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw new TypeError('Invalid transport identity.')
+  return value
 }
 
 export function parseTarget(value: unknown): string {
@@ -122,7 +127,7 @@ export function parseView(value: unknown): ConnectionView {
   const phase = input.phase
   if (phase !== 'disconnected' && phase !== 'connecting' && phase !== 'updating' && phase !== 'connected' && phase !== 'error') throw new TypeError('Invalid connection state.')
   if (input.stage !== undefined && ((phase !== 'connecting' && phase !== 'updating') || !['preparing', 'tunnel', 'authenticating'].includes(input.stage as string))) throw new TypeError('Invalid connection stage.')
-  if (input.transportId !== undefined && (typeof input.transportId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.transportId))) throw new TypeError('Invalid transport identity.')
+  if (input.transportId !== undefined) parseTransportId(input.transportId)
   const runtime = input.runtime === undefined ? undefined : object(input.runtime)
   if (runtime !== undefined && (runtime.service !== 'systemd' || !Number.isSafeInteger(runtime.pid) || (runtime.pid as number) < 1)) throw new TypeError('Invalid managed Host status.')
   return {
@@ -142,6 +147,64 @@ export function parseViews(value: unknown): ConnectionView[] {
   if (!Array.isArray(value) || value.length > 100) throw new TypeError('Invalid connections list.')
   return value.map(parseView)
 }
+
+// Diagnostic wire data is an exact, closed schema. No arbitrary provider text,
+// record kind, payload, token, URL, or digest can pass through these codecs.
+function diagnosticObject(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  const input = object(value)
+  if (Object.keys(input).some(key => !keys.includes(key))) throw new TypeError('Invalid connection diagnostic.')
+  return input
+}
+function diagnosticScope(value: unknown): ConnectionDiagnosticScope {
+  if (value !== 'current' && value !== 'legacy') throw new TypeError('Invalid connection diagnostic scope.')
+  return value
+}
+export function parseDiagnosticRef(value: unknown): ConnectionDiagnosticRef {
+  const input = diagnosticObject(value, ['id', 'scope', 'receipt'])
+  if (typeof input.receipt !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(input.receipt)) throw new TypeError('Invalid connection diagnostic receipt.')
+  return { id: parseId(input.id), scope: diagnosticScope(input.scope), receipt: input.receipt }
+}
+export function parseDeleteDiagnostic(value: unknown): DeleteConnectionDiagnostic {
+  const input = diagnosticObject(value, ['id', 'scope', 'receipt', 'confirm', 'acknowledgeProcessLocal'])
+  if (input.confirm !== true || input.acknowledgeProcessLocal !== true) throw new TypeError('Explicit diagnostic deletion confirmation is required.')
+  return { ...parseDiagnosticRef({ id: input.id, scope: input.scope, receipt: input.receipt }), confirm: true, acknowledgeProcessLocal: true }
+}
+export function parseDiagnosticList(value: unknown): ConnectionDiagnosticList {
+  const input = diagnosticObject(value, ['records', 'truncated'])
+  if (!Array.isArray(input.records) || input.records.length > 200) throw new TypeError('Invalid connection diagnostic list.')
+  const records: ConnectionDiagnostic[] = input.records.map(value => {
+    const item = diagnosticObject(value, ['id', 'scope', 'receipt', 'issue', 'canDelete'])
+    if (item.issue !== 'invalid-record') throw new TypeError('Invalid connection diagnostic issue.')
+    return { ...parseDiagnosticRef({ id: item.id, scope: item.scope, receipt: item.receipt }), issue: 'invalid-record', canDelete: boolean(item.canDelete) }
+  })
+  if (new Set(records.map(item => `${item.scope}/${item.id}`)).size !== records.length) throw new TypeError('Invalid connection diagnostic list.')
+  return { records, truncated: boolean(input.truncated) }
+}
+export function parseDiagnosticExport(value: unknown): ConnectionDiagnosticExport {
+  const input = diagnosticObject(value, ['format', 'redacted', 'credentialBackup', 'concurrency', 'record'])
+  if (input.format !== 'connections-redacted-diagnostic-v1' || input.redacted !== true || input.credentialBackup !== false || input.concurrency !== 'same-process-provider-queue-only') throw new TypeError('Invalid redacted connection diagnostic.')
+  const record = diagnosticObject(input.record, ['id', 'scope', 'issue', 'canDelete'])
+  if (record.issue !== 'invalid-record') throw new TypeError('Invalid connection diagnostic issue.')
+  return { format: input.format, redacted: true, credentialBackup: false, concurrency: input.concurrency,
+    record: { id: parseId(record.id), scope: diagnosticScope(record.scope), issue: 'invalid-record', canDelete: boolean(record.canDelete) } }
+}
+function diagnosticResult<T>(value: unknown, parse: (value: unknown) => T): ConnectionDiagnosticResult<T> {
+  const input = object(value)
+  if (input.ok === true) {
+    diagnosticObject(input, ['ok', 'value'])
+    return { ok: true, value: parse(input.value) }
+  }
+  diagnosticObject(input, ['ok', 'code'])
+  const codes: readonly ConnectionDiagnosticFailure[] = ['STALE', 'UNAVAILABLE', 'UNSAFE_RECORD', 'EXPORT_REQUIRED']
+  if (input.ok !== false || !codes.includes(input.code as ConnectionDiagnosticFailure)) throw new TypeError('Invalid connection diagnostic result.')
+  return { ok: false, code: input.code as ConnectionDiagnosticFailure }
+}
+export const parseDiagnosticExportResult = (value: unknown): ConnectionDiagnosticResult<ConnectionDiagnosticExport> => diagnosticResult(value, parseDiagnosticExport)
+export const parseDiagnosticDeleteResult = (value: unknown): ConnectionDiagnosticResult<{ deleted: true }> => diagnosticResult(value, value => {
+  const input = diagnosticObject(value, ['deleted'])
+  if (input.deleted !== true) throw new TypeError('Invalid connection diagnostic deletion result.')
+  return { deleted: true }
+})
 
 export function parseOpenResult(value: unknown): { url: string } {
   const input = object(value)

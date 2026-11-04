@@ -2,7 +2,7 @@ import ts from 'typescript'
 
 const nativeId = '@deepseek-ai/dsh-client-shortcuts'
 
-/** Refuse build drift in the private rc.3 command-identity adapter; copy no native code. */
+/** Refuse build drift in the private rc.5 content-command adapter; copy no native code. */
 export function assertNativeShortcutRegistry(source) {
   const prefix = 'window.__ModuleLoader__.load('
   const tree = ts.createSourceFile('native-shortcuts.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)

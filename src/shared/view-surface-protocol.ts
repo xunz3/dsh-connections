@@ -2,6 +2,8 @@
 export interface LocalPresentation {
   locale: string
   theme: {
+    /** The palette is resolved in the owner document, not an independent light/dark pair. */
+    mode?: 'mirrored'
     preference: 'light' | 'dark'
     fontSize: number; codeFontSize: number; terminalFontSize: number
     textFontFamily: string; codeFontFamily: string; terminalFontFamily: string
@@ -34,6 +36,7 @@ export function parseLocalPresentation(value: unknown): LocalPresentation {
   const locale = text(input.locale, 64)
   if (!/^[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*$/.test(locale)) throw new TypeError('Invalid locale')
   if (theme.preference !== 'light' && theme.preference !== 'dark') throw new TypeError('Invalid theme')
+  if (theme.mode !== undefined && theme.mode !== 'mirrored') throw new TypeError('Invalid theme projection mode')
   const size = (key: string, max: number): number => {
     const n = theme[key]
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 10 || n > max) throw new TypeError('Invalid font size')
@@ -61,7 +64,7 @@ export function parseLocalPresentation(value: unknown): LocalPresentation {
     collapseTiming: choice('collapseTiming', ['completion', 'next-input']),
     performanceUsage: choice('performanceUsage', ['compact', 'detailed']),
     linkOpening: choice('linkOpening', ['sidebar', 'new-tab']), busyEnter: choice('busyEnter', ['queue', 'steer']), developerTools: general.developerTools,
-  }, theme: { preference: theme.preference, fontSize: size('fontSize', 22), codeFontSize: size('codeFontSize', 16), terminalFontSize: size('terminalFontSize', 20),
+  }, theme: { ...(theme.mode === 'mirrored' ? { mode: 'mirrored' as const } : {}), preference: theme.preference, fontSize: size('fontSize', 22), codeFontSize: size('codeFontSize', 16), terminalFontSize: size('terminalFontSize', 20),
     textFontFamily: text(theme.textFontFamily, 512), codeFontFamily: text(theme.codeFontFamily, 512), terminalFontFamily: text(theme.terminalFontFamily, 512) }, tokens: accepted }
 }
 export function parseLoginAction(value: unknown): LoginAction {

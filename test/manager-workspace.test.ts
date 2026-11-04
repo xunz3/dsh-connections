@@ -9,7 +9,7 @@ import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentia
 import { ConnectionsManager } from '../src/host/manager.js'
 import { createStore } from '../src/host/store.js'
 import type { Tunnel } from '../src/host/ssh.js'
-import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL } from '../src/shared/workspace-protocol.js'
+import { WORKSPACE_ENDPOINT, WORKSPACE_PROTOCOL, WorkspaceProtocolError, type WorkspaceRequest } from '../src/shared/workspace-protocol.js'
 
 const token = 'workspace-manager-private-launch-token'
 const secret = 'remote-private-payload-not-for-public-projections'
@@ -144,6 +144,79 @@ test('workspace calls share a Host-only cookie without exposing or persisting it
     assert.equal(host.state.auth, 2)
     assert.equal(host.state.receivedCookies.at(-1), host.state.cookies[1])
   } finally { await manager.dispose(); await host.close() }
+})
+
+const mutations: WorkspaceRequest[] = [
+  { op: 'renameWorkspace', id: 'workspace-1', title: 'Renamed' },
+  { op: 'forgetWorkspace', id: 'workspace-1' },
+  { op: 'renameSession', id: 'session-1', title: 'Renamed' },
+  { op: 'archiveSession', id: 'session-1', archived: true },
+  { op: 'pinSession', id: 'session-1', pinned: true },
+]
+const conflict = (error: unknown) => error instanceof WorkspaceProtocolError && error.code === 'CONFLICT'
+
+test('workspace writes require an observed transport while unguarded reads remain compatible', async () => {
+  const host = await remote()
+  const { manager, add } = await setup({ dev: host.port })
+  try {
+    const id = await add('dev')
+    const transportId = (await manager.list())[0]!.transportId!
+    assert.ok(transportId)
+    for (const request of mutations) {
+      await assert.rejects(manager.workspace(id, request), conflict)
+      await assert.rejects(manager.workspace(id, request, 'stale-transport'), conflict)
+    }
+    await assert.rejects(manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, 'stale-transport'), conflict)
+    assert.equal(host.state.posts, 0, 'rejected authorities cannot reach any remote workspace operation')
+    assert.equal(host.state.auth, 1, 'rejected authorities cannot start another authentication exchange')
+    assert.deepEqual(await manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }), catalog('Remote'))
+    host.state.onPost = (_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, value: { done: true } }))
+    }
+    for (const request of mutations) assert.deepEqual(await manager.workspace(id, request, transportId), { ok: true, value: { done: true } })
+    assert.equal(host.state.posts, 6)
+  } finally { await manager.dispose(); await host.close() }
+})
+
+for (const change of ['destination', 'same-origin-reconnect'] as const) test(`a delayed workspace mutation cannot cross a ${change} authority replacement`, async () => {
+  const first = await remote('First'), second = await remote('Second')
+  const { manager, add } = await setup({ dev: first.port, other: second.port })
+  const entered = deferred(), release = deferred()
+  let writes: Promise<void> | undefined
+  try {
+    const id = await add('dev')
+    const observed = (await manager.list())[0]!
+    // Model another browser retaining a catalog/list sample while this browser
+    // changes that same saved connection id before the delayed RPC is admitted.
+    writes = (async () => {
+      entered.resolve()
+      await release.promise
+      await Promise.all(mutations.map(request => assert.rejects(manager.workspace(id, request, observed.transportId), conflict)))
+      await assert.rejects(manager.workspace(id, { op: 'catalog', protocol: WORKSPACE_PROTOCOL }, observed.transportId), conflict)
+    })()
+    void writes.catch(() => {})
+    await entered.promise
+    if (change === 'destination') {
+      await manager.save({ id, name: 'Changed', target: 'other', launchUrl: `http://127.0.0.1:3080/?token=${token}` })
+      await manager.connect(id)
+    } else await manager.reconnect(id)
+    const current = (await manager.list())[0]!
+    assert.equal(current.phase, 'connected')
+    assert.notEqual(current.transportId, observed.transportId)
+    if (change === 'same-origin-reconnect') assert.equal(current.localPort, observed.localPort, 'a port alone is not an authority identity')
+    release.resolve()
+    await writes
+    assert.equal(first.state.posts, 0)
+    assert.equal(second.state.posts, 0, 'the replacement Host must receive zero business writes from the stale caller')
+    assert.deepEqual((await manager.list())[0], current)
+  } finally {
+    release.resolve()
+    await Promise.allSettled([writes])
+    await manager.dispose()
+    await first.close()
+    await second.close()
+  }
 })
 
 test('workspace pools end with their transport and a replacement on the same port gets a fresh socket', async () => {
@@ -382,12 +455,13 @@ test('a workspace timeout does not close the shared tunnel or replay an ambiguou
   const { manager, add, tunnels } = await setup({ dev: host.port })
   try {
     const id = await add('dev')
+    const transportId = (await manager.list())[0]!.transportId!
     host.state.onPost = () => {}
     for (const request of [
       { op: 'catalog', protocol: WORKSPACE_PROTOCOL },
       { op: 'viewState', channel: 'a'.repeat(43) },
       { op: 'renameSession', id: 'session-1', title: 'Updated' },
-    ]) await assert.rejects(manager.workspace(id, request), safeRejection)
+    ]) await assert.rejects(manager.workspace(id, request, transportId), safeRejection)
     assert.equal(timeouts, 3)
     assert.equal(host.state.posts, 3, 'transport failures must not replay an operation')
     assert.equal(host.state.auth, 1)

@@ -328,6 +328,31 @@ test('a command frozen after attachment disables routing without failing native 
   } finally { await f.dispose() }
 })
 
+test('unrelated immutable application commands stay outside the compatibility boundary', async () => {
+  let routed = 0, native = 0
+  const unrelated = Object.freeze(command('application.palette', 'KeyP', () => { native++ }))
+  const original = unrelated.resolve
+  const f = await fixture(() => { routed++; return { status: 'blocked', reason: 'fixture' } }, ctx => {
+    ctx.shortcuts.register(unrelated)
+  })
+  try {
+    assert.equal(f.readiness.at(-1), true)
+    assert.equal(unrelated.resolve, original)
+    f.input('KeyP')
+    assert.equal(native, 1)
+    assert.equal(routed, 0, 'No global or third-party resolver is inspected or wrapped')
+    const routedCommand = command('session.new', 'KeyN', () => { native++ })
+    await f.register(routedCommand)
+    f.input('KeyN')
+    assert.equal(routed, 1)
+    assert.equal(unrelated.resolve, original)
+    await f.provider.dispose()
+    assert.equal(unrelated.resolve, original)
+    f.input('KeyP')
+    assert.equal(native, 2)
+  } finally { await f.dispose() }
+})
+
 test('build validation rejects changes to native command identity or dispatch', () => {
   assertNativeShortcutRegistry(source)
   assert.throws(() => assertNativeShortcutRegistry(source.replace('this.commands.set(command.id, command)', 'this.commands.set(command.id, { ...command })')), /command identity contract/)

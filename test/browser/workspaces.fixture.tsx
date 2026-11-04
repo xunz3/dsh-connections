@@ -1,3 +1,4 @@
+import { CONNECTION_CONTRACTS } from '../../src/shared/contracts.js'
 import { WORKSPACE_PROTOCOL } from '../../src/shared/workspace-protocol.js'
 import { useState, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -25,7 +26,7 @@ let popup: (() => void) | undefined
 const api = {
   async reconnect() { return api.connect() },
   async list() { return [{ ...row }] },
-  async connect() { row.phase = 'connected'; row.localPort = 43188; return { ...row } },
+  async connect() { row.phase = 'connected'; row.localPort = 43188; row.transportId = crypto.randomUUID(); return { ...row } },
   async open() { calls.opens++; return { url: 'http://127.0.0.1:43188/?token=fixture-workspace-private-credential' } },
   async workspace<R extends WorkspaceRequest>(sourceId: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
     let result: WorkspaceResult
@@ -33,7 +34,7 @@ const api = {
       case 'catalog': result = catalog(sourceId !== 'local'); break
       case 'openView': {
         const channel = String(++viewCount).padStart(43, 'a')
-        result = { protocol: WORKSPACE_PROTOCOL, channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, result); break
+        result = { protocol: WORKSPACE_PROTOCOL, contracts: { ...CONNECTION_CONTRACTS }, channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, result); break
       }
       case 'navigate': {
         const previous = views.get(request.channel)!
@@ -93,11 +94,11 @@ function App() {
     <aside><WorkspaceBrowser sources={sources} selected={selected} onOpenSession={(id, sessionId) => controller.navigate(id, { kind: 'session', id: sessionId })} onOpenWorkspace={(id, workspaceId) => controller.navigate(id, { kind: 'workspace', id: workspaceId })}
       onNewSession={(id, workspaceId) => controller.navigate(id, { kind: 'newSession', id: workspaceId })}
       onAddWorkspace={() => setOpen(true)} onReconnect={id => controller.retry(id)}
-      onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
-      onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
-      onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}
-      onArchiveSession={(id, sessionId, archived) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived })}
-      onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned })} /></aside>
+      onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title }, sources.find(source => source.id === id)?.info?.transportId)}
+      onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId }, sources.find(source => source.id === id)?.info?.transportId)}
+      onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title }, sources.find(source => source.id === id)?.info?.transportId)}
+      onArchiveSession={(id, sessionId, archived) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived }, sources.find(source => source.id === id)?.info?.transportId)}
+      onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned }, sources.find(source => source.id === id)?.info?.transportId)} /></aside>
     <div className="workspace-main">{remote ? <RemoteWorkspace controller={controller} t={t} bridge={bridge} /> : <div className="local-content"><h1>Local native workspace</h1><output>{picked}</output></div>}</div>
     <HostChooser owner={owner} controller={controller} t={t} renderLocal={owner => <LocalPicker owner={owner} />} />
   </>

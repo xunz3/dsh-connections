@@ -1,13 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { ConnectionsApi, ConnectionView, SaveConnection, SshCheckResult, UpdateConnection } from '../shared/types.js'
+import type { ConnectionDiagnosticExport, ConnectionDiagnosticList, ConnectionDiagnosticRef, ConnectionDiagnosticResult, ConnectionsApi, ConnectionView, DeleteConnectionDiagnostic, SaveConnection, SshCheckResult, UpdateConnection } from '../shared/types.js'
 import { rpcContribution } from '../shared/rpc.js'
-import { parseOpenResult, parseSshCheck, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
+import { parseDeleteDiagnostic, parseDiagnosticDeleteResult, parseDiagnosticExportResult, parseDiagnosticList, parseDiagnosticRef, parseOpenResult, parseSshCheck, parseSshHosts, parseView, parseViews } from '../shared/validation.js'
 import { parseWorkspaceCallResult, type WorkspaceApi, type WorkspaceCall, type WorkspaceCallResult } from '../shared/workspace-rpc.js'
 import type { WorkspaceRequest, WorkspaceResultMap } from '../shared/workspace-protocol.js'
 
 interface RemoteApi {
+  diagnosticRecords(): Promise<RemoteResult<ConnectionDiagnosticList>>
+  exportDiagnostic(input: ConnectionDiagnosticRef): Promise<RemoteResult<ConnectionDiagnosticResult<ConnectionDiagnosticExport>>>
+  deleteDiagnostic(input: DeleteConnectionDiagnostic): Promise<RemoteResult<ConnectionDiagnosticResult<{ deleted: true }>>>
   checkSsh(target: string): Promise<RemoteResult<SshCheckResult>>
   sshHosts(): Promise<RemoteResult<string[]>>
   list(): Promise<RemoteResult<ConnectionView[]>>
@@ -41,6 +44,11 @@ export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
     finally { listing = undefined }
   }
   return {
+    diagnostics: {
+      list: () => unwrap(api.diagnosticRecords(), parseDiagnosticList),
+      export: input => unwrap(api.exportDiagnostic(parseDiagnosticRef(input)), parseDiagnosticExportResult),
+      remove: input => change(() => unwrap(api.deleteDiagnostic(parseDeleteDiagnostic(input)), parseDiagnosticDeleteResult)),
+    },
     checkSsh: target => unwrap(api.checkSsh(target), parseSshCheck),
     sshHosts: () => unwrap(api.sshHosts(), parseSshHosts),
     // The workspace and Settings schedulers may sample the same live Host in a
@@ -57,8 +65,8 @@ export function createApi(ctx: Context): ConnectionsApi & WorkspaceApi {
     disconnect: id => change(() => unwrap(api.disconnect(id), parseView)),
     update: input => change(() => unwrap(api.update(input), parseView)),
     open: id => unwrap(api.open(id), parseOpenResult),
-    async workspace<R extends WorkspaceRequest>(id: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
-      const result = await unwrap(api.workspace({ id, request }), parseWorkspaceCallResult)
+    async workspace<R extends WorkspaceRequest>(id: string, request: R, expectedTransportId?: string): Promise<WorkspaceResultMap[R['op']]> {
+      const result = await unwrap(api.workspace({ id, request, ...(expectedTransportId === undefined ? {} : { expectedTransportId }) }), parseWorkspaceCallResult)
       if (result.request.op !== request.op) throw new Error('The workspace response did not match the request.')
       if (!result.response.ok) throw Object.assign(new Error(result.response.error.message), { code: result.response.error.code })
       return result.response.value as WorkspaceResultMap[R['op']]

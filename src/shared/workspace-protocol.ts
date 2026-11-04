@@ -1,3 +1,4 @@
+import { parseConnectionContracts, type ConnectionContracts } from './contracts.js'
 import { parseLocalPresentation, parseLoginAction, parseSurfaceSnapshot, parseSurfaceActionResult, type LocalPresentation, type LoginAction, type SurfaceSnapshot, type SurfaceActionResult, type SurfaceRequest, type SurfaceAck } from './view-surface-protocol.js'
 import { parseSettingsHostExchange, parseSettingsHostId, parseSettingsHostSnapshot, type SettingsHostExchange, type SettingsHostSnapshot } from './settings-host-protocol.js'
 
@@ -69,7 +70,7 @@ export type WorkspaceRequest =
   | { op: 'renameSession'; id: string; title: string }
   | { op: 'archiveSession'; id: string; archived: boolean; stopActivity?: true }
   | { op: 'pinSession'; id: string; pinned: boolean }
-  | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string; presentation?: LocalPresentation }
+  | { op: 'openView'; protocol: typeof WORKSPACE_PROTOCOL; clientId: string; contracts?: ConnectionContracts; presentation?: LocalPresentation }
   | { op: 'navigate'; channel: string; requestId: string; target: WorkspaceNavigationTarget }
   | { op: 'pollView'; channel: string; afterRevision: number }
   | { op: 'reportView'; channel: string; revision: number; presented?: true; sessionId?: string; error?: WorkspaceNavigationError }
@@ -90,7 +91,7 @@ export interface WorkspaceResultMap {
   renameSession: { done: true }
   archiveSession: { done: true }
   pinSession: { done: true }
-  openView: WorkspaceViewState & { channel: string; protocol: typeof WORKSPACE_PROTOCOL }
+  openView: WorkspaceViewState & { channel: string; protocol: typeof WORKSPACE_PROTOCOL; contracts?: ConnectionContracts }
   navigate: WorkspaceViewState
   pollView: WorkspaceViewState
   reportView: WorkspaceViewState
@@ -215,8 +216,11 @@ export function parseWorkspaceRequest(value: unknown): WorkspaceRequest {
         ...(input.cursor === undefined ? {} : { cursor: catalogCursor(input.cursor) }),
       }
     case 'openView':
-      keys(input, ['op', 'protocol', 'clientId', 'presentation'])
-      return { op, protocol: protocol(input.protocol), clientId: parseWorkspaceId(input.clientId), ...(input.presentation === undefined ? {} : { presentation: parseLocalPresentation(input.presentation) }) }
+      keys(input, ['op', 'protocol', 'clientId', 'contracts', 'presentation'])
+      return { op, protocol: protocol(input.protocol), clientId: parseWorkspaceId(input.clientId),
+        ...(input.contracts === undefined ? {} : { contracts: parseConnectionContracts(input.contracts) }),
+        ...(input.presentation === undefined ? {} : { presentation: parseLocalPresentation(input.presentation) }),
+      }
     case 'renameWorkspace': case 'renameSession':
       keys(input, ['op', 'id', 'title'])
       return { op, id: parseWorkspaceId(input.id), title: text(input.title, 512).trim() }
@@ -348,7 +352,9 @@ export function parseWorkspaceResponse<Op extends WorkspaceOperation>(op: Op, va
       parsed = { done: true }; break
     case 'openView': {
       const version = protocol(result.protocol)
-      parsed = { ...parseWorkspaceViewState(result), channel: parseWorkspaceChannel(result.channel), protocol: version }; break
+      parsed = { ...parseWorkspaceViewState(result), channel: parseWorkspaceChannel(result.channel), protocol: version,
+        ...(result.contracts === undefined ? {} : { contracts: parseConnectionContracts(result.contracts) }),
+      }; break
     }
     case 'navigate': case 'pollView': case 'reportView': case 'viewState': parsed = parseWorkspaceViewState(result); break
     case 'publishSettingsHosts': case 'pollSettingsHosts': case 'selectSettingsHost': parsed = parseSettingsHostExchange(result); break

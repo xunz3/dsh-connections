@@ -6,6 +6,8 @@ export interface WorkspaceSource {
   name: string
   phase: 'connected' | 'connecting' | 'disconnected' | 'error'
   catalog?: WorkspaceCatalog
+  /** Authority captured with this catalog, never the transport of a newer list. */
+  info?: { transportId?: string }
   /** Catalog availability is independent of transport status. */
   catalogError?: string
 }

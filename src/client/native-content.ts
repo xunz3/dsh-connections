@@ -1,15 +1,14 @@
 import type { NativeSettingsAdapter } from './local-presentation.js'
 import { createNativeSettings as settings2 } from '@connections-native/rc2/settings'
-import { createNativeAccount as account2 } from '@connections-native/rc2/account'
 import { createNativeSettings as settings3 } from '@connections-native/rc3/settings'
-import { createNativeAccount as account3 } from '@connections-native/rc3/account'
 import { createNativeSettings as settings5 } from '@connections-native/rc5/settings'
-import { createNativeAccount as account5 } from '@connections-native/rc5/account'
-import type { LoginHost } from './login-host.js'
+import { nativeSnapshotStores } from './settings-native/snapshot-store.js'
 
-export function nativeContent(version: string, host: LoginHost | undefined, adapt: NativeSettingsAdapter) {
-  if (version === '0.2.1-rc.2') return { settings: settings2(adapt), account: account2(host, version) }
-  if (version === '0.2.1-rc.3') return { settings: settings3(adapt), account: account3(host, version) }
-  if (version === '0.2.1-rc.5') return { settings: settings5(adapt), account: account5(host, version) }
+/** Only the pre-consumer Settings bootstrap remains version-composed. Account
+ * stays an independently activated native plugin and uses public slot inputs. */
+export function nativeSettingsContent(version: string, adapt: NativeSettingsAdapter) {
+  if (version === '0.2.1-rc.2') return settings2(adapt, nativeSnapshotStores)
+  if (version === '0.2.1-rc.3') return settings3(adapt, nativeSnapshotStores)
+  if (version === '0.2.1-rc.5') return settings5(adapt, nativeSnapshotStores)
   throw new Error('Unsupported native settings version')
 }

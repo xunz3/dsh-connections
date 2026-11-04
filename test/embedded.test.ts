@@ -8,6 +8,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { EmbeddedLayoutController } from '../src/client/embedded-layout.js'
 import type { EmbeddedEndpoint } from '../src/client/embedded.js'
 import type { EmbeddedSettingsAdapter } from '../src/client/embedded-settings.js'
+import type { SurfacePollingOptions } from '../src/client/view-surface.js'
 import type { WorkspaceRequest, WorkspaceViewState } from '../src/shared/workspace-protocol.js'
 
 // Exercise the controller without loading the native visual package's browser
@@ -33,7 +34,12 @@ async function until(predicate: () => boolean) {
   assert.equal(predicate(), true, 'expected the asynchronous state transition to settle')
 }
 
-function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter, plugins = true) {
+class Visibility extends EventTarget {
+  visibilityState: DocumentVisibilityState = 'visible'
+  set(value: DocumentVisibilityState) { this.visibilityState = value; this.dispatchEvent(new Event('visibilitychange')) }
+}
+const settled = () => new Promise<void>(resolve => setImmediate(resolve))
+function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter, plugins = true, polling: SurfacePollingOptions = {}) {
   const selection = createSnapshotStore<{ key: string | undefined }>({ key: 'previous' })
   const layout = new EmbeddedLayoutController(id => id !== 'plugins' || plugins)
   const opened: string[] = []
@@ -86,15 +92,21 @@ function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter
   const queued = [initial]
   let deliver: ((state: WorkspaceViewState) => void) | undefined
   let abortedPolls = 0
+  const requests: Parameters<EmbeddedEndpoint>[0][] = []
+  let pollError: Error | undefined, reportError: Error | undefined
   const endpoint: EmbeddedEndpoint = async (request, signal) => {
+    requests.push(request)
     if (request.op === 'reportView') {
+      if (reportError) throw reportError
       reports.push(request)
       current = request.presented === true ? { ...current, presentedRevision: request.revision }
         : { ...current, reportedRevision: request.revision, presentedRevision: request.revision, sessionId: request.sessionId, error: request.error }
       return current
     }
+    if (pollError) throw pollError
     const next = queued.shift()
     if (next) return next
+    if (request.afterRevision < current.revision) return current
     return new Promise((resolve, reject) => {
       const abort = () => { abortedPolls++; deliver = undefined; reject(signal.reason) }
       signal.addEventListener('abort', abort, { once: true })
@@ -102,9 +114,11 @@ function fixture(initial: WorkspaceViewState, settings?: EmbeddedSettingsAdapter
       if (signal.aborted) abort()
     })
   }
-  const controller = new EmbeddedViewController(context as unknown as Context, channel, endpoint, undefined, settings)
+  const controller = new EmbeddedViewController(context as unknown as Context, channel, endpoint, undefined, settings, polling)
   return {
-    controller, context, selection, reports, opened, created, started, blockedWorkspaces,
+    controller, context, selection, reports, requests, opened, created, started, blockedWorkspaces,
+    setPollError(value: Error | undefined) { pollError = value },
+    setReportError(value: Error | undefined) { reportError = value },
     get finalReports() { return reports.filter(report => report.presented !== true) },
     presentPicker() { controller.pickerPresented(controller.state.getSnapshot().picker!.generation) },
     get abortedPolls() { return abortedPolls },
@@ -417,4 +431,141 @@ test('missing native plugin manager is explicit and leaves conversation state av
   assert.equal(f.finalReports.at(-1)?.error, undefined)
   assert.equal(f.finalReports.at(-1)?.sessionId, 'previous')
   assert.equal(f.controller.state.getSnapshot().message, undefined)
+})
+
+test('embedded polling and reports pause hidden for ten minutes and reconcile before flushing old reports', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility()
+  document.set('hidden')
+  const f = fixture(intent(1, { kind: 'session', id: 'initial' }), undefined, true, { document })
+  t.after(() => f.controller.dispose())
+  f.controller.start()
+  await settled()
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, 0)
+  document.set('visible')
+  await until(() => f.finalReports.length === 1)
+  assert.deepEqual(f.opened, ['initial'])
+  document.set('hidden')
+  assert.equal(f.abortedPolls, 1, 'hiding cancels the in-flight long poll')
+  f.selection.set({ key: 'hidden-native-selection' })
+  f.push(intent(2, { kind: 'session', id: 'newer' }))
+  const before = f.requests.length
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, before, 'queued report retries also have no RPC while hidden')
+  document.set('visible')
+  document.set('visible')
+  await until(() => f.finalReports.some(report => report.revision === 2))
+  const resumed = f.requests.slice(before)
+  assert.equal(resumed[0].op, 'pollView')
+  assert.equal(resumed[0].op === 'pollView' && resumed[0].afterRevision, 0, 'resume performs a fresh reconciliation rather than another long wait')
+  assert.equal(resumed.some(request => request.op === 'reportView' && request.revision === 1), false)
+  assert.deepEqual(f.opened, ['initial', 'newer'])
+})
+
+test('native creation completed hidden is never replayed and cannot report over a newer lease revision', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility(), creation = deferred<string>()
+  const f = fixture(intent(1, { kind: 'newSession', id: 'project' }), undefined, true, { document })
+  f.setStart(() => creation.promise)
+  t.after(() => f.controller.dispose())
+  f.controller.start()
+  await until(() => f.started.length === 1)
+  document.set('hidden')
+  creation.resolve('created-while-hidden')
+  await settled()
+  assert.equal(f.finalReports.length, 0)
+  f.push(intent(2, { kind: 'session', id: 'newer' }))
+  const before = f.requests.length
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, before)
+  document.set('visible')
+  await until(() => f.finalReports.some(report => report.revision === 2))
+  assert.deepEqual(f.started, ['project'])
+  assert.equal(f.finalReports.some(report => report.revision === 1), false)
+  assert.equal(f.selection.getSnapshot().key, 'newer')
+})
+
+test('embedded poll failures use capped backoff and visible resume immediately retries without replay', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility()
+  const f = fixture(intent(1, { kind: 'newSession', id: 'project' }), undefined, true, { document, maxBackoffMs: 4000 })
+  t.after(() => f.controller.dispose())
+  f.setPollError(new Error('Temporary poll failure'))
+  f.controller.start()
+  await settled()
+  const polls = () => f.requests.filter(request => request.op === 'pollView').length
+  assert.equal(polls(), 1)
+  for (const [ms, expected] of [[999, 1], [1, 2], [1999, 2], [1, 3], [3999, 3], [1, 4], [4000, 5]]) {
+    t.mock.timers.tick(ms)
+    await settled()
+    assert.equal(polls(), expected)
+  }
+  document.set('hidden')
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(polls(), 5)
+  f.setPollError(undefined)
+  document.set('visible')
+  await until(() => f.finalReports.length === 1)
+  assert.deepEqual(f.started, ['project'])
+  assert.equal(f.controller.state.getSnapshot().message, undefined)
+})
+
+test('embedded report retries back off, pause hidden, and never repeat native session creation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility()
+  const f = fixture(intent(1, { kind: 'newSession', id: 'project' }), undefined, true, { document, maxBackoffMs: 4000 })
+  t.after(() => f.controller.dispose())
+  f.setReportError(new Error('Temporary report failure'))
+  f.controller.start()
+  await settled()
+  const reports = () => f.requests.filter(request => request.op === 'reportView').length
+  assert.equal(reports(), 1)
+  for (const [ms, expected] of [[999, 1], [1, 2], [1999, 2], [1, 3], [3999, 3], [1, 4], [4000, 5]]) {
+    t.mock.timers.tick(ms)
+    await settled()
+    assert.equal(reports(), expected)
+    assert.deepEqual(f.started, ['project'])
+  }
+  document.set('hidden')
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(reports(), 5)
+  f.setReportError(undefined)
+  document.set('visible')
+  await until(() => f.finalReports.length === 1)
+  assert.equal(reports(), 6)
+  assert.deepEqual(f.started, ['project'])
+})
+
+test('synchronous native readiness subscriptions and aborted pending waits release their subscribers', async t => {
+  for (const ready of [true, false]) await t.test(ready ? 'synchronous ready' : 'disposed while waiting', async t => {
+    const f = fixture(intent(1, { kind: 'session', id: 'native' }))
+    t.after(() => f.controller.dispose())
+    let subscriptions = 0
+    const observe = (listener: () => void) => {
+      subscriptions++
+      listener()
+      return () => { subscriptions-- }
+    }
+    if (!ready) {
+      f.context.sessions.list.set({ phase: 'loading' })
+      f.context.workspaces.list.set({ phase: 'loading', items: [] })
+    }
+    f.context.sessions.list.subscribe = observe
+    f.context.workspaces.list.subscribe = observe
+    f.controller.start()
+    if (ready) await until(() => f.finalReports.length === 1)
+    else {
+      await until(() => subscriptions === 2)
+      f.controller.dispose()
+      await settled()
+      assert.deepEqual(f.opened, [])
+    }
+    assert.equal(subscriptions, 0)
+  })
 })

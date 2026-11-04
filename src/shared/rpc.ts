@@ -1,5 +1,5 @@
 import type { InvocationDescriptor, TypertCodec, TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
-import { parseId, parseOpenResult, parseSave, parseSshCheck, parseSshHosts, parseTarget, parseUpdate, parseView, parseViews } from './validation.js'
+import { parseDeleteDiagnostic, parseDiagnosticDeleteResult, parseDiagnosticExportResult, parseDiagnosticList, parseDiagnosticRef, parseId, parseOpenResult, parseSave, parseSshCheck, parseSshHosts, parseTarget, parseUpdate, parseView, parseViews } from './validation.js'
 import { parseWorkspaceCall, parseWorkspaceCallResult } from './workspace-rpc.js'
 
 export const RPC_NAMESPACE = 'connections'
@@ -26,6 +26,19 @@ export const rpcContribution: TypertRemoteContribution = {
     parameters: method === 'list' || method === 'sshHosts' ? [] : [{ name: method === 'save' || method === 'update' ? 'input' : 'id', wire: method === 'save' || method === 'update' ? 'input' : 'id', source: 'json', codec: method === 'save' ? codec('SaveConnection', parseSave) : method === 'update' ? codec('UpdateConnection', parseUpdate) : id }],
     result: method === 'sshHosts' ? codec('SshHosts', parseSshHosts) : method === 'list' ? codec('ConnectionViews', parseViews) : method === 'open' ? codec('OpenConnection', parseOpenResult) : method === 'forget' ? nothing : view,
   })), {
+    id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/diagnosticRecords`, service: RPC_NAMESPACE, namespace: RPC_NAMESPACE, method: 'diagnosticRecords',
+    invocation: { kind: 'direct' }, parameters: [], result: codec('ConnectionDiagnosticList', parseDiagnosticList),
+  }, {
+    id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/exportDiagnostic`, service: RPC_NAMESPACE, namespace: RPC_NAMESPACE, method: 'exportDiagnostic',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'input', wire: 'input', source: 'json', codec: codec('ConnectionDiagnosticRef', parseDiagnosticRef) }],
+    result: codec('ConnectionDiagnosticExportResult', parseDiagnosticExportResult),
+  }, {
+    id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/deleteDiagnostic`, service: RPC_NAMESPACE, namespace: RPC_NAMESPACE, method: 'deleteDiagnostic',
+    invocation: { kind: 'direct' },
+    parameters: [{ name: 'input', wire: 'input', source: 'json', codec: codec('DeleteConnectionDiagnostic', parseDeleteDiagnostic) }],
+    result: codec('ConnectionDiagnosticDeleteResult', parseDiagnosticDeleteResult),
+  }, {
     id: `${RPC_PACKAGE}#${RPC_NAMESPACE}/workspace`, service: RPC_NAMESPACE, namespace: RPC_NAMESPACE, method: 'workspace',
     invocation: { kind: 'direct' },
     parameters: [{ name: 'input', wire: 'input', source: 'json', codec: codec('WorkspaceCall', parseWorkspaceCall) }],

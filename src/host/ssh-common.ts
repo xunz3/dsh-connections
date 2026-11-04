@@ -40,9 +40,15 @@ export const SSH_ERROR_MESSAGES = {
 
 export type SshErrorCode = keyof typeof SSH_ERROR_MESSAGES
 
+/** Host-owned fixed diagnostics; never forward arbitrary process messages. */
+export const SSH_DIAGNOSTIC_MESSAGES = {
+  CONTROL_PATH: 'SSH ControlPath exceeds the portable Unix socket limit and the /tmp fallback could not be used. Check TMPDIR and /tmp permissions.',
+  SUPERVISOR: 'SSH supervisor could not start. Check the local Node runtime or Desktop installation.',
+} as const
+
 export class SshTunnelError extends Error {
-  constructor(readonly code: SshErrorCode, message: string = SSH_ERROR_MESSAGES[code]) {
-    super(message)
+  constructor(readonly code: SshErrorCode, message: string = SSH_ERROR_MESSAGES[code], readonly diagnostic?: keyof typeof SSH_DIAGNOSTIC_MESSAGES) {
+    super(diagnostic ? SSH_DIAGNOSTIC_MESSAGES[diagnostic] : message)
     this.name = 'SshTunnelError'
   }
 }
@@ -60,8 +66,12 @@ export function sshProcessError(stderr: string, result: ProcessResult, fallback:
     .trim().slice(-8_192)
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return new SshTunnelError('SSH_UNAVAILABLE')
   if (/host key verification failed|remote host identification has changed|no .* host key is known|host key .*mismatch/i.test(message)) return new SshTunnelError('SSH_HOST_KEY')
+  // A destination socket can fail with EACCES after SSH authentication has
+  // succeeded. Classify its explicit channel envelope before generic auth copy,
+  // or a single denied forward would revoke all unrelated established streams.
+  if (/channel \d+: open failed: (?:administratively prohibited|connect failed)/i.test(message)) return new SshTunnelError('SSH_FORWARD')
   if (/permission denied|authentication failed|no supported authentication|too many authentication failures/i.test(message)) return new SshTunnelError('SSH_AUTH')
-  if (/channel \d+: open failed: (?:administratively prohibited|connect failed)|stdio forwarding failed/i.test(message)) return new SshTunnelError('SSH_FORWARD')
+  if (/stdio forwarding failed/i.test(message)) return new SshTunnelError('SSH_FORWARD')
   if (/could not resolve hostname|name or service not known|temporary failure in name resolution|nodename nor servname provided|no such host is known|getaddrinfo.*(?:failed|not known)/i.test(message)) return new SshTunnelError('SSH_DNS')
   if (/connection timed out|operation timed out|connection timeout|connect.*etimedout/i.test(message)) return new SshTunnelError('SSH_TIMEOUT')
   if (/connection refused|connect.*econnrefused/i.test(message)) return new SshTunnelError('SSH_REFUSED')

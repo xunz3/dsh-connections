@@ -1,16 +1,17 @@
 import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from 'react'
-import { IconCloseOutlineRegular, useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCloseOutlineRegular, useModalLayer } from './ui/index.js'
 import type { Translate } from './messages.js'
 
-/** Native modal focus containment, Escape handling and focus return. */
+/** Browser-modal dialog with plugin-owned focus, Escape and foreground coordination. */
 export function ConnectionDialog({ title, busy = false, onClose, t, children }: {
   title: string; busy?: boolean; onClose(): void; t: Translate; children: ReactNode
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   const titleId = useId()
-  // Remove browser inertness before the native layer restores its invoking focus.
+  // Remove browser inertness before the owned layer restores its invoking focus.
   useLayoutEffect(() => { const dialog = ref.current!; return () => dialog.close() }, [])
-  // Share keyboard ownership with native Settings and its application shortcuts.
+  // Coordinate semantic foreground with native Settings; the shortcut owner
+  // routes page.close through ownedModalClose, not the native private layer map.
   useModalLayer(ref, true, () => { if (!busy) onClose() })
   useEffect(() => {
     ref.current!.showModal()

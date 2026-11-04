@@ -75,6 +75,7 @@ for (const [message, code] of [
   ['Host key verification failed.', 'SSH_HOST_KEY'],
   ['Permission denied (publickey).', 'SSH_AUTH'],
   ['channel 0: open failed: administratively prohibited: open failed', 'SSH_FORWARD'],
+  ['channel 0: open failed: connect failed: Permission denied\nstdio forwarding failed', 'SSH_FORWARD'],
 ] as const) {
   test(`stdio first-use ${code} failure closes the bridge with its SSH reason`, async () => {
     const f = await fixture({ TEST_SSH_STDIO_ERROR: message })
@@ -99,6 +100,54 @@ test('stdio missing SSH is reported by first-use failure rather than a successfu
     await assert.rejects(fetch(`http://127.0.0.1:${tunnel.port}`))
     assert.equal((await failure as SshTunnelError).code, 'SSH_UNAVAILABLE')
   } finally { await tunnel.close() }
+})
+
+for (const [message, code] of [
+  ['Permission denied (publickey).', 'SSH_AUTH'],
+  ['Host key verification failed.', 'SSH_HOST_KEY'],
+] as const) test(`a later ${code} failure closes the connection and every active stream exactly once`, { timeout: 10_000 }, async () => {
+  const f = await fixture()
+  const remoteSockets = new Set<ReturnType<typeof createConnection>>()
+  const remote = createServer(socket => {
+    remoteSockets.add(socket)
+    socket.once('close', () => remoteSockets.delete(socket))
+    socket.write('ready')
+  })
+  const tunnel = await connectTunnel({ target: 'dev', remotePort: await listen(remote) }, f.options)
+  const persistent = createConnection({ host: '127.0.0.1', port: tunnel.port })
+  persistent.on('error', () => {})
+  try {
+    await new Promise<void>(resolve => persistent.once('data', () => resolve()))
+    const persistentClosed = new Promise<void>(resolve => persistent.once('close', () => resolve()))
+    let closes = 0
+    const failure = new Promise<Error | undefined>(resolve => tunnel.onClose(error => { closes++; resolve(error) }))
+    f.options.env!.TEST_SSH_STDIO_ERROR = message
+    const failed = createConnection({ host: '127.0.0.1', port: tunnel.port })
+    failed.on('error', () => {})
+    await new Promise<void>(resolve => failed.once('close', () => resolve()))
+    const error = await failure
+    assert.ok(error instanceof SshTunnelError)
+    assert.equal(error.code, code)
+    await persistentClosed
+    await Promise.all([tunnel.close(), tunnel.close()])
+    assert.equal(closes, 1)
+    assert.equal(await new Promise<Error | undefined>(resolve => tunnel.onClose(resolve)), error, 'late listeners retain the classified reason')
+    const calls = await f.calls()
+    assert.equal(calls.length, 2, 'fatal failures never retry SSH authentication automatically')
+    await assertStopped(calls)
+    await assert.rejects(new Promise<void>((resolve, reject) => {
+      const socket = createConnection({ host: '127.0.0.1', port: tunnel.port })
+      socket.once('error', reject)
+      socket.once('connect', () => { socket.destroy(); resolve() })
+    }))
+    assert.equal((await f.calls()).length, calls.length)
+  } finally {
+    persistent.destroy()
+    await tunnel.close()
+    remoteSockets.forEach(socket => socket.destroy())
+    await new Promise<void>(resolve => remote.close(() => resolve()))
+    await f.dispose()
+  }
 })
 
 test('stdio cancellation during the initial bind cannot leave an owned listener behind', async () => {
@@ -163,7 +212,7 @@ test('stdio browser cancellation only disposes its stream and leaves the bridge 
   } finally { await tunnel.close(); await f.dispose() }
 })
 
-test('a later SSH channel failure preserves an active stream and accepts subsequent streams', async () => {
+for (const message of ['channel 0: open failed: administratively prohibited: open failed', 'channel 0: open failed: connect failed: Permission denied\nstdio forwarding failed', 'Connection refused', 'Network is unreachable']) test(`a later ${message} failure preserves other streams and allows recovery`, async () => {
   const f = await fixture()
   const remote = createServer(socket => {
     socket.write('ready')
@@ -180,7 +229,7 @@ test('a later SSH channel failure preserves an active stream and accepts subsequ
   })
   try {
     assert.equal(await read(persistent), 'ready')
-    f.options.env!.TEST_SSH_STDIO_ERROR = 'Permission denied (publickey).'
+    f.options.env!.TEST_SSH_STDIO_ERROR = message
     const failed = createConnection({ host: '127.0.0.1', port: tunnel.port })
     failed.on('error', () => {})
     await new Promise<void>(resolve => failed.once('close', () => resolve()))

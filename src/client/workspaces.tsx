@@ -23,6 +23,7 @@ import { scheduleVisiblePoll } from './connection-polling.js'
 import { workspaceUrl } from './workspace-surface.js'
 import { workspaceCommandResolver } from './workspace-shortcuts.js'
 import type { NativeCommandResolver } from './native-shortcuts.js'
+import { waitForNativeStartup } from './native-shell-routing.js'
 import { desktopBrowser, DesktopGuest } from './desktop-guest.js'
 export { desktopBrowser } from './desktop-guest.js'
 export { WorkspaceController } from './workspace-controller.js'
@@ -114,7 +115,7 @@ export function RemoteWorkspace({ controller, t, bridge }: {
   return <section className="dc-remote-workspace" aria-label={state.name || t('frame')}>
     <style>{workspaceCss}</style>
     {state.phase === 'connecting' ? <div className="dc-remote-status"><p role="status">{t('connecting')} {state.name}</p><button onClick={() => controller.close()}>{t('cancel')}</button></div>
-      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p>{(!state.error || ['failed', 'timeout', 'disconnected'].includes(state.error)) && <button onClick={() => { setGuestError(false); void controller.retry(state.id) }}>{t('retry')}</button>}{' '}<button onClick={() => controller.close()}>{t('cancel')}</button></div>
+      : state.phase === 'error' || guestError ? <div className="dc-remote-status"><p role="alert">{t(state.error ?? 'failed')}</p>{(!state.error || ['failed', 'timeout', 'disconnected'].includes(state.error)) && <button onClick={() => { setGuestError(false); void controller.reconnect(state.id) }}>{t('retry')}</button>}{' '}<button onClick={() => controller.close()}>{t('cancel')}</button></div>
       : <>
         {bridge ? <DesktopGuest bridge={bridge} id={state.id} url={state.url!} title={t('frame')} failed={failed} />
           : <iframe key={state.url} className="dc-remote-frame" src={state.url} title={t('frame')} referrerPolicy="no-referrer" allow="clipboard-write" sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onError={failed} />}
@@ -124,18 +125,21 @@ export function RemoteWorkspace({ controller, t, bridge }: {
 }
 
 /** Compose the native shell through public slots; remote content owns no local Session. */
-export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, _t: Translate, canRoute = () => true, onCommands?: (resolver: NativeCommandResolver) => () => void): WorkspaceController {
+export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceApi, _t: Translate, canRoute = () => true, onCommands?: (resolver: NativeCommandResolver) => () => void, navigatePanel: (action: () => void) => void = action => action()): WorkspaceController {
   const bridge = desktopBrowser()
-  let workspaceConflict = false
+  let workspaceReady = false
+  let ownsWorkspaces = () => false
   let storage: Storage | undefined
   try { storage = window.localStorage } catch { /* Optional preference persistence. */ }
   let localNavigate: (target: WorkspaceNavigationTarget) => Promise<void> = async () => { throw new Error('Local workspace navigation is not ready.') }
   let sessionStorage: Storage | undefined
   try { sessionStorage = window.sessionStorage } catch { /* Optional per-tab leases. */ }
+  const viewOwner = new AbortController()
+  ctx.effect(() => () => viewOwner.abort())
   const controller = new WorkspaceController(api, {
     schedulePoll: task => scheduleVisiblePoll(document, task),
-    clientId: viewClientId(sessionStorage, 'workspace'), storage, surface: localSurface(ctx), prepareUrl: url => {
-      if (!canRoute() || workspaceConflict) throw new Error('sidebar-composition-unavailable')
+    clientId: viewClientId(sessionStorage, 'workspace', window, viewOwner.signal), storage, surface: localSurface(ctx), prepareUrl: url => {
+      if (!canRoute() || !workspaceReady || !ownsWorkspaces()) throw new Error('sidebar-composition-unavailable')
       return workspaceUrl(url, window.location, bridge !== undefined)
     },
     localNavigate: target => localNavigate(target),
@@ -155,19 +159,30 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
   ctx.effect(() => () => controller.dispose())
   const panel = 'connections.workspace' as MainPanelId
 
-  const delegate = (slot: PickerSlot, alias: LocalSlot, excluded?: unknown) => {
+  const delegate = (slot: PickerSlot, alias: LocalSlot, excluded?: unknown, onFailure?: () => void) => {
     let delegated: StoredEntry | undefined
     let remove: (() => void) | undefined
+    let active = true
+    const stop = () => { active = false; off(); remove?.(); remove = undefined }
     const sync = () => {
-      const entry = ctx.slots.entries(slot).find(entry => entry.component !== excluded)
-      if (entry === delegated) return
-      remove?.(); remove = undefined; delegated = entry
-      if (!entry || (entry.children && Object.keys(entry.children).length > 0)) return
-      remove = ctx.slots.register({ name: alias, inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+      if (!active) return
+      try {
+        const entry = ctx.slots.entries(slot).find(entry => entry.component !== excluded)
+        if (entry === delegated) return
+        remove?.(); remove = undefined; delegated = entry
+        if (!entry || (entry.children && Object.keys(entry.children).length > 0)) return
+        remove = ctx.slots.register({ name: alias, inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+      } catch {
+        // A failed alias must not retain a subscriber that later writes into a
+        // retired child declaration or rolls back the independent native shell.
+        stop()
+        onFailure?.()
+        ctx.logger.warn('Connections could not delegate the native directory picker; native navigation is preserved.')
+      }
     }
     const off = ctx.slots.subscribe(slot, sync)
     sync()
-    return () => { off(); remove?.() }
+    return stop
   }
 
   ctx.inject(['layout', 'uiWorkspace', 'uiSession', 'workspaces', 'shortcuts'], ctx => {
@@ -199,6 +214,8 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
           return () => { if (controls === current) controls = undefined }
         }, [props.expandSidebar])
         useEffect(() => { setShortcutNote(false) }, [selected.sourceId, selected.sessionId])
+        const mutate = (id: string, request: Parameters<WorkspaceController['mutate']>[1]) =>
+          controller.mutate(id, request, sources.find(source => source.id === id)?.info?.transportId)
         const owner: DirectoryFlowOwnerProps = {
           open, busy, onCancel: () => { if (!busy) setOpen(false) }, onError: () => { setOpen(false); setError(true) },
           onPicked: path => {
@@ -218,11 +235,11 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
             onOpenWorkspace={(id, workspaceId) => controller.navigate(id, { kind: 'workspace', id: workspaceId })}
             onNewSession={(id, workspaceId) => controller.navigate(id, { kind: 'newSession', id: workspaceId })}
             onAddWorkspace={() => { setError(false); setOpen(true) }} onReconnect={id => controller.retry(id)}
-            onRenameWorkspace={(id, workspaceId, title) => controller.mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
-            onForgetWorkspace={(id, workspaceId) => controller.mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
-            onRenameSession={(id, sessionId, title) => controller.mutate(id, { op: 'renameSession', id: sessionId, title })}
-            onArchiveSession={(id, sessionId, archived, options) => controller.mutate(id, { op: 'archiveSession', id: sessionId, archived, ...options })}
-            onPinSession={(id, sessionId, pinned) => controller.mutate(id, { op: 'pinSession', id: sessionId, pinned })} />
+            onRenameWorkspace={(id, workspaceId, title) => mutate(id, { op: 'renameWorkspace', id: workspaceId, title })}
+            onForgetWorkspace={(id, workspaceId) => mutate(id, { op: 'forgetWorkspace', id: workspaceId })}
+            onRenameSession={(id, sessionId, title) => mutate(id, { op: 'renameSession', id: sessionId, title })}
+            onArchiveSession={(id, sessionId, archived, options) => mutate(id, { op: 'archiveSession', id: sessionId, archived, ...options })}
+            onPinSession={(id, sessionId, pinned) => mutate(id, { op: 'pinSession', id: sessionId, pinned })} />
           {shortcutNote && <p className="dcw-command-note" role="status">{t('shortcutBlocked')} <button onClick={() => setShortcutNote(false)}>{t('cancel')}</button></p>}
           {error && <p role="alert">{t('failed')} <button onClick={() => setError(false)}>{t('cancel')}</button></p>}
           <HostChooser owner={owner} controller={controller} t={t} renderLocal={owner => props.renderSlot('connections.local.sidebarDirectoryFlow', owner, { fallback: <p role="alert">{t('localUnavailable')} <button onClick={owner.onCancel}>{t('cancel')}</button></p> })} />
@@ -231,31 +248,44 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
       let remove: (() => void) | undefined
       let stopDelegate: (() => void) | undefined
       let syncing = false
+      let failed = false
+      let warned = false
+      const conflict = () => ctx.slots.entries('sidebar.workspaces').some(entry => entry.component !== Browser && (entry.options.priority ?? 0) < 0)
+      ownsWorkspaces = () => remove !== undefined && !conflict() && ctx.slots.entriesOfSlot('sidebar.workspaces')[0]?.component === Browser
+      const retire = () => {
+        workspaceReady = false
+        stopDelegate?.(); stopDelegate = undefined
+        remove?.(); remove = undefined
+        if (controller.getSnapshot()) controller.close()
+      }
       const sync = () => {
-        if (syncing) return
+        if (syncing || failed) return
         syncing = true
         try {
-          const conflict = ctx.slots.entries('sidebar.workspaces').some(entry => entry.component !== Browser && (entry.options.priority ?? 0) < 0)
-          if (conflict) {
-            if (!workspaceConflict) ctx.logger.warn('Connections left sidebar.workspaces to another priority provider; remote workspace navigation is unavailable.')
-            workspaceConflict = true
-            stopDelegate?.(); stopDelegate = undefined
-            remove?.(); remove = undefined
-            if (controller.getSnapshot()) controller.close()
+          if (conflict()) {
+            if (!warned) ctx.logger.warn('Connections left sidebar.workspaces to another priority provider; remote workspace navigation is unavailable.')
+            warned = true
+            retire()
           } else {
-            workspaceConflict = false
+            warned = false
             if (!remove) {
-              remove = ctx.slots.register({ name: 'sidebar.workspaces', priority: -100, locale: 'connections.workspace',
+              remove = ctx.slots.register({ name: 'sidebar.workspaces', priority: -1, locale: 'connections.workspace',
                 children: { 'connections.local.sidebarDirectoryFlow': { kind: 'single', scope: 'root' } },
               }, Browser)
-              stopDelegate = delegate('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow')
+              stopDelegate = delegate('sidebar.workspaces.directoryFlow', 'connections.local.sidebarDirectoryFlow', undefined, () => { failed = true; retire() })
             }
+            workspaceReady = ownsWorkspaces()
+            if (!workspaceReady && controller.getSnapshot()) controller.close()
           }
+        } catch {
+          failed = true
+          retire()
+          ctx.logger.warn('Connections could not compose sidebar.workspaces; native navigation is preserved.')
         } finally { syncing = false }
       }
       const unsubscribe = ctx.slots.subscribe('sidebar.workspaces', sync)
       sync()
-      return () => { unsubscribe(); stopDelegate?.(); remove?.() }
+      return () => { unsubscribe(); ownsWorkspaces = () => false; retire() }
     })
     // The empty-state picker keeps its native adoption semantics for this computer.
     ctx.slots.inject('conversation.hero.workspace.directoryFlow', () => {
@@ -264,11 +294,57 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
         return <HostChooser owner={{ open, busy, onPicked, onCancel, onError }} controller={controller} t={t}
           renderLocal={owner => props.renderSlot('connections.local.heroDirectoryFlow', owner, { fallback: <p role="alert">{t('localUnavailable')} <button onClick={owner.onCancel}>{t('cancel')}</button></p> })} />
       }
-      const remove = ctx.slots.register({ name: 'conversation.hero.workspace.directoryFlow', priority: -100, locale: 'connections.workspace',
-        children: { 'connections.local.heroDirectoryFlow': { kind: 'single', scope: 'root' } },
-      }, Picker)
-      const stop = delegate('conversation.hero.workspace.directoryFlow', 'connections.local.heroDirectoryFlow', Picker)
-      return () => { stop(); remove() }
+      let remove: (() => void) | undefined
+      let removeAlias: (() => void) | undefined
+      let delegated: StoredEntry | undefined
+      let syncing = false
+      let failed = false
+      let warned = false
+      const nativeLeaf = () => {
+        const entries = ctx.slots.entries('conversation.hero.workspace.directoryFlow').filter(entry => entry.component !== Picker)
+        if (entries.some(entry => (entry.options.priority ?? 0) < 0)) return
+        const entry = entries[0]
+        if (!entry || entry.children && Object.keys(entry.children).length > 0) return
+        return entry
+      }
+      const retire = () => {
+        removeAlias?.(); removeAlias = undefined
+        remove?.(); remove = undefined
+        delegated = undefined
+      }
+      const sync = () => {
+        if (syncing || failed) return
+        syncing = true
+        try {
+          const entry = nativeLeaf()
+          if (!entry) {
+            retire()
+            if (!warned && ctx.slots.entries('conversation.hero.workspace.directoryFlow').length > 0) {
+              warned = true
+              ctx.logger.warn('Connections left the workspace directory picker to another provider; native navigation is preserved.')
+            }
+            return
+          }
+          warned = false
+          if (entry === delegated) return
+          retire()
+          // Validate the delegated leaf before shadowing it. Both registrations
+          // commit synchronously before batched slot publication; an alias error
+          // withdraws the wrapper instead of leaving a non-functional chooser.
+          remove = ctx.slots.register({ name: 'conversation.hero.workspace.directoryFlow', priority: -1, locale: 'connections.workspace',
+            children: { 'connections.local.heroDirectoryFlow': { kind: 'single', scope: 'root' } },
+          }, Picker)
+          removeAlias = ctx.slots.register({ name: 'connections.local.heroDirectoryFlow', inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+          delegated = entry
+        } catch {
+          failed = true
+          retire()
+          ctx.logger.warn('Connections could not compose the workspace directory picker; native navigation is preserved.')
+        } finally { syncing = false }
+      }
+      const unsubscribe = ctx.slots.subscribe('conversation.hero.workspace.directoryFlow', sync)
+      sync()
+      return () => { unsubscribe(); retire() }
     })
     ctx.effect(() => {
       let wasRemote = false
@@ -279,8 +355,8 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
         const remote = controller.getSnapshot() !== undefined
         transitioning = true
         try {
-          if (remote && !wasRemote) { ctx.layout.beginNavigation(); ctx.layout.selectPanel(panel); wasRemote = true }
-          else if (!remote && wasRemote) { wasRemote = false; if (ctx.layout.panelInfo.getSnapshot().activePanelId === panel) ctx.layout.selectPanel(null) }
+          if (remote && !wasRemote) navigatePanel(() => { ctx.layout.beginNavigation(); ctx.layout.selectPanel(panel); wasRemote = true })
+          else if (!remote && wasRemote) navigatePanel(() => { wasRemote = false; if (ctx.layout.panelInfo.getSnapshot().activePanelId === panel) ctx.layout.selectPanel(null) })
           lastPanel = ctx.layout.panelInfo.getSnapshot().activePanelId
         } finally { transitioning = false }
       }
@@ -299,20 +375,41 @@ export function installWorkspaces(ctx: Context, api: ConnectionsApi & WorkspaceA
       visibility()
       document.addEventListener('visibilitychange', visibility)
       controller.start()
-      void controller.restore()
+      // Before a first native main binding exists, beginNavigation cannot tell
+      // automatic blank restoration from a user action. During only this cold
+      // saved-selection restore, trusted local activity cancels the automatic
+      // intent conservatively; it never intercepts or reroutes the input.
+      const startup = new AbortController()
+      const cancelColdRestore = (event: Event) => {
+        if (event.isTrusted && ctx.uiSession.adapter.current.getSnapshot().key === undefined
+          && !controller.getSnapshot() && controller.hasNavigationIntent()) controller.close()
+      }
+      const cold = ctx.uiSession.adapter.current.getSnapshot().key === undefined
+      if (cold) {
+        document.addEventListener('pointerdown', cancelColdRestore, { capture: true })
+        document.addEventListener('keydown', cancelColdRestore, { capture: true })
+      }
+      const stopColdRestore = () => {
+        startup.abort()
+        if (!cold) return
+        document.removeEventListener('pointerdown', cancelColdRestore, { capture: true })
+        document.removeEventListener('keydown', cancelColdRestore, { capture: true })
+      }
+      void controller.restore(() => waitForNativeStartup(ctx.uiSession.adapter.current, ctx.workspaces.list,
+        AbortSignal.any([viewOwner.signal, startup.signal]))).finally(stopColdRestore)
       // Capture the remote preference before sampling already-restored native state.
       controller.localSelection(ctx.uiSession.adapter.current.getSnapshot().key)
-      return () => { document.removeEventListener('visibilitychange', visibility); offController(); offPanel(); offSession() }
+      return () => { stopColdRestore(); document.removeEventListener('visibilitychange', visibility); offController(); offPanel(); offSession() }
     })
   })
   return controller
 }
 
 const workspaceCss = `
-.dc-workspace-chooser,.dc-remote-workspace{font:14px/1.5 system-ui,sans-serif;color:var(--dsw-alias-label-primary,#202124);background:var(--dsw-alias-bg-base,#fff)}
-.dc-workspace-chooser{max-height:calc(100dvh - 48px);overflow:auto;width:min(420px,calc(100vw - 48px));border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:14px;padding:24px;box-sizing:border-box;box-shadow:0 16px 70px #0002}.dc-workspace-chooser::backdrop{background:#0005}
-.dc-workspace-chooser h2{font-size:19px;margin:0 0 6px}.dc-workspace-chooser h3{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary,#666);margin:24px 0 8px}.dc-workspace-chooser p{color:var(--dsw-alias-label-secondary,#666);margin:0 0 18px}
-.dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1,#f4f4f4)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4670d9));outline-offset:2px}
-.dc-workspace-chooser .dc-host-search{box-sizing:border-box;width:100%;font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);padding:8px;border-radius:6px;margin-bottom:8px}.dc-workspace-chooser .dc-host-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;margin:6px 0;padding:12px}.dc-host-choice strong{font-weight:500}.dc-host-choice span{font-size:12px;color:var(--dsw-alias-label-secondary,#666);overflow:hidden;text-overflow:ellipsis}.dc-workspace-chooser-actions{display:flex;justify-content:flex-end;margin-top:22px}
-.dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--dsw-alias-bg-base,#fff);padding:32px;text-align:center}.dc-remote-loading p{color:var(--dsw-alias-label-secondary,#666)}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
+.dc-workspace-chooser,.dc-remote-workspace{font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:1.5;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
+.dc-workspace-chooser{max-height:calc(100dvh - 48px);overflow:auto;width:min(420px,calc(100vw - 48px));border:1px solid var(--dsw-alias-border-l1);border-radius:14px;padding:24px;box-sizing:border-box;box-shadow:var(--dsw-elevation-panel)}.dc-workspace-chooser::backdrop{background:color-mix(in srgb,var(--dsw-static-neutral-1000) 32%,transparent)}
+.dc-workspace-chooser h2{font-size:19px;margin:0 0 6px}.dc-workspace-chooser h3{font-size:12px;font-weight:500;color:var(--dsw-alias-label-secondary);margin:24px 0 8px}.dc-workspace-chooser p{color:var(--dsw-alias-label-secondary);margin:0 0 18px}
+.dc-workspace-chooser button,.dc-remote-workspace button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dsw-alias-border-l1);border-radius:7px;padding:7px 12px;cursor:pointer}.dc-workspace-chooser button:hover,.dc-remote-workspace button:hover{background:var(--dsw-alias-bg-layer-1)}.dc-workspace-chooser button:focus-visible,.dc-remote-workspace button:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dc-workspace-chooser .dc-host-search{box-sizing:border-box;width:100%;font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-base);padding:8px;border-radius:6px;margin-bottom:8px}.dc-workspace-chooser .dc-host-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;text-align:left;margin:6px 0;padding:12px}.dc-host-choice strong{font-weight:500}.dc-host-choice span{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis}.dc-workspace-chooser-actions{display:flex;justify-content:flex-end;margin-top:22px}
+.dc-remote-workspace{position:relative;flex:1;min-width:0;min-height:0;width:100%;height:100%;margin:0;padding:0;border:0;overflow:hidden;display:flex;flex-direction:column}.dc-remote-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--dsw-alias-bg-base);padding:32px;text-align:center}.dc-remote-loading p{color:var(--dsw-alias-label-secondary)}.dc-remote-status{margin:auto;padding:32px;max-width:520px;text-align:center}.dc-remote-frame,.dc-remote-guest{display:flex;flex:1;min-height:0;width:100%;height:100%;border:0}.dc-remote-guest>.dc-remote-frame{height:100%}
 `

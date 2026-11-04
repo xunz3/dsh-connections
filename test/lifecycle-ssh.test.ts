@@ -1,9 +1,47 @@
 import assert from 'node:assert/strict'
+import childProcess, { type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import test from 'node:test'
-import { prepareHost } from '../src/host/lifecycle.js'
+import { prepareHost, RemoteHostError } from '../src/host/lifecycle.js'
+
+for (const multibyte of [false, true]) test(`management bounds ${multibyte ? 'UTF-8 bytes' : 'ASCII output'} before decoding and ignores output after failure`, async t => {
+  // A no-PID child double cannot signal or contact any real SSH process. Keep
+  // emitting while cleanup awaits close to exercise the post-limit drain window.
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+    exitCode: null, signalCode: null,
+  }) as unknown as ChildProcessWithoutNullStreams
+  let pending: ReturnType<typeof prepareHost> | undefined
+  try {
+    t.mock.method(childProcess, 'spawn', () => child)
+    syncBuiltinESMExports()
+    pending = prepareHost({ target: 'fixture' }, { workspacePlugin: false })
+    const rejected = assert.rejects(pending, error => error instanceof RemoteHostError && error.code === 'protocol')
+    let decoded = 0
+    const chunk = (value: Buffer) => {
+      const decode = value.toString.bind(value)
+      value.toString = (...args: Parameters<Buffer['toString']>) => { decoded++; return decode(...args) }
+      return value
+    }
+    child.stdout.emit('data', chunk(Buffer.alloc(8192, 'x')))
+    child.stdout.emit('data', chunk(multibyte ? Buffer.from('界'.repeat(3000)) : Buffer.alloc(8193, 'x')))
+    for (let index = 0; index < 32; index++) child.stdout.emit('data', chunk(Buffer.alloc(8192, 'x')))
+    child.emit('close', 0)
+    await rejected
+    assert.equal(decoded, 1, 'only the first within-budget chunk may be decoded or retained')
+  } finally {
+    child.emit('close', 0)
+    await Promise.allSettled([pending])
+    child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy()
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+})
 
 test('management cancellation settles when an exited SSH leader leaves inherited pipes open', { timeout: 6_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-management-pipes-'))

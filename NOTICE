@@ -1,21 +1,29 @@
-dsh-connections includes adapted portions of DeepSeek Harness:
+dsh-connections includes adapted portions and control behavior of DeepSeek Harness:
 
-  @deepseek-ai/dsh-client-ui-sidebar 0.2.1-rc.5
-    Local sidebar factory; navigation injection and stylesheet ownership adapted.
   @deepseek-ai/dsh-client-ui-settings 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5
-    Remote settings factory; ConfigForms accessor adapted for local preferences.
-  @deepseek-ai/dsh-client-ui-settings-account 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5
-    Remote account factory; browser capabilities and stylesheet ownership adapted.
+    Remote settings bootstrap; the ConfigForms accessor projects local interface
+    preferences before native consumers activate. The snapshot-store dependency
+    is explicitly supplied by Connections, not imported from a Client package.
 
-Copyright (c) 2026 DeepSeek. These portions are licensed under the MIT License.
-The original license texts are included in dist/native-sidebar.LICENSE and in
-the remote archive's dist/native-settings.LICENSE and dist/native-account.LICENSE.
+  @deepseek-ai/dsh-client-ui-primitives 0.2.1-rc.5
+    Connections-owned controls adapt composition, focus/Tab, menu and modal
+    behavior, layout patterns and relative-time buckets from the published
+    keyboard-composition, useModalLayer, focus, Menu, Modal and relativeTime
+    implementations. Classes are plugin-prefixed; styling uses theme aliases.
+    The simple control SVG paths are original Connections artwork.
+
+Copyright (c) 2026 DeepSeek. These adapted portions are licensed under the MIT
+License. The original control license is included as dist/native-ui.LICENSE in
+both archives. The remote archive also includes dist/native-settings.LICENSE.
+
+The native sidebar and Account providers, components and styles remain supplied
+and owned by Harness; their factories are not copied. The shortcut adapter checks
+and narrows the installed content/Settings command resolvers without copying or
+replacing the native keyboard provider.
 
 Source: https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.5
-Adapters: scripts/native-sidebar.mjs, scripts/native-settings.mjs,
-scripts/native-account.mjs. The shortcut adapter observes the installed native
-registry; it does not include or replace the native shortcut provider.
-
-dist/native-inputs.json records exact native input versions and SHA-512 digests
-for reproducible maintenance review. These private adapters require review when
-their upstream inputs change; the manifest does not grant future compatibility.
+The retained Settings bootstrap is composed by scripts/native-settings.mjs.
+dist/native-inputs.json records exact native input versions, SHA-512 digests and
+explicit compatibility boundaries. These records do not grant compatibility with
+future Harness versions; the remaining constructor/shortcut seams need review
+when their upstream inputs change.

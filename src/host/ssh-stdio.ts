@@ -65,10 +65,12 @@ export async function connectStdioTunnel(input: TunnelInput, options: SshTunnelO
   }
   const onAbort = () => { void stop(cancelled()).catch(() => {}) }
   const failChannel = (socket: Socket, error: Error) => {
-    // Retain an initial authentication/launch failure for the manager's first
-    // probe. Once in use, each SSH process owns only its TCP stream; a later
-    // failed request must not tear down unrelated HTTP and WebSocket streams.
-    if (!forwardedData && channels.size === 0) void stop(error).catch(() => {})
+    // Auth/host-identity failures invalidate the connection even after first use:
+    // later streams must not silently keep advertising an authenticated bridge.
+    // Forwarding/network/launch failures otherwise own only their TCP stream,
+    // except before any data has established the manager's initial probe.
+    const fatal = error instanceof SshTunnelError && (error.code === 'SSH_AUTH' || error.code === 'SSH_HOST_KEY')
+    if (fatal || !forwardedData && channels.size === 0) void stop(error).catch(() => {})
     socket.destroy()
   }
 

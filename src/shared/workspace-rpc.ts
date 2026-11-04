@@ -1,10 +1,15 @@
-import { parseId } from './validation.js'
+import { parseId, parseTransportId } from './validation.js'
 import { WORKSPACE_PROTOCOL, parseWorkspaceCatalogPage, parseWorkspaceRequest, parseWorkspaceResponse, WorkspaceProtocolError, type WorkspaceCatalog, type WorkspaceCatalogWorkspace, type WorkspaceRequest, type WorkspaceResponse, type WorkspaceResultMap } from './workspace-protocol.js'
 
-export interface WorkspaceCall { id: string; request: WorkspaceRequest }
+export interface WorkspaceCall {
+  id: string
+  request: WorkspaceRequest
+  /** Local-Host precondition; never forwarded to the remote content endpoint. */
+  expectedTransportId?: string
+}
 export interface WorkspaceCallResult { request: WorkspaceRequest; response: WorkspaceResponse }
 export interface WorkspaceApi {
-  workspace<R extends WorkspaceRequest>(id: string, request: R): Promise<WorkspaceResultMap[R['op']]>
+  workspace<R extends WorkspaceRequest>(id: string, request: R, expectedTransportId?: string): Promise<WorkspaceResultMap[R['op']]>
 }
 export interface WorkspaceCatalogSnapshot { revision: string; catalog: WorkspaceCatalog }
 
@@ -53,8 +58,12 @@ export async function readWorkspaceCatalog(api: WorkspaceApi, id: string, previo
 export function parseWorkspaceCall(value: unknown): WorkspaceCall {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Invalid workspace request.')
   const input = value as Record<string, unknown>
-  if (Object.keys(input).some(key => key !== 'id' && key !== 'request')) throw new TypeError('Invalid workspace request.')
-  return { id: input.id === 'local' ? 'local' : parseId(input.id), request: parseWorkspaceRequest(input.request) }
+  if (Object.keys(input).some(key => !['id', 'request', 'expectedTransportId'].includes(key))) throw new TypeError('Invalid workspace request.')
+  const id = input.id === 'local' ? 'local' : parseId(input.id)
+  if (id === 'local' && input.expectedTransportId !== undefined) throw new TypeError('Invalid workspace transport precondition.')
+  return { id, request: parseWorkspaceRequest(input.request),
+    ...(input.expectedTransportId === undefined ? {} : { expectedTransportId: parseTransportId(input.expectedTransportId) }) }
+
 }
 export function parseWorkspaceCallResult(value: unknown): WorkspaceCallResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Invalid workspace response.')

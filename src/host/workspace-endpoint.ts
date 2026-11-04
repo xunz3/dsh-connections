@@ -1,5 +1,8 @@
 import type { LocalPresentation, SurfaceRequest, SurfaceActionResult } from '../shared/view-surface-protocol.js'
-import { createHash, randomBytes } from 'node:crypto'
+import { CONNECTION_CONTRACTS, matchingConnectionContracts } from '../shared/contracts.js'
+import harnessVersions from '../shared/harness-versions.json' with { type: 'json' }
+import { randomBytes } from 'node:crypto'
+import { workspaceCatalogRevision } from './workspace-catalog-revision.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsHostExchange } from '../shared/settings-host-protocol.js'
 import {
@@ -248,7 +251,7 @@ export class WorkspaceEndpoint {
           })),
           archivedSessionIds: [...workspaceRegistry.archivedSessionIds], pinnedSessionIds: [...workspaceRegistry.pinnedSessionIds],
         }
-        const revision = createHash('sha256').update(JSON.stringify(catalog)).digest('base64url')
+        const revision = workspaceCatalogRevision(catalog)
         if (input.ifRevision === revision) return { ...emptyCatalog(), protocol: WORKSPACE_PROTOCOL, revision, unchanged: true }
         let snapshot = this.catalogs.get(revision)
         if (!snapshot) {
@@ -273,6 +276,13 @@ export class WorkspaceEndpoint {
         else await workspaceController.unpinSession({ sessionId: input.id })
         return { done: true }
       case 'openView': {
+        // Negotiate before rotating a previous lease or allocating any state.
+        // Omitted contracts retain the v3 seam for older reviewed clients; new
+        // clients additionally require our advertisement before navigation.
+        if (input.contracts && !matchingConnectionContracts(input.contracts)) throw new EndpointError('INCOMPATIBLE_PROTOCOL')
+        // The native factories are still version-reviewed inputs. Plugin-owned
+        // contract numbers alone must never admit an unreviewed native runtime.
+        if (this.nativeVersion !== 'unknown' && !harnessVersions.remote.includes(this.nativeVersion)) throw new EndpointError('INCOMPATIBLE_PROTOCOL')
         this.expire()
         // A stable per-tab client ID owns one lease. Rotate the channel on reload:
         // delayed cleanup or reports from the previous document cannot affect it.
@@ -283,7 +293,7 @@ export class WorkspaceEndpoint {
         const channel = randomBytes(32).toString('base64url')
         const view: ViewChannel = { clientId: input.clientId, expires: this.now() + this.ttlMs, state: { revision: 0, reportedRevision: 0, presentedRevision: 0 }, requests: new Map(), waiters: new Set(), surfaceActions: new Map(), cancelledSurfaceActions: new Set(), ...(input.presentation ? { presentation: input.presentation } : {}) }
         this.channels.set(channel, view)
-        return { channel, ...view.state, protocol: WORKSPACE_PROTOCOL }
+        return { channel, ...view.state, protocol: WORKSPACE_PROTOCOL, contracts: { ...CONNECTION_CONTRACTS } }
       }
       case 'closeView': {
         const view = this.channels.get(input.channel)

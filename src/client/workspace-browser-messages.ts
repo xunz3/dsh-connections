@@ -8,6 +8,9 @@ export const messages = {
     pin: 'Pin', unpin: 'Unpin', archive: 'Archive', restore: 'Restore', failed: 'This action could not be completed.', running: 'Running', dismiss: 'Dismiss',
     archiveRunning: 'Stop and archive chat?', archiveRunningHint: 'This chat has running work. Archiving stops its running tasks, jobs and subagents.', stopAndArchive: 'Stop and archive',
     showMore: 'Show more', remaining: 'remaining',
+    navigationHint: 'Use Up and Down to move between visible rows, Home and End to jump to the first or last row, and Tab to reach the current row’s actions.',
+    searchHint: 'Press Enter to focus the first result. Escape closes search.',
+    copySessionId: 'Copy session ID', copied: 'Session ID copied.', copyFailed: 'Could not copy the session ID. Check clipboard access and try again.',
   },
   zh: {
     title: '工作区', add: '添加工作区', search: '搜索工作区和会话标题', filter: '筛选会话', active: '未归档', pinned: '已置顶', archived: '已归档',
@@ -18,6 +21,9 @@ export const messages = {
     pin: '置顶', unpin: '取消置顶', archive: '归档', restore: '恢复', failed: '操作未完成。', running: '运行中', dismiss: '关闭提示',
     archiveRunning: '停止并归档会话？', archiveRunningHint: '此会话仍有工作在运行。归档会停止其正在运行的任务、作业和子代理。', stopAndArchive: '停止并归档',
     showMore: '显示更多', remaining: '项未显示',
+    navigationHint: '使用上、下方向键在可见行间移动，Home 和 End 跳至首行或末行，Tab 进入当前行的操作。',
+    searchHint: '按 Enter 聚焦首条结果，按 Escape 关闭搜索。',
+    copySessionId: '复制会话 ID', copied: '已复制会话 ID。', copyFailed: '无法复制会话 ID。请检查剪贴板访问权限后重试。',
   },
 }
 export type Translate = (key: keyof typeof messages.en) => string

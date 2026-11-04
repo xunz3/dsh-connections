@@ -1,14 +1,14 @@
-import { randomUUID } from 'node:crypto'
-import type { ConnectionRecord, ConnectionView, ConnectionsApi, SaveConnection, SshCheckResult, UpdateConnection } from '../shared/types.js'
+import { createHash, randomUUID } from 'node:crypto'
+import type { ConnectionDiagnosticsApi, ConnectionOperationSnapshot, ConnectionRecord, ConnectionView, ConnectionsApi, SaveConnection, SshCheckResult, UpdateConnection } from '../shared/types.js'
 import { parseId, parseSave, parseTarget, parseUpdate } from '../shared/validation.js'
 import { connectTunnel, SshTunnelError, type Tunnel } from './ssh.js'
 import type { ConnectionStore } from './store.js'
 import { prepareHost, updateHost, RemoteHostError, type ManagedHost } from './lifecycle.js'
 import { discoverSshHosts } from './ssh-config.js'
 import { authenticateHarness, createWorkspaceAgent, HarnessAuthorizationError, HarnessProtocolError, requestWorkspace } from './harness-http.js'
-import { parseWorkspaceRequest } from '../shared/workspace-protocol.js'
+import { parseWorkspaceRequest, WorkspaceProtocolError } from '../shared/workspace-protocol.js'
 import { checkSshTarget } from './ssh-check.js'
-import { SSH_ERROR_MESSAGES } from './ssh-common.js'
+import { SSH_DIAGNOSTIC_MESSAGES, SSH_ERROR_MESSAGES } from './ssh-common.js'
 
 export type Probe = typeof authenticateHarness
 export interface ManagerOptions {
@@ -44,12 +44,26 @@ function sameDestination(a: ConnectionRecord, b: ConnectionRecord): boolean {
   return a.target === b.target && (a.mode ?? 'existing') === (b.mode ?? 'existing') && (a.mode === 'managed' || (a.remotePort === b.remotePort && a.token === b.token))
 }
 
+/** Host-only approval precondition, never persisted or exposed in ConnectionView. */
+function operationRevision(record: ConnectionRecord): string {
+  return createHash('sha256').update(JSON.stringify([
+    record.id, record.target, record.mode ?? 'existing',
+    ...(record.mode === 'managed' ? [] : [record.remotePort, record.token]),
+  ])).digest('hex')
+}
+
+function assertRevision(record: ConnectionRecord, expectedRevision?: string): void {
+  if (expectedRevision !== undefined && operationRevision(record) !== expectedRevision) throw new Error('This connection has changed.')
+}
+
 function sshFailure(error: unknown): string {
+  if (error instanceof SshTunnelError && error.diagnostic && Object.hasOwn(SSH_DIAGNOSTIC_MESSAGES, error.diagnostic)) return SSH_DIAGNOSTIC_MESSAGES[error.diagnostic]
   return SSH_ERROR_MESSAGES[error instanceof SshTunnelError ? error.code : 'SSH_FAILED']
 }
 
 /** Owns only connection attempts and tunnels; the remote Harness owns all work. */
 export class ConnectionsManager implements ConnectionsApi {
+  readonly diagnostics?: ConnectionDiagnosticsApi
   private readonly runtimes = new Map<string, Runtime>()
   private readonly reconnections = new Map<string, Promise<ConnectionView>>()
   private readonly createTunnel: typeof connectTunnel
@@ -72,6 +86,15 @@ export class ConnectionsManager implements ConnectionsApi {
     this.updateRemote = options.updateHost ?? updateHost
     this.discoverHosts = options.sshHosts ?? discoverSshHosts
     this.checkTarget = options.checkSshTarget ?? checkSshTarget
+    const diagnostics = store.diagnostics
+    if (diagnostics) {
+      const active = <T>(operation: () => Promise<T>) => this.serialize(async () => { this.assertActive(); return operation() })
+      this.diagnostics = {
+        list: () => active(() => diagnostics.list()),
+        export: input => active(() => diagnostics.export(input)),
+        remove: input => active(() => diagnostics.remove(input)),
+      }
+    }
   }
 
   async sshHosts(): Promise<string[]> {
@@ -200,12 +223,26 @@ export class ConnectionsManager implements ConnectionsApi {
     })
   }
 
-  save(value: SaveConnection): Promise<ConnectionView> {
+  /** Same-process approval snapshot; the revision must never cross a caller wire. */
+  operationSnapshot(id: string): Promise<ConnectionOperationSnapshot> {
+    parseId(id)
+    return this.serialize(async () => {
+      this.assertActive()
+      const record = await this.record(id)
+      const runtime = this.runtimes.get(id)
+      if (runtime?.record && !sameDestination(runtime.record, record)) await this.stop(runtime)
+      return { view: this.view(record), revision: operationRevision(record) }
+    })
+  }
+
+  save(value: SaveConnection, expectedRevision?: string): Promise<ConnectionView> {
     const input = parseSave(value)
     return this.serialize(async () => {
       this.assertActive()
+      if (expectedRevision !== undefined && input.id === undefined) throw new Error('This connection has changed.')
       if (input.id === undefined && (await this.store.list()).length >= 100) throw new Error('At most 100 saved connections are supported.')
       const previous = input.id === undefined ? undefined : await this.record(input.id)
+      if (previous) assertRevision(previous, expectedRevision)
       // Commit validation and credential storage before changing a live transport.
       // Names and automatic-restore preferences do not change its destination.
       const saved = await this.store.save(input)
@@ -216,23 +253,30 @@ export class ConnectionsManager implements ConnectionsApi {
     })
   }
 
-  remove(id: string): Promise<void> {
+  remove(id: string, expectedRevision?: string): Promise<void> {
     parseId(id)
     return this.serialize(async () => {
       this.assertActive()
+      if (expectedRevision !== undefined) assertRevision(await this.record(id), expectedRevision)
       await this.stop(this.runtime(id))
+      // Closing an old pending transport can yield to another store instance.
+      // Recheck before deletion; this is not a cross-process compare-and-delete.
+      if (expectedRevision !== undefined) assertRevision(await this.record(id), expectedRevision)
       await this.store.remove(id)
       this.runtimes.delete(id)
     })
   }
 
   /** Explicit connection enables automatic restoration even when this attempt fails. */
-  async connect(id: string): Promise<ConnectionView> {
-    return this.start(id)
+  async connect(id: string, expectedRevision?: string): Promise<ConnectionView> {
+    return this.start(id, undefined, undefined, false, expectedRevision)
   }
 
   /** Re-resolve managed credentials and rebuild access without restarting remote work. */
-  reconnect(id: string): Promise<ConnectionView> {
+  reconnect(id: string, expectedRevision?: string): Promise<ConnectionView> {
+    // An approved caller must reach the serialized precondition even when an
+    // unguarded reconnect already exists for this id but another destination.
+    if (expectedRevision !== undefined) return this.start(id, undefined, undefined, true, expectedRevision)
     // Coalesce at entry, before credential reads yield: a fast first attempt
     // can finish before a simultaneous request reaches the management queue.
     const existing = this.reconnections.get(id)
@@ -244,16 +288,17 @@ export class ConnectionsManager implements ConnectionsApi {
     return pending
   }
 
-  async update(value: UpdateConnection): Promise<ConnectionView> {
+  async update(value: UpdateConnection, expectedRevision?: string): Promise<ConnectionView> {
     const { id, version } = parseUpdate(value)
-    return this.start(id, { version })
+    return this.start(id, { version }, undefined, false, expectedRevision)
   }
 
-  private async start(id: string, update?: Pick<UpdateConnection, 'version'>, restoring?: ConnectionRecord, reconnect = false): Promise<ConnectionView> {
+  private async start(id: string, update?: Pick<UpdateConnection, 'version'>, restoring?: ConnectionRecord, reconnect = false, expectedRevision?: string): Promise<ConnectionView> {
     parseId(id)
     const operation = await this.serialize(async () => {
       this.assertActive()
       let record = await this.record(id)
+      assertRevision(record, expectedRevision)
       // A later restore worker must not undo a disconnect/edit while an earlier
       // host was slow. Check current settings and manual activity inside the
       // same queue that owns those actions, before creating an automatic runtime.
@@ -263,7 +308,12 @@ export class ConnectionsManager implements ConnectionsApi {
       // Persist explicit intent before touching the live transport. Restore and
       // maintenance retain the preference chosen by the user. The store updates
       // only this field, so another writer's name, target and credential survive.
-      if (restoring === undefined && update === undefined) record = await this.store.setAutoConnect(id, true)
+      if (restoring === undefined && update === undefined) {
+        record = await this.store.setAutoConnect(id, true)
+        // Another store instance can replace the record between the two awaits.
+        // Never prepare or connect that replacement under the old approval.
+        assertRevision(record, expectedRevision)
+      }
       const runtime = this.runtime(id)
       if (update !== undefined) {
         if (record.mode !== 'managed') throw new Error('Only a managed remote Host can be updated here.')
@@ -279,7 +329,10 @@ export class ConnectionsManager implements ConnectionsApi {
       runtime.phase = update === undefined ? 'connecting' : 'updating'
       runtime.stage = record.mode === 'managed' ? 'preparing' : 'tunnel'
       delete runtime.error
+      // A new transport must authenticate itself. A previous transport's probe
+      // may still settle after abort, including an Open/openView refresh.
       delete runtime.cookie
+      delete runtime.authenticating
       const controller = new AbortController()
       runtime.controller = controller
       runtime.record = record
@@ -322,6 +375,8 @@ export class ConnectionsManager implements ConnectionsApi {
         delete runtime.stage
         runtime.workspaceAgent?.destroy()
         delete runtime.workspaceAgent
+        delete runtime.cookie
+        delete runtime.authenticating
         runtime.error = error instanceof SshTunnelError ? sshFailure(error) : 'The SSH connection closed. Connect again to resume access.'
         transportFailure = { generation: runtime.generation, message: runtime.error }
         delete runtime.tunnel
@@ -364,11 +419,13 @@ export class ConnectionsManager implements ConnectionsApi {
     }
   }
 
-  disconnect(id: string): Promise<ConnectionView> {
+  disconnect(id: string, expectedRevision?: string): Promise<ConnectionView> {
     parseId(id)
     return this.serialize(async () => {
       this.assertActive()
+      if (expectedRevision !== undefined) assertRevision(await this.record(id), expectedRevision)
       const record = await this.store.setAutoConnect(id, false)
+      assertRevision(record, expectedRevision)
       await this.stop(this.runtime(id))
       return this.view(record)
     })
@@ -431,13 +488,20 @@ export class ConnectionsManager implements ConnectionsApi {
   }
 
   /** Keep remote credentials and the transport lease entirely on the local Host. */
-  async workspace(id: string, input: unknown): Promise<unknown> {
+  async workspace(id: string, input: unknown, expectedTransportId?: string): Promise<unknown> {
     const request = parseWorkspaceRequest(input)
+    const mutation = ['renameWorkspace', 'forgetWorkspace', 'renameSession', 'archiveSession', 'pinSession'].includes(request.op)
     const lease = await this.serialize(async () => {
       this.assertActive()
       const record = await this.record(id)
       const runtime = this.runtime(id)
       if (runtime.record && !sameDestination(runtime.record, record)) await this.stop(runtime)
+      // A connection id may now name another destination or a fresh transport.
+      // Bind writes to the caller's observed authority inside this lease queue,
+      // before starting authentication or sending any request to the remote Host.
+      if ((mutation || expectedTransportId !== undefined) && (runtime.phase !== 'connected' || !runtime.transportId || expectedTransportId !== runtime.transportId)) {
+        throw new WorkspaceProtocolError('CONFLICT')
+      }
       if (runtime.phase !== 'connected' || !runtime.tunnel || !runtime.controller || !runtime.workspaceAgent || !runtime.record?.token) {
         throw new Error('Connect before opening this workspace.')
       }

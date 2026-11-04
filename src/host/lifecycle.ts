@@ -102,6 +102,7 @@ async function execute(request: { target: string; script: string; signal?: Abort
       stdio: ['pipe', 'pipe', 'pipe'], env: options.env ?? process.env,
     })
     let stdout = ''
+    let stdoutBytes = 0
     let stderr = ''
     let failure: Error | undefined
     let settled = false
@@ -128,8 +129,10 @@ async function execute(request: { target: string; script: string; signal?: Abort
     request.signal?.addEventListener('abort', onAbort, { once: true })
     if (request.signal?.aborted) onAbort()
     child.stdout.on('data', (chunk: Buffer) => {
+      if (failure || settled) return
+      stdoutBytes += chunk.byteLength
+      if (stdoutBytes > 16_384) { stop(new RemoteHostError('protocol')); return }
       stdout += chunk.toString('utf8')
-      if (stdout.length > 16_384) stop(new RemoteHostError('protocol'))
     })
     // Retain a bounded tail only to classify SSH failures into fixed messages.
     // Diagnostics can contain native startup URLs and must never be exposed.

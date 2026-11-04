@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from './snapshot-store.js'
 import type { HostObservable, PropsRenderSlots, StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
 import type { EmbeddedLayoutController } from './embedded-layout.js'
 import { settingsShell, type NativeSettingsShell } from './native-settings.js'

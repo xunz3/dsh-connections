@@ -1,82 +1,148 @@
-import type { Context, Fiber } from '@deepseek-ai/cordis'
-import type { UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client'
-// The build inlines this installed package's ModuleLoader factory: a disabled
-// sidebar deployment is absent from Harness's runtime module table. Its native
-// dependencies stay external and are supplied by the main manifest's inject list.
-import { apply as applySidebar, inject as sidebarInject } from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ILayout } from '@deepseek-ai/dsh-client-ui-layout/client'
 
-export interface NativeSidebarRouting {
-  /** Explicit user navigation, shared with the source-aware New Session command. */
-  startSession: UiWorkspace['startSession']
-  /** True only while the successfully installed native sidebar owns its slot. */
-  onReady?(ready: boolean): void
+/** Observe the independently deployed native shell; never install or replace it. */
+export function observeNativeSidebar(ctx: Context, onReady: (ready: boolean) => void): () => void {
+  let ready: boolean | undefined
+  const publish = (next: boolean) => {
+    if (next === ready) return
+    ready = next
+    onReady(next)
+  }
+  const sync = () => {
+    const entry = ctx.slots.entriesOfSlot('sidebar')[0]
+    publish(entry?.locale === 'sidebar'
+      && entry.children?.['sidebar.workspaces']?.kind === 'single'
+      && entry.children?.['sidebar.settings']?.kind === 'single')
+  }
+  const unsubscribe = ctx.slots.subscribe('sidebar', sync)
+  sync()
+  return () => { unsubscribe(); publish(false) }
+}
+
+/** Plugin-owned synchronous panel transitions, never a replacement layout API. */
+export interface NavigationTransaction {
+  getSnapshot(): boolean
+  subscribe(listener: () => void): () => void
+  run(action: () => void): void
+}
+
+export function createNavigationTransaction(): NavigationTransaction {
+  let depth = 0
+  const listeners = new Set<() => void>()
+  const emit = () => { for (const listener of listeners) listener() }
+  return {
+    getSnapshot: () => depth > 0,
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    run(action) {
+      const outer = depth++ === 0
+      try { if (outer) emit(); action() }
+      finally { depth--; if (outer) emit() }
+    },
+  }
+}
+
+export interface RemoteNavigationSource {
+  getSnapshot(): boolean
+  subscribe(listener: () => void): () => void
+  close(): void
+}
+
+export interface NativeSessionSource {
+  getSnapshot(): { readonly key: string | undefined }
+  subscribe(listener: () => void): () => void
+}
+
+/** Wait for the native local baseline before an automatic remote panel commit.
+ * An empty ready workspace list needs no local workspace restoration. A stalled
+ * native startup is bounded; this does not create a Session or rewrite its facts. */
+export function waitForNativeStartup(session: NativeSessionSource, workspaces: {
+  getSnapshot(): { readonly phase: string; readonly items: readonly unknown[] }
+  subscribe(listener: () => void): () => void
+}, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  if (session.getSnapshot().key !== undefined) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    let active = true, queued = false
+    const subscriptions: Array<() => void> = []
+    const finish = (error?: unknown) => {
+      if (!active) return
+      active = false
+      clearTimeout(timer)
+      signal.removeEventListener('abort', aborted)
+      for (const off of subscriptions) off()
+      if (error !== undefined) reject(error); else resolve()
+    }
+    const aborted = () => finish(signal.reason ?? new DOMException('Startup cancelled', 'AbortError'))
+    const check = () => {
+      if (!active || queued) return
+      const snapshot = workspaces.getSnapshot()
+      if (session.getSnapshot().key === undefined && (snapshot.phase !== 'ready' || snapshot.items.length !== 0)) return
+      queued = true
+      queueMicrotask(() => {
+        queued = false
+        if (!active) return
+        const latest = workspaces.getSnapshot()
+        if (session.getSnapshot().key !== undefined || latest.phase === 'ready' && latest.items.length === 0) finish()
+      })
+    }
+    const timer = setTimeout(() => finish(), 30_000)
+    signal.addEventListener('abort', aborted, { once: true })
+    try {
+      for (const source of [session, workspaces]) {
+        const off = source.subscribe(check)
+        if (active) subscriptions.push(off); else off()
+      }
+      if (signal.aborted) aborted(); else check()
+    } catch (error) { finish(error) }
+  })
 }
 
 /**
- * Reuse the complete native sidebar in a profile with its separate deployment disabled.
- * Only this child scope sees routed session creation; all other UI keeps native navigation.
- * Native apply owns its original components, injected props, child slots, and disposal.
+ * Native blank restoration also calls beginNavigation during cold startup. Do
+ * not arm a cancelling navigation signal until the first native main binding
+ * has committed. Afterwards latch readiness: explicit New Session may reuse
+ * the same blank/key/panel and must still supersede pending remote intent.
  */
-export function installNativeSidebar(ctx: Context, routing: NativeSidebarRouting): (Fiber & PromiseLike<Fiber>) | undefined {
-  routing.onReady?.(false)
-  if (ctx.slots.entries('sidebar').length !== 0) {
-    // Another composition owns the shell. Preserve it and leave remote opening
-    // unavailable; its New Session action cannot safely target a remote source.
-    ctx.logger.warn('Connections found an existing sidebar provider; native navigation is preserved and remote workspace routing is unavailable.')
-    return undefined
+export function watchNativeNavigation(layout: Pick<ILayout, 'beginNavigation'>, source: RemoteNavigationSource, transaction?: NavigationTransaction, session?: NativeSessionSource): () => void {
+  let active = true
+  let ready = session === undefined || session.getSnapshot().key !== undefined
+  let queued = false
+  let closing = false
+  let signal: AbortSignal | undefined
+  const clear = () => { signal?.removeEventListener('abort', navigate); signal = undefined }
+  const navigate = () => {
+    clear()
+    closing = true
+    try { source.close() } finally { closing = false }
   }
-  const native = ctx.uiWorkspace
-  const methods = new WeakMap<Function, Function>()
-  const startSession: UiWorkspace['startSession'] = (...args) => routing.startSession(...args)
-  // A Proxy over the native Cordis Service inherits its tracker and method
-  // descriptors. ctx.get() then wraps it again and reads the native prototype's
-  // startSession descriptor, bypassing the routing get trap. This facade owns
-  // its method and forwards the remaining navigation interface. Cordis's native
-  // tracker alone must stay absent or it would bypass our own startSession.
-  const navigation = new Proxy({ startSession }, {
-    get(target, property) {
-      if (property === 'startSession') return target.startSession
-      if (property === Symbol.for('cordis.tracker')) return undefined
-      // Preserve receivers for native methods and getters, including future additions.
-      const value: unknown = Reflect.get(native, property, native)
-      if (typeof value !== 'function') return value
-      let bound = methods.get(value)
-      if (bound === undefined) { bound = value.bind(native) as Function; methods.set(value, bound) }
-      return bound
-    },
-    set(_target, property, value) { return Reflect.set(native, property, value, native) },
-    has(target, property) { return property in target || property !== Symbol.for('cordis.tracker') && property in native },
-    ownKeys(target) { return [...new Set([...Reflect.ownKeys(native), ...Reflect.ownKeys(target)])].filter(key => key !== Symbol.for('cordis.tracker')) },
-    getOwnPropertyDescriptor(target, property) {
-      if (property === Symbol.for('cordis.tracker')) return undefined
-      const own = Reflect.getOwnPropertyDescriptor(target, property)
-      if (own) return own
-      const descriptor = Reflect.getOwnPropertyDescriptor(native, property)
-      return descriptor && { ...descriptor, configurable: true }
-    },
-    deleteProperty(_target, property) { return property !== 'startSession' && Reflect.deleteProperty(native, property) },
-  }) as UiWorkspace
-  return ctx.isolate('uiWorkspace').plugin({
-    name: 'connections-native-sidebar',
-    apply(scope: Context) {
-      scope.provide('uiWorkspace', navigation)
-      scope.plugin({ name: 'connections-native-sidebar-content', inject: sidebarInject, apply(content: Context) {
-        applySidebar(content)
-        // Returning a Fiber is not evidence that its native apply succeeded.
-        // The layout service already declares this slot; retain the installed
-        // entry identity so a later conflicting occupant also disables routing.
-        let installed = content.slots.entries('sidebar')[0]
-        const sync = () => {
-          const entries = content.slots.entries('sidebar')
-          if (!installed && entries.length === 1) installed = entries[0]
-          routing.onReady?.(installed !== undefined && entries.length === 1 && entries[0] === installed)
-        }
-        content.effect(() => {
-          const off = content.slots.subscribe('sidebar', sync)
-          sync()
-          return () => { off(); routing.onReady?.(false) }
-        })
-      } })
-    },
+  const sync = () => {
+    if (!active || closing) return
+    if (!ready || transaction?.getSnapshot() || !source.getSnapshot()) { clear(); return }
+    if (signal !== undefined) return
+    const next = layout.beginNavigation()
+    // Superseding an older native navigation may synchronously update state.
+    if (!active || transaction?.getSnapshot() || !source.getSnapshot()) return
+    signal = next
+    next.addEventListener('abort', navigate, { once: true })
+    if (next.aborted) navigate()
+  }
+  // Withdraw the old abort listener before our own panel actions and rearm only
+  // after the complete synchronous transaction (including nested actions) ends.
+  const offTransaction = transaction?.subscribe(sync)
+  const unsubscribe = source.subscribe(sync)
+  const offSession = session?.subscribe(() => {
+    if (ready || queued || session.getSnapshot().key === undefined) return
+    queued = true
+    // retain() may publish the binding before native replaceMain checks its
+    // navigation signal once more. Never abort that in-progress commit inline.
+    queueMicrotask(() => {
+      queued = false
+      if (!active || session.getSnapshot().key === undefined) return
+      ready = true
+      sync()
+    })
   })
+  sync()
+  return () => { active = false; unsubscribe(); offSession?.(); offTransaction?.(); clear() }
 }

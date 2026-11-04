@@ -70,6 +70,7 @@ test('disposed settings operations ignore late replies and abort their request s
   let ready = false
   const stop = bindSettingsHostRelay({ channel, revision: 1, endpoint, getSnapshot: () => snapshot,
     onSelect: id => { selected.push(id) }, onReady: () => { ready = true }, onError: assert.fail })
+  await new Promise<void>(resolve => setImmediate(resolve))
   stop()
   assert.equal(signal.aborted, true)
   finish({ revision: 1, snapshot, ready: true, selection: 'local' })
@@ -77,9 +78,192 @@ test('disposed settings operations ignore late replies and abort their request s
   assert.deepEqual(selected, [])
   assert.equal(ready, false)
   const client = createSettingsHostRelayClient(channel, endpoint)
+  await new Promise<void>(resolve => setImmediate(resolve))
   client.dispose()
   assert.equal(signal.aborted, true)
   finish({ revision: 1, reportedRevision: 1, presentedRevision: 1, intent: { revision: 1, requestId: 'one', target: { kind: 'settings' } } })
   await Promise.resolve(); await Promise.resolve()
   assert.equal(client.getSnapshot(), undefined)
+})
+
+const settled = () => new Promise<void>(resolve => setImmediate(resolve))
+class Visibility extends EventTarget {
+  visibilityState: DocumentVisibilityState = 'visible'
+  readonly listeners = new Set<EventListenerOrEventListenerObject | null>()
+  override addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: AddEventListenerOptions | boolean) {
+    if (type === 'visibilitychange') this.listeners.add(listener)
+    super.addEventListener(type, listener, options)
+  }
+  override removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: EventListenerOptions | boolean) {
+    if (type === 'visibilitychange') this.listeners.delete(listener)
+    super.removeEventListener(type, listener, options)
+  }
+  set(value: DocumentVisibilityState) { this.visibilityState = value; this.dispatchEvent(new Event('visibilitychange')) }
+}
+async function fixture() {
+  const service = new WorkspaceEndpoint(services), requests: WorkspaceRequest[] = []
+  const signal = new AbortController().signal
+  const endpoint: SettingsHostEndpoint = async <R extends WorkspaceRequest>(request: R, signal: AbortSignal) => {
+    requests.push(structuredClone(request))
+    const result = await service.handle(request, signal)
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code })
+    return result.value as WorkspaceResultMap[R['op']]
+  }
+  const { channel } = await endpoint({ op: 'openView', protocol: WORKSPACE_PROTOCOL, clientId: 'relay-lifecycle' }, signal)
+  const { revision } = await endpoint({ op: 'navigate', channel, requestId: 'settings', target: { kind: 'settings' } }, signal)
+  return { service, requests, endpoint, channel, revision, signal }
+}
+
+test('Desktop Settings publish, poll and queued selection pause hidden for ten minutes and consume once visible', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = await fixture(), document = new Visibility(), selected: string[] = [], errors: unknown[] = []
+  t.after(() => f.service.dispose())
+  document.set('hidden')
+  f.requests.length = 0
+  let ready = false
+  const stop = bindSettingsHostRelay({ ...f, document, getSnapshot: () => snapshot, onSelect: id => selected.push(id),
+    onReady: () => { ready = true }, onError: error => errors.push(error), intervalMs: 2 })
+  const client = createSettingsHostRelayClient(f.channel, f.endpoint, 2, { document })
+  t.after(() => { stop(); client.dispose() })
+  await settled()
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, 0)
+  document.set('visible')
+  await settled()
+  assert.deepEqual(client.getSnapshot(), snapshot)
+  t.mock.timers.tick(2)
+  await settled()
+  assert.equal(ready, true)
+  document.set('hidden')
+  client.select('local'); client.select('local')
+  const before = f.requests.length
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, before)
+  document.set('visible')
+  document.set('visible')
+  await settled()
+  t.mock.timers.tick(2)
+  await settled()
+  assert.deepEqual(selected, ['local'])
+  assert.equal(f.requests.slice(before).some(request => request.op === 'viewState'), true)
+  assert.equal(f.requests.filter(request => request.op === 'selectSettingsHost').length, 1)
+  assert.deepEqual(errors, [])
+  assert.equal(document.listeners.size, 0, 'both one-consumer loops remove their visibility listener on consumption')
+  const count = f.requests.length
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, count)
+})
+
+test('a queued Settings selection is not migrated into a newer Settings revision after hiding', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = await fixture(), document = new Visibility(), selected: string[] = [], errors: unknown[] = []
+  t.after(() => f.service.dispose())
+  const stop = bindSettingsHostRelay({ ...f, document, getSnapshot: () => snapshot, onSelect: id => selected.push(id),
+    onReady() {}, onError: error => errors.push(error), intervalMs: 2 })
+  const client = createSettingsHostRelayClient(f.channel, f.endpoint, 2, { document })
+  t.after(() => { stop(); client.dispose() })
+  await settled()
+  assert.deepEqual(client.getSnapshot(), snapshot)
+  document.set('hidden')
+  client.select('local')
+  await f.endpoint({ op: 'navigate', channel: f.channel, requestId: 'new-settings', target: { kind: 'settings' } }, f.signal)
+  const count = f.requests.length
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.equal(f.requests.length, count)
+  document.set('visible')
+  await settled()
+  assert.deepEqual(selected, [])
+  assert.equal(client.getSnapshot(), undefined)
+  assert.equal(f.requests.some(request => request.op === 'selectSettingsHost'), false)
+  assert.equal(errors.length, 1)
+  assert.equal((errors[0] as { code: string }).code, 'CONFLICT')
+  assert.equal(document.listeners.size, 0)
+})
+
+test('lost selection and publish replies retry only the same operation and never repeat host navigation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = await fixture(), selected: string[] = []
+  t.after(() => f.service.dispose())
+  let selectionLost = false, publishLost = false
+  const endpoint: SettingsHostEndpoint = async (request, signal) => {
+    const result = await f.endpoint(request, signal)
+    if (request.op === 'selectSettingsHost' && !selectionLost) { selectionLost = true; throw new Error('Lost selection reply') }
+    if (request.op === 'publishSettingsHosts' && 'selection' in result && result.selection !== undefined && !publishLost) {
+      publishLost = true
+      throw new Error('Lost publish reply')
+    }
+    return result
+  }
+  const stop = bindSettingsHostRelay({ ...f, endpoint, getSnapshot: () => snapshot, onSelect: id => selected.push(id), onReady() {}, onError() {}, intervalMs: 2 })
+  const client = createSettingsHostRelayClient(f.channel, endpoint, 2)
+  t.after(() => { stop(); client.dispose() })
+  await settled()
+  client.select('local')
+  for (let attempt = 0; attempt < 5; attempt++) { t.mock.timers.tick(2); await settled() }
+  assert.equal(selectionLost, true)
+  assert.equal(publishLost, true)
+  assert.deepEqual(selected, ['local'])
+  const selections = f.requests.filter(request => request.op === 'selectSettingsHost')
+  assert.equal(selections.length, 2)
+  assert.deepEqual(selections[0], selections[1])
+  const count = f.requests.length
+  t.mock.timers.tick(10_000)
+  await settled()
+  assert.equal(f.requests.length, count)
+})
+
+test('Settings parent and child use capped backoff, suppress hidden errors and clear waits on dispose', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const document = new Visibility(), calls: string[] = [], errors: unknown[] = []
+  const endpoint: SettingsHostEndpoint = async request => { calls.push(request.op); throw new Error('Temporary relay outage') }
+  const stop = bindSettingsHostRelay({ channel: 'b'.repeat(43), revision: 1, endpoint, document, intervalMs: 2, maxBackoffMs: 8,
+    getSnapshot: () => snapshot, onSelect: assert.fail, onReady: assert.fail, onError: error => errors.push(error) })
+  const client = createSettingsHostRelayClient('b'.repeat(43), endpoint, 2, { document, maxBackoffMs: 8 })
+  t.after(() => { stop(); client.dispose() })
+  const counts = () => [calls.filter(op => op === 'publishSettingsHosts').length, calls.filter(op => op === 'viewState').length]
+  await settled()
+  assert.deepEqual(counts(), [1, 1])
+  for (const [ms, expected] of [[1, 1], [1, 2], [3, 2], [1, 3], [7, 3], [1, 4], [8, 5], [8, 6]]) {
+    t.mock.timers.tick(ms)
+    await settled()
+    assert.deepEqual(counts(), [expected, expected])
+  }
+  document.set('hidden')
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.deepEqual(counts(), [6, 6])
+  assert.equal(errors.length, 6)
+  document.set('visible')
+  await settled()
+  assert.deepEqual(counts(), [7, 7])
+  document.set('hidden')
+  stop(); client.dispose()
+  assert.equal(document.listeners.size, 0)
+  document.set('visible')
+  t.mock.timers.tick(10 * 60_000)
+  await settled()
+  assert.deepEqual(counts(), [7, 7])
+})
+
+test('disposing a hidden queued selection cannot send it or navigate after visibility returns', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = await fixture(), document = new Visibility(), selected: string[] = []
+  t.after(() => f.service.dispose())
+  const stop = bindSettingsHostRelay({ ...f, document, getSnapshot: () => snapshot, onSelect: id => selected.push(id), onReady() {}, onError: assert.fail, intervalMs: 2 })
+  const client = createSettingsHostRelayClient(f.channel, f.endpoint, 2, { document })
+  t.after(() => { stop(); client.dispose() })
+  await settled()
+  document.set('hidden')
+  client.select('local')
+  client.dispose()
+  document.set('visible')
+  await settled()
+  assert.equal(f.requests.some(request => request.op === 'selectSettingsHost'), false)
+  assert.deepEqual(selected, [])
+  stop()
+  assert.equal(document.listeners.size, 0)
 })

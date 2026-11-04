@@ -7,6 +7,7 @@ import type { CredentialKey, CredentialRecord } from '@deepseek-ai/dsh-credentia
 import { ConnectionsManager, probeHarness } from '../src/host/manager.js'
 import { createStore } from '../src/host/store.js'
 import { SshTunnelError, type Tunnel } from '../src/host/ssh.js'
+import { SSH_DIAGNOSTIC_MESSAGES } from '../src/host/ssh-common.js'
 import { LATEST_SUPPORTED_REMOTE_VERSION } from '../src/shared/validation.js'
 import { HarnessAuthorizationError, HarnessConnectionError, HarnessProtocolError } from '../src/host/harness-http.js'
 
@@ -213,6 +214,49 @@ test('an old open completion cannot invalidate a replacement connection', async 
   } finally { release.resolve(); await manager.dispose() }
 })
 
+for (const staleOutcome of ['success', 'failure'] as const) test(`a dropped transport cannot reuse its pending authentication ${staleOutcome} on a new connect`, async () => {
+  const stale = deferred<string>(), replacement = deferred<string>(), entered = deferred<void>()
+  const tunnels = [fakeTunnel(41380), fakeTunnel(41381)]
+  const probePorts: number[] = []
+  let attempts = 0
+  const manager = new ConnectionsManager(createStore(credentials()), {
+    connectTunnel: async () => tunnels[attempts++]!,
+    probe: async port => {
+      probePorts.push(port)
+      if (probePorts.length === 1) return PROBE_COOKIE
+      if (port === tunnels[0]!.port) { entered.resolve(); return stale.promise }
+      return replacement.promise
+    },
+  })
+  let connecting: Promise<unknown> | undefined
+  let opening: Promise<unknown> | undefined
+  try {
+    const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+    await manager.connect(saved.id)
+    opening = assert.rejects(manager.open(saved.id), /Connection changed/)
+    await entered.promise
+    tunnels[0]!.drop(new SshTunnelError('SSH_CLOSED'))
+    assert.equal((await manager.list())[0]?.phase, 'error')
+    connecting = manager.connect(saved.id)
+    void connecting.catch(() => {})
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual(probePorts, [41380, 41380, 41381], 'the new transport must start its own authentication exchange')
+    if (staleOutcome === 'success') stale.resolve('previous-transport-cookie')
+    else stale.reject(new HarnessConnectionError(`old private failure ${TOKEN}`))
+    await opening
+    assert.equal((await manager.list())[0]?.phase, 'connecting', 'a stale completion cannot authenticate or fail the replacement transport')
+    assert.equal(tunnels[1]!.closes, 0)
+    replacement.resolve(PROBE_COOKIE)
+    await connecting
+    assert.equal((await manager.list())[0]?.phase, 'connected')
+  } finally {
+    stale.resolve(PROBE_COOKIE)
+    replacement.resolve(PROBE_COOKIE)
+    await Promise.allSettled([opening, connecting])
+    await manager.dispose()
+  }
+})
+
 test('an open transport or authorization failure invalidates only its current lease', async () => {
   for (const failure of [new HarnessAuthorizationError('Private authorization detail'), new HarnessConnectionError('Private network detail')]) {
     const tunnel = fakeTunnel()
@@ -378,6 +422,20 @@ test('SSH failure codes retain useful guidance without forwarding raw process di
   await assert.rejects(manager.connect(saved.id), error => error instanceof Error && /host identity/.test(error.message) && !error.message.includes(TOKEN))
   assert.equal(JSON.stringify(await manager.list()).includes(TOKEN), false)
   await manager.dispose()
+})
+
+test('typed SSH setup diagnostics reach connection status without arbitrary error text', async () => {
+  for (const diagnostic of ['CONTROL_PATH', 'SUPERVISOR'] as const) {
+    const manager = new ConnectionsManager(createStore(credentials()), {
+      connectTunnel: async () => { throw new SshTunnelError(diagnostic === 'CONTROL_PATH' ? 'SSH_FORWARD' : 'SSH_FAILED', TOKEN, diagnostic) },
+    })
+    try {
+      const saved = await manager.save({ name: 'Work', target: 'dev', launchUrl })
+      await assert.rejects(manager.connect(saved.id), { message: SSH_DIAGNOSTIC_MESSAGES[diagnostic] })
+      assert.equal((await manager.list())[0]?.error, SSH_DIAGNOSTIC_MESSAGES[diagnostic])
+      assert.equal(JSON.stringify(await manager.list()).includes(TOKEN), false)
+    } finally { await manager.dispose() }
+  }
 })
 
 test('SSH authentication failure during the first HTTP request remains actionable', async () => {
@@ -823,5 +881,169 @@ test('remote updates and destination edits preserve the saved restoration prefer
     assert.equal(edited.autoConnect, true, 'internal transport cleanup does not disable the connection')
     await manager.update({ id: saved.id })
     assert.equal((await store.read(saved.id))?.autoConnect, true)
+  } finally { await manager.dispose() }
+})
+
+const approvalChanged = (error: unknown) => error instanceof Error && error.message === 'This connection has changed.'
+
+test('Host operation snapshots bind destination identity, not mutable presentation or transport preferences', async () => {
+  const store = createStore(credentials())
+  const manager = new ConnectionsManager(store, { connectTunnel: async () => fakeTunnel(), probe: async () => PROBE_COOKIE })
+  try {
+    const saved = await manager.save({ name: 'Original', target: 'dev', launchUrl, autoConnect: false })
+    const snapshot = await manager.operationSnapshot(saved.id)
+    assert.match(snapshot.revision, /^[a-f0-9]{64}$/)
+    assert.equal(JSON.stringify(snapshot.view).includes(TOKEN), false)
+    await manager.save({ id: saved.id, name: 'Renamed', target: 'dev', mode: 'existing', autoConnect: true }, snapshot.revision)
+    await store.rememberPort(saved.id, 'dev', 41381)
+    assert.equal((await manager.operationSnapshot(saved.id)).revision, snapshot.revision, 'names, explicit existing mode, restoration preference and last port are not authority changes')
+    await manager.connect(saved.id, snapshot.revision)
+    assert.equal((await manager.operationSnapshot(saved.id)).revision, snapshot.revision)
+    const output = JSON.stringify(await manager.list())
+    assert.equal(output.includes(snapshot.revision), false, 'the Host precondition is never public connection state')
+    assert.equal(output.includes(TOKEN), false)
+    await manager.save({ id: saved.id, name: 'Rotated credential', target: 'dev', launchUrl: `${launchUrl}-rotated` })
+    assert.notEqual((await manager.operationSnapshot(saved.id)).revision, snapshot.revision, 'a credential rotation changes authority even on the same SSH alias and port')
+    await assert.rejects(manager.save({ name: 'Unapproved new target', target: 'other', launchUrl }, snapshot.revision), approvalChanged)
+    assert.equal((await store.list()).length, 1)
+  } finally { await manager.dispose() }
+})
+
+for (const action of ['connect', 'reconnect', 'disconnect', 'remove', 'update', 'rename'] as const) test(`an approval-stalled ${action} cannot change a replacement destination under the same id`, async () => {
+  const store = createStore(credentials())
+  const calls: string[] = [], tunnels: ReturnType<typeof fakeTunnel>[] = []
+  const host = () => ({ remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', pid: 512, service: 'systemd' as const })
+  const manager = new ConnectionsManager(store, {
+    prepareHost: async ({ target }) => { calls.push(`prepare:${target}`); return host() },
+    updateHost: async ({ target }) => { calls.push(`update:${target}`); return host() },
+    connectTunnel: async ({ target }) => { calls.push(`tunnel:${target}`); const tunnel = fakeTunnel(); tunnels.push(tunnel); return tunnel },
+    probe: async () => PROBE_COOKIE,
+  })
+  const entered = deferred<void>(), approved = deferred<void>()
+  let pending: Promise<unknown> | undefined
+  try {
+    const saved = await manager.save({ name: 'Approved Host', target: 'approved', mode: 'managed' })
+    await manager.connect(saved.id)
+    const snapshot = await manager.operationSnapshot(saved.id)
+    const operation = async () => {
+      entered.resolve()
+      await approved.promise
+      if (action === 'update') return manager.update({ id: saved.id }, snapshot.revision)
+      if (action === 'rename') return manager.save({ id: saved.id, name: 'Unapproved stale rename', target: snapshot.view.target, mode: snapshot.view.mode }, snapshot.revision)
+      return manager[action](saved.id, snapshot.revision)
+    }
+    pending = assert.rejects(operation(), approvalChanged)
+    await entered.promise
+    await manager.save({ id: saved.id, name: 'Replacement Host', target: 'replacement', mode: 'managed' })
+    await manager.connect(saved.id)
+    const current = (await manager.list())[0]!
+    const record = await store.read(saved.id)
+    const before = [...calls]
+    approved.resolve()
+    await pending
+    assert.deepEqual(calls, before, 'a stale approval cannot prepare, update or connect either Host')
+    assert.equal(tunnels.at(-1)!.closes, 0, 'a stale approval cannot disconnect or remove the replacement transport')
+    assert.deepEqual(await store.read(saved.id), record, 'a stale approval cannot alter or delete the replacement credential/preference/name')
+    assert.deepEqual((await manager.list())[0], current)
+  } finally { approved.resolve(); await pending; await manager.dispose() }
+})
+
+test('a guarded reconnect cannot bypass its revision check by joining an unguarded reconnect', async () => {
+  const store = createStore(credentials()), entered = deferred<void>(), ready = deferred<void>()
+  let prepares = 0
+  const manager = new ConnectionsManager(store, {
+    prepareHost: async () => { prepares++; entered.resolve(); await ready.promise; return { remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', pid: 512, service: 'systemd' } },
+    connectTunnel: async () => fakeTunnel(), probe: async () => PROBE_COOKIE,
+  })
+  let connecting: Promise<unknown> | undefined, joined: Promise<unknown> | undefined
+  try {
+    const saved = await manager.save({ name: 'Approved', target: 'approved', mode: 'managed' })
+    const old = await manager.operationSnapshot(saved.id)
+    await manager.save({ id: saved.id, name: 'Replacement', target: 'replacement', mode: 'managed' })
+    connecting = manager.reconnect(saved.id)
+    await entered.promise
+    let checked = false
+    const refused = assert.rejects(manager.reconnect(saved.id, old.revision), approvalChanged).then(() => { checked = true })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(checked, true, 'the stale caller must be rejected before the pending replacement is released')
+    await refused
+    const current = await manager.operationSnapshot(saved.id)
+    joined = manager.reconnect(saved.id, current.revision)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(prepares, 1, 'a valid guarded caller can still share the checked in-flight runtime')
+    ready.resolve()
+    await Promise.all([connecting, joined])
+    assert.equal((await manager.list())[0]?.target, 'replacement')
+  } finally { ready.resolve(); await Promise.allSettled([connecting, joined]); await manager.dispose() }
+})
+
+for (const action of ['connect', 'disconnect'] as const) test(`a record replaced during ${action} intent persistence cannot start another Host operation`, async () => {
+  const store = createStore(credentials()), persist = store.setAutoConnect.bind(store)
+  let replace = false, prepares = 0
+  const tunnel = fakeTunnel()
+  const manager = new ConnectionsManager(store, {
+    prepareHost: async () => { prepares++; return { remotePort: 3080, token: TOKEN, version: '0.2.1-rc.3', pid: 512, service: 'systemd' } },
+    connectTunnel: async () => tunnel, probe: async () => PROBE_COOKIE,
+  })
+  store.setAutoConnect = async (id, enabled) => {
+    if (replace) {
+      replace = false
+      // Another store/provider writer is not protected by this manager's queue.
+      await store.save({ id, name: 'External replacement', target: 'replacement', mode: 'managed' })
+    }
+    return persist(id, enabled)
+  }
+  try {
+    const saved = await manager.save({ name: 'Approved', target: 'approved', mode: 'managed' })
+    await manager.connect(saved.id)
+    const snapshot = await manager.operationSnapshot(saved.id)
+    replace = true
+    await assert.rejects(manager[action](saved.id, snapshot.revision), approvalChanged)
+    assert.equal(prepares, 1)
+    assert.equal(tunnel.closes, 0, 'a changed return record cannot be used to stop or replace the current transport')
+    assert.equal((await store.read(saved.id))?.target, 'replacement')
+  } finally { await manager.dispose() }
+})
+
+test('guarded removal rereads its authority after draining the approved old transport', async () => {
+  const store = createStore(credentials()), closing = deferred<void>(), release = deferred<void>()
+  const tunnel = fakeTunnel(), close = tunnel.close.bind(tunnel)
+  tunnel.close = async () => { closing.resolve(); await release.promise; await close() }
+  const manager = new ConnectionsManager(store, { connectTunnel: async () => tunnel, probe: async () => PROBE_COOKIE })
+  let removed: Promise<unknown> | undefined
+  try {
+    const saved = await manager.save({ name: 'Approved', target: 'approved', launchUrl })
+    await manager.connect(saved.id)
+    const snapshot = await manager.operationSnapshot(saved.id)
+    removed = assert.rejects(manager.remove(saved.id, snapshot.revision), approvalChanged)
+    await closing.promise
+    await store.save({ id: saved.id, name: 'External replacement', target: 'replacement', launchUrl })
+    release.resolve()
+    await removed
+    assert.equal((await store.read(saved.id))?.target, 'replacement', 'a replacement credential must survive a slow old-tunnel close')
+  } finally { release.resolve(); await removed; await manager.dispose() }
+})
+
+test('matching approval revisions support all connection changes while UI callers remain optional', async () => {
+  const store = createStore(credentials()), tunnels: ReturnType<typeof fakeTunnel>[] = []
+  let version = '0.2.1-rc.2', updates = 0
+  const host = () => ({ remotePort: 3080, token: TOKEN, version, pid: 512, service: 'systemd' as const })
+  const manager = new ConnectionsManager(store, {
+    prepareHost: async () => host(), updateHost: async input => { updates++; version = input.version!; return host() },
+    connectTunnel: async () => { const tunnel = fakeTunnel(); tunnels.push(tunnel); return tunnel }, probe: async () => PROBE_COOKIE,
+  })
+  try {
+    const saved = await manager.save({ name: 'Approved', target: 'approved', mode: 'managed', autoConnect: false })
+    const snapshot = await manager.operationSnapshot(saved.id)
+    await manager.save({ id: saved.id, name: 'Approved rename', target: 'approved', mode: 'managed' }, snapshot.revision)
+    await manager.connect(saved.id, snapshot.revision)
+    await manager.reconnect(saved.id, snapshot.revision)
+    await manager.update({ id: saved.id, version: '0.2.1-rc.3' }, snapshot.revision)
+    assert.equal(updates, 1)
+    assert.equal((await manager.operationSnapshot(saved.id)).revision, snapshot.revision, 'managed launch credentials and runtime version are not persisted destination changes')
+    await manager.disconnect(saved.id, snapshot.revision)
+    await manager.remove(saved.id, snapshot.revision)
+    assert.deepEqual(await manager.list(), [])
+    assert.ok(tunnels.every(tunnel => tunnel.closes === 1))
   } finally { await manager.dispose() }
 })

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createApi } from '../src/client/rpc.js'
 import type { ConnectionView } from '../src/shared/types.js'
+import type { WorkspaceCall } from '../src/shared/workspace-rpc.js'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -34,4 +35,21 @@ test('concurrent shell list samples share a read but mutations invalidate earlie
   reads[1].resolve({ ok: true, value: [row] })
   reads[2].resolve({ ok: true, value: [row] })
   await Promise.all([duringChange, latest])
+})
+
+test('workspace RPC forwards catalog transport authority only in the local Host envelope', async () => {
+  const calls: WorkspaceCall[] = []
+  const api = createApi({ remote: { connections: {
+    async workspace(input: WorkspaceCall) {
+      calls.push(structuredClone(input))
+      return { ok: true, value: { request: input.request, response: { ok: true, value: { done: true } } } }
+    },
+  } } } as never)
+  const id = 'connection-11111111-1111-4111-a111-111111111111', transportId = crypto.randomUUID()
+  const request = { op: 'renameSession' as const, id: 'native-chat', title: 'Renamed' }
+  await api.workspace(id, request, transportId)
+  assert.deepEqual(calls[0], { id, request, expectedTransportId: transportId })
+  assert.equal('expectedTransportId' in calls[0].request, false, 'no new field is smuggled into the remote content protocol')
+  await api.workspace('local', request)
+  assert.deepEqual(calls[1], { id: 'local', request }, 'local writes need no SSH authority and omit the optional envelope field')
 })

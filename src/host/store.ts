@@ -1,9 +1,11 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { serialize as serializeRecord } from 'node:v8'
 import { credentialKey, type CredentialProvider, type CredentialRecord } from '@deepseek-ai/dsh-credentials'
-import type { ConnectionRecord, SaveConnection } from '../shared/types.js'
-import { parseId, parseLaunchUrl, parseRecord, parseSave } from '../shared/validation.js'
+import type { ConnectionDiagnostic, ConnectionDiagnosticsApi, ConnectionDiagnosticScope, ConnectionRecord, SaveConnection } from '../shared/types.js'
+import { parseDeleteDiagnostic, parseDiagnosticRef, parseId, parseLaunchUrl, parseRecord, parseSave } from '../shared/validation.js'
 
 export interface ConnectionStore {
+  diagnostics?: ConnectionDiagnosticsApi
   list(): Promise<ConnectionRecord[]>
   read(id: string): Promise<ConnectionRecord | undefined>
   save(input: SaveConnection): Promise<ConnectionRecord>
@@ -20,8 +22,57 @@ const LEGACY_SCOPE = 'connections'
 const key = (id: string) => credentialKey(SCOPE, parseId(id))
 const legacyKey = (id: string) => credentialKey(LEGACY_SCOPE, parseId(id))
 // Migration touches two native records. Share one per-id transaction queue
-// across stores backed by the same provider so deletion cannot be overtaken.
+// across this process's stores using the same provider object, not other writers.
 const providerOperations = new WeakMap<Credentials, Map<string, Promise<unknown>>>()
+interface DiagnosticReceipt {
+  id: string
+  scope: ConnectionDiagnosticScope
+  digest?: string
+  expires: number
+  exported: boolean
+}
+const providerReceipts = new WeakMap<Credentials, Map<string, DiagnosticReceipt>>()
+const RECEIPT_TTL = 10 * 60_000
+const scopedKey = (id: string, scope: ConnectionDiagnosticScope) => scope === 'current' ? key(id) : legacyKey(id)
+
+// Hash the entire native record, not its decoded (lossy) projection. Keep the
+// digest only in Host memory behind a random receipt. Nonserializable or huge
+// records remain diagnosable, but are never eligible for deletion.
+function recordDigest(record: CredentialRecord): string | undefined {
+  try {
+    // Native JSON-like data only. V8 serialization can omit custom properties
+    // on exotic objects; never treat such a lossy digest as deletion evidence.
+    const ancestors = new Set<object>()
+    let budget = 1024 * 1024
+    const safe = (value: unknown, depth: number): boolean => {
+      if (--budget < 0 || depth > 64) return false
+      if (value === null || value === undefined || typeof value === 'boolean') return true
+      if (typeof value === 'number') return Number.isFinite(value)
+      if (typeof value === 'string') { budget -= value.length; return budget >= 0 }
+      if (typeof value !== 'object' || ancestors.has(value)) return false
+      const array = Array.isArray(value), prototype = Object.getPrototypeOf(value)
+      if (prototype !== (array ? Array.prototype : Object.prototype) && !(prototype === null && !array)) return false
+      ancestors.add(value)
+      for (const property of Reflect.ownKeys(value)) {
+        if (typeof property !== 'string') return false
+        if (array && property === 'length') continue
+        budget -= property.length
+        const descriptor = Object.getOwnPropertyDescriptor(value, property)!
+        if (!descriptor.enumerable || !('value' in descriptor) || !safe(descriptor.value, depth + 1)) return false
+      }
+      ancestors.delete(value)
+      return budget >= 0
+    }
+    if (!safe(record, 0)) return undefined
+    const bytes = serializeRecord(record)
+    if (bytes.byteLength > 1024 * 1024) return undefined
+    return createHash('sha256').update(bytes).digest('hex')
+  } catch { return undefined }
+}
+function invalid(record: CredentialRecord, id: string): boolean {
+  try { decode(record, id); return false }
+  catch (error) { if (error instanceof InvalidConnectionRecord) return true; throw error }
+}
 
 class InvalidConnectionRecord extends Error {}
 function decode(record: CredentialRecord, id: string): ConnectionRecord {
@@ -39,7 +90,7 @@ function connectionId(value: string): string | undefined {
   try { return parseId(id) } catch { return undefined }
 }
 
-/** Connections and their launch credentials are one native, atomic credential record. */
+/** Connections and their launch credentials share one native credential record. */
 export function createStore(credentials: Credentials): ConnectionStore {
   let operations = providerOperations.get(credentials)
   if (!operations) { operations = new Map(); providerOperations.set(credentials, operations) }
@@ -72,7 +123,89 @@ export function createStore(credentials: Credentials): ConnectionStore {
     return saved
   }
   const read: ConnectionStore['read'] = id => serialize(id, () => readCurrent(id))
+  let receipts = providerReceipts.get(credentials)
+  if (!receipts) { receipts = new Map(); providerReceipts.set(credentials, receipts) }
+  const pruneReceipts = () => {
+    for (const [receipt, value] of receipts) if (value.expires <= Date.now()) receipts.delete(receipt)
+    while (receipts.size >= 1000) receipts.delete(receipts.keys().next().value!)
+  }
+  const receiptFor = (input: { id: string; scope: ConnectionDiagnosticScope; receipt: string }) => {
+    const saved = receipts.get(input.receipt)
+    return saved && saved.expires > Date.now() && saved.id === input.id && saved.scope === input.scope ? saved : undefined
+  }
+  const diagnostics: ConnectionDiagnosticsApi = {
+    async list() {
+      try {
+        pruneReceipts()
+        const entries = await credentials.listRecords()
+        const seen = new Set<string>(), records: ConnectionDiagnostic[] = []
+        for (const entry of entries) {
+          const id = connectionId(entry.key)
+          if (id === undefined || seen.has(entry.key)) continue
+          seen.add(entry.key)
+          const scope = entry.key === key(id) ? 'current' : 'legacy'
+          // Deliberately do not call read/readCurrent: diagnostics never migrate,
+          // normalize, or remove a current/legacy credential as a side effect.
+          const found = await serialize<ConnectionDiagnostic | undefined>(id, async () => {
+            const record = await credentials.readRecord(scopedKey(id, scope))
+            if (record === undefined || !invalid(record, id)) return undefined
+            const digest = recordDigest(record), receipt = randomUUID()
+            pruneReceipts()
+            receipts.set(receipt, { id, scope, digest, expires: Date.now() + RECEIPT_TTL, exported: false })
+            return { id, scope, receipt, issue: 'invalid-record' as const, canDelete: digest !== undefined }
+          })
+          if (!found) continue
+          if (records.length === 200) return { records, truncated: true }
+          records.push(found)
+        }
+        return { records, truncated: false }
+      } catch { throw new Error('Connection record diagnostics are unavailable.') }
+    },
+    async export(value) {
+      const input = parseDiagnosticRef(value)
+      return serialize(input.id, async () => {
+        try {
+          const saved = receiptFor(input)
+          if (!saved) return { ok: false, code: 'STALE' }
+          const record = await credentials.readRecord(scopedKey(input.id, input.scope))
+          if (record === undefined || !invalid(record, input.id)) return { ok: false, code: 'STALE' }
+          const digest = recordDigest(record)
+          if (saved.digest !== undefined && digest !== saved.digest) return { ok: false, code: digest === undefined ? 'UNSAFE_RECORD' : 'STALE' }
+          // A redacted report is not a recoverable credential backup. Export is
+          // still useful for unsafe-to-hash records, but never enables cleanup.
+          saved.exported = saved.digest !== undefined
+          return { ok: true, value: { format: 'connections-redacted-diagnostic-v1', redacted: true, credentialBackup: false,
+            concurrency: 'same-process-provider-queue-only', record: { id: input.id, scope: input.scope, issue: 'invalid-record', canDelete: saved.exported } } }
+        } catch { return { ok: false, code: 'UNAVAILABLE' } }
+      })
+    },
+    async remove(value) {
+      const input = parseDeleteDiagnostic(value)
+      return serialize(input.id, async () => {
+        const saved = receiptFor(input)
+        if (!saved) return { ok: false, code: 'STALE' }
+        if (saved.digest === undefined) return { ok: false, code: 'UNSAFE_RECORD' }
+        if (!saved.exported) return { ok: false, code: 'EXPORT_REQUIRED' }
+        // Consume before I/O: an uncertain provider failure must not be retried
+        // under the same receipt. Refresh and export again instead.
+        receipts.delete(input.receipt)
+        try {
+          const record = await credentials.readRecord(scopedKey(input.id, input.scope))
+          if (record === undefined || !invalid(record, input.id)) return { ok: false, code: 'STALE' }
+          const digest = recordDigest(record)
+          if (digest === undefined) return { ok: false, code: 'UNSAFE_RECORD' }
+          if (digest !== saved.digest || saved.expires <= Date.now()) return { ok: false, code: 'STALE' }
+          // CredentialProvider has no compare-and-delete. This recheck and delete
+          // share only this process's per-id queue for this provider object. A
+          // different process/provider can still race between these awaits.
+          await credentials.deleteRecord(scopedKey(input.id, input.scope))
+          return { ok: true, value: { deleted: true } }
+        } catch { return { ok: false, code: 'UNAVAILABLE' } }
+      })
+    },
+  }
   return {
+    diagnostics,
     read,
     async list() {
       const entries = await credentials.listRecords()

@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useState, useSyncExternalStore } from 'react'
 import type { PropsRenderSlots, StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
-import { IconGlobeOutlineRegular, IconSlidersTwoOutlineRegular, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconGlobeOutlineRegular, IconSlidersTwoOutlineRegular, Menu, UiStyles, type MenuEntry } from './ui/index.js'
 import type { SettingsHostSnapshot } from './settings-host-bridge.js'
 
 const messages = {
@@ -16,7 +16,7 @@ export interface SettingsHostSource {
   refresh?(): void | Promise<void>
 }
 
-/** Native menu owns placement, keyboard navigation, selection and focus return. */
+/** Owned menu controls placement, keyboard navigation, selection and focus return. */
 export function SettingsHostMenu({ snapshot, locale, onSelect, onOpen }: {
   snapshot?: SettingsHostSnapshot
   locale: string
@@ -35,7 +35,7 @@ export function SettingsHostMenu({ snapshot, locale, onSelect, onOpen }: {
       {row.id !== 'local' && <i className="dcs-host-dot" data-phase={row.phase} aria-label={t[row.phase]} title={t[row.phase]} />}</span>,
   })) ?? [{ id: 'loading', label: t.loading, disabled: true }])]
   return <>
-    <style>{styles}</style>
+    <UiStyles /><style>{styles}</style>
     <Menu open={open} onClose={() => setOpen(false)} items={items} selectedId={snapshot?.selectedId} portal dense align="end"
       className="dcs-host-menu" listClassName="dcs-host-list"
       footer={failed ? [{ type: 'label', id: 'host-error', text: t.failed }] : undefined}
@@ -56,8 +56,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap { 'connections.settings.nativeHeader': { kind: 'single'; scope: 'root'; owner: {} } }
 }
 
-/** Wrap the public header leaf; the original title keeps its own locale and injection. */
-export function installSettingsHostHeader(ctx: Context, source: SettingsHostSource): void {
+export interface SettingsHostHeaderHandle { isReady(): boolean }
+
+/** Wrap only the native public leaf; competing or incompatible providers stay untouched. */
+export function installSettingsHostHeader(ctx: Context, source: SettingsHostSource, onReady: (ready: boolean) => void = () => {}): SettingsHostHeaderHandle {
+  let available = () => false
+  let ready = false
+  const publish = (next: boolean) => { if (ready !== next) { ready = next; onReady(next) } }
+  onReady(false)
   const subscribeLocale = (listener: () => void) => ctx.locale.subscribe(listener)
   const locale = () => ctx.locale.getSnapshot()
   const Header = (props: PropsRenderSlots<'connections.settings.nativeHeader'>) => {
@@ -69,22 +75,64 @@ export function installSettingsHostHeader(ctx: Context, source: SettingsHostSour
     </div>
   }
   ctx.slots.inject('settings.header', () => {
-    const remove = ctx.slots.register({ name: 'settings.header', priority: -100,
-      children: { 'connections.settings.nativeHeader': { kind: 'single', scope: 'root' } },
-    }, Header)
+    let remove: (() => void) | undefined
     let delegated: StoredEntry | undefined
     let removeAlias: (() => void) | undefined
+    let syncing = false
+    let failed = false
+    let warned = false
+    const nativeLeaf = () => {
+      const entries = ctx.slots.entries('settings.header').filter(row => row.component !== Header)
+      if (entries.some(row => (row.options.priority ?? 0) < 0)) return
+      const entry = entries[0]
+      if (entry?.locale !== 'settings' || entry.children && Object.keys(entry.children).length > 0) return
+      return entry
+    }
+    const ownsHeader = () => !failed && remove !== undefined && removeAlias !== undefined
+      && nativeLeaf() === delegated && ctx.slots.entriesOfSlot('settings.header')[0]?.component === Header
+    available = ownsHeader
+    const retire = () => {
+      publish(false)
+      removeAlias?.(); removeAlias = undefined
+      remove?.(); remove = undefined
+      delegated = undefined
+    }
     const sync = () => {
-      const entry = ctx.slots.entries('settings.header').find(row => row.component !== Header)
-      if (entry === delegated) return
-      removeAlias?.(); removeAlias = undefined; delegated = entry
-      if (!entry || entry.children && Object.keys(entry.children).length > 0) return
-      removeAlias = ctx.slots.register({ name: 'connections.settings.nativeHeader', inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+      if (syncing || failed) return
+      syncing = true
+      try {
+        const entry = nativeLeaf()
+        if (!entry) {
+          retire()
+          if (!warned && ctx.slots.entries('settings.header').length > 0) {
+            warned = true
+            ctx.logger.warn('Connections left settings.header to another provider; remote settings are unavailable.')
+          }
+          return
+        }
+        warned = false
+        if (entry !== delegated) {
+          retire()
+          remove = ctx.slots.register({ name: 'settings.header', priority: -1,
+            children: { 'connections.settings.nativeHeader': { kind: 'single', scope: 'root' } },
+          }, Header)
+          removeAlias = ctx.slots.register({ name: 'connections.settings.nativeHeader', inject: entry.inject, store: entry.store, locale: entry.locale } as never, entry.component as never)
+          delegated = entry
+        }
+        publish(ownsHeader())
+      } catch {
+        // A registration/alias failure must not roll back the native title or
+        // spin forever retrying against the same incompatible slot declaration.
+        failed = true
+        retire()
+        ctx.logger.warn('Connections could not compose settings.header; native settings are preserved.')
+      } finally { syncing = false }
     }
     const unsubscribe = ctx.slots.subscribe('settings.header', sync)
     sync()
-    return () => { unsubscribe(); removeAlias?.(); remove() }
+    return () => { unsubscribe(); available = () => false; retire() }
   })
+  return { isReady: () => available() }
 }
 
 const styles = `
@@ -93,9 +141,9 @@ const styles = `
 .dcs-host-trigger{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:28px;max-width:100%;height:28px;padding:5px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer}
 .dcs-host-trigger>svg{flex:none}
 .dcs-host-trigger:hover,.dcs-host-trigger[aria-expanded=true]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
-.dcs-host-trigger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.dcs-host-trigger:focus-visible{outline:2px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 .dcs-host-list{max-width:min(300px,calc(100vw - 24px));font-weight:400}
 .dcs-host-row{display:flex;align-items:center;gap:10px;min-width:0;width:100%}.dcs-host-row>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dcs-host-dot{flex:none;display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#9ca3af)}
-.dcs-host-dot[data-phase=connected]{background:var(--dsw-alias-state-success-primary,#28a76b)}.dcs-host-dot[data-phase=connecting],.dcs-host-dot[data-phase=updating]{background:var(--dsw-alias-state-warning-primary,#ca9230)}.dcs-host-dot[data-phase=error]{background:var(--dsw-alias-state-error-primary,#d65353)}
+.dcs-host-dot{flex:none;display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary)}
+.dcs-host-dot[data-phase=connected]{background:var(--dsw-alias-state-success-primary)}.dcs-host-dot[data-phase=connecting],.dcs-host-dot[data-phase=updating]{background:var(--dsw-alias-state-warn-primary)}.dcs-host-dot[data-phase=error]{background:var(--dsw-alias-state-error-primary)}
 `

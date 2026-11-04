@@ -26,12 +26,38 @@ async function privateDir(path) {
   await privatePath(path, true);
 }
 async function atomic(path, value) {
-  const temporary = path + '.tmp-' + randomUUID();
+  // Every production caller owns management.lock. Distinguish this protocol
+  // from older bootstraps that used lock-external .tmp-UUID writes.
+  const temporary = path + '.tmp-locked-' + randomUUID();
   const handle = await fs.open(temporary, 'wx', 0o600);
   try {
     try { await handle.writeFile(value); } finally { await handle.close(); }
     await fs.rename(temporary, path);
   } finally { await fs.rm(temporary, { force: true }); }
+}
+async function sweepTemporary(root) {
+  // Only the management.lock owner calls this. Collect the exact root names
+  // in the locked namespace, plus legacy names written only by locked workers.
+  // Legacy bootstrap environment/request .tmp-UUID writes were lock-external:
+  // even an old mtime cannot prove that their writer will not resume a rename.
+  await privatePath(root, true);
+  const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+  const lockedFiles = new RegExp('^(?:environment|transaction\\.json|(?:request|result)-' + uuid + '\\.json)\\.tmp-locked-' + uuid + '$');
+  const legacyFiles = new RegExp('^(?:transaction\\.json|result-' + uuid + '\\.json)\\.tmp-' + uuid + '$');
+  const links = new RegExp('^current\\.tmp-(?:locked-)?' + uuid + '$');
+  for (const name of await fs.readdir(root)) {
+    const file = lockedFiles.test(name) || legacyFiles.test(name);
+    if (!file && !links.test(name)) continue;
+    const path = join(root, name);
+    const stat = await exists(path);
+    if (!stat) continue;
+    if (stat.uid !== process.getuid()) fail('ownership');
+    if (file) {
+      if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) || stat.nlink !== 1) fail('ownership');
+    } else if (!stat.isSymbolicLink() || !/^releases\/0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(await fs.readlink(path))) fail('ownership');
+    // unlink cannot recurse into directories or follow a symlink's target.
+    await fs.unlink(path);
+  }
 }
 async function json(path) { await privatePath(path); return JSON.parse(await fs.readFile(path, 'utf8')); }
 async function run(command, args, { timeout = 120000, log, allowFailure = false, env = process.env } = {}) {
@@ -187,7 +213,7 @@ async function currentRelease(root) {
   return metadata.version;
 }
 async function select(root, version) {
-  const path = join(root, 'current.tmp-' + randomUUID());
+  const path = join(root, 'current.tmp-locked-' + randomUUID());
   await fs.symlink('releases/' + version, path);
   try { await fs.rename(path, join(root, 'current')); }
   finally { await fs.rm(path, { force: true }); }
@@ -234,7 +260,7 @@ async function authenticate(port, token) {
     req.on('timeout', () => req.destroy()); req.on('error', () => resolve(undefined)); req.end();
   });
 }
-async function pluginManagerRequest(port, cookie, method, args) {
+async function pluginManagerRequest(port, cookie, method, args, timeout = 120000) {
   if (!['listPlugins', 'setPluginEnabled', 'setBundleEnabled'].includes(method)) fail('plugin-activation');
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({ type: 'client-request', rpcId: 'connections-plugin-' + method, method: 'pluginManager/' + method, payload: { args } });
@@ -253,7 +279,7 @@ async function pluginManagerRequest(port, cookie, method, args) {
       });
       response.on('close', () => { if (!response.complete) rejectRequest(); });
     });
-    const timer = setTimeout(() => { req.destroy(); rejectRequest(); }, 120000);
+    const timer = setTimeout(() => { req.destroy(); rejectRequest(); }, timeout);
     req.on('close', () => clearTimeout(timer));
     req.on('error', rejectRequest);
     req.end(payload);
@@ -279,14 +305,25 @@ async function activateWorkspacePlugin(context, reconcile = false) {
   // native layout entries disabled by the remote bundle, are never mutated.
   const entries = plugins.filter(plugin => plugin?.moduleName === packageName);
   if (entries.length !== 1 || entries[0].patchId !== 'connections' || typeof entries[0].entryId !== 'string' || entries[0].entryId.length === 0 || entries[0].entryId.length > 1024 || entries[0].readOnlyReason) fail('plugin-activation');
-  if (entries[0].enabled === true && !reconcile) return;
+  if (entries[0].enabled === true && entries[0].fiberPhase === 'active' && !reconcile) return;
   const result = await pluginManagerRequest(host.remotePort, cookie, 'setPluginEnabled', { id: entries[0].entryId, enabled: true });
   if (result?.application === 'restart-required') fail('plugin-restart');
   if (result?.application !== 'applied') fail('plugin-activation');
-  const verified = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {});
-  if (!Array.isArray(verified)) fail('plugin-activation');
-  const active = verified.filter(plugin => plugin?.moduleName === packageName);
-  if (active.length !== 1 || active[0].entryId !== entries[0].entryId || active[0].patchId !== 'connections' || active[0].enabled !== true) fail('plugin-activation');
+  // Saved enablement is not runtime readiness: a failed/missing dependency can
+  // leave an enabled row inactive. Only read polling may retry after this one
+  // native mutation; do not restart the service or replay an ambiguous write.
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) fail('plugin-activation');
+    const verified = await pluginManagerRequest(host.remotePort, cookie, 'listPlugins', {}, remaining);
+    if (!Array.isArray(verified)) fail('plugin-activation');
+    const active = verified.filter(plugin => plugin?.moduleName === packageName);
+    if (active.length !== 1 || active[0].entryId !== entries[0].entryId || active[0].patchId !== 'connections' || active[0].enabled !== true || active[0].readOnlyReason) fail('plugin-activation');
+    if (active[0].fiberPhase === 'active') return;
+    if (!['pending', 'loading'].includes(active[0].fiberPhase) || Date.now() >= deadline) fail('plugin-activation');
+    await sleep(250);
+  }
 }
 async function installWorkspacePlugin(context, plugin) {
   try { return await installWorkspacePluginContents(context, plugin); }
@@ -459,6 +496,16 @@ async function worker(input) {
   const context = await initialize(input);
   const { root, unit } = context;
   await verifyUnit(context);
+  await sweepTemporary(root);
+  // Bootstrap conveys only the current SSH login's network allowlist in its
+  // private request, not argv. Replace rather than merge an older environment
+  // so unsetting a proxy/CA/registry variable also removes the persisted value.
+  for (const key of networkKeys) {
+    delete process.env[key];
+    const value = input.network?.[key];
+    if (typeof value === 'string' && !/[\x00\r\n]/.test(value)) process.env[key] = value;
+  }
+  await atomic(join(root, 'environment'), networkEnvironment(context.marker.node, root));
   const runtime = await runtimeNode(context);
   await recover(context);
   await checkWorkspacePluginMigration(context, input.plugin);
@@ -514,16 +561,13 @@ async function worker(input) {
     fail('rollback');
   }
 }
-async function bootstrap(input, encoded) {
+async function bootstrap(input) {
   await preflight();
   // Check fresh installations before creating any owned files. The worker
   // repeats this under its lock in case a previous attempt was interrupted.
   if (!await exists(input.root ?? join(homedir(), '.local/share/dsh-connections'))) await installPreflight();
   const context = await initialize(input);
   await verifyUnit(context);
-  // Preserve the remote SSH user's network configuration without exposing proxy
-  // credentials in argv, logs, or client records. API keys are never copied.
-  await atomic(join(context.root, 'environment'), networkEnvironment(context.marker.node, context.root));
   // Abandoned callers may leave private result credentials behind. Maintenance
   // can run for at most 30 minutes; only files older than a day are collected.
   for (const name of await fs.readdir(context.root)) {
@@ -541,9 +585,16 @@ async function bootstrap(input, encoded) {
   if (await fs.readFile(workerPath, 'utf8') !== script) fail('ownership');
   const resultPath = join(context.root, 'result-' + input.operation + '.json');
   const requestPath = join(context.root, 'request-' + input.operation + '.json');
-  await atomic(requestPath, encoded);
+  // A unique request needs no rename: it is fully written before launching the
+  // reader. Keeping bootstrap out of root-level atomic writes lets the locked
+  // worker collect crash leftovers without racing another live SSH bootstrap.
+  const encoded = Buffer.from(JSON.stringify({ ...input, network: environment(networkKeys) })).toString('base64');
+  const request = await fs.open(requestPath, 'wx', 0o600);
+  try { await request.writeFile(encoded); }
+  catch (error) { await fs.rm(requestPath, { force: true }); throw error; }
+  finally { await request.close(); }
   const maintenance = 'dsh-connections-maintenance-' + input.operation;
-  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + maintenance, '--property=Type=exec', '--property=UMask=0077', '--property=EnvironmentFile=' + join(context.root, 'environment'), '--setenv=PATH=' + runtimePath(context.marker.node), 'flock', '--wait', '1200', '--conflict-exit-code', '75', join(context.root, 'management.lock'), process.execPath, workerPath, '--worker', requestPath];
+  const args = ['--user', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + maintenance, '--property=Type=exec', '--property=UMask=0077', '--setenv=PATH=' + runtimePath(context.marker.node), 'flock', '--wait', '1200', '--conflict-exit-code', '75', join(context.root, 'management.lock'), process.execPath, workerPath, '--worker', requestPath];
   let execution;
   try { execution = await run('systemd-run', args, { timeout: 1800000, allowFailure: true, log: join(context.root, 'maintenance.log') }); }
   catch { await fs.rm(requestPath, { force: true }); fail('maintenance'); }
@@ -562,7 +613,7 @@ async function main(encoded) {
   try {
     input = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
     if (!['prepare', 'update'].includes(input.action) || !/^0\.2\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) || !/^[0-9a-f-]{36}$/.test(input.operation)) fail('ownership');
-    result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input, encoded);
+    result = process.argv[2] === '--worker' ? await worker(input) : await bootstrap(input);
   } catch (error) {
     result = { error: ['unavailable', 'install-tools', 'linger', 'linger-check', 'ownership', 'install', 'runtime', 'version', 'update-version', 'plugin-activation', 'plugin-restart', 'plugin-migration', 'startup', 'rollback', 'recovery', 'busy', 'maintenance'].includes(error.code) ? error.code : 'startup' };
   }

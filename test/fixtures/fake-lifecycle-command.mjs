@@ -90,10 +90,11 @@ const server = createServer(async (req, res) => {
     const loaded = await readFile(runtimePath, 'utf8');
     const disabled = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-disabled', 'utf8').then(() => true, () => false);
     const duplicate = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-duplicate', 'utf8').then(() => true, () => false);
+    const fiberPhase = await readFile(process.env.DSH_LIFECYCLE_FIXTURE + '/plugin-fiber-phase', 'utf8').catch(() => disabled ? null : 'active');
     respond([
-      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz03/dsh-connections', patchId: 'connections', enabled: !disabled }] : []),
-      ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz03/dsh-connections', patchId: 'duplicate', enabled: true }] : []),
-      { entryId: 'web:ui-layout', moduleName: '@deepseek/ui-layout', patchId: 'ui-layout', enabled: false },
+      ...(loaded ? [{ entryId: 'web:connections', moduleName: '@xunz03/dsh-connections', patchId: 'connections', enabled: !disabled, fiberPhase }] : []),
+      ...(duplicate ? [{ entryId: 'web:duplicate', moduleName: '@xunz03/dsh-connections', patchId: 'duplicate', enabled: true, fiberPhase: 'active' }] : []),
+      { entryId: 'web:ui-layout', moduleName: '@deepseek/ui-layout', patchId: 'ui-layout', enabled: false, fiberPhase: null },
     ]); return;
   }
   if (input.method === 'pluginManager/setBundleEnabled') {

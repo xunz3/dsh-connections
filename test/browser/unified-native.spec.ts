@@ -1,5 +1,5 @@
 import { WORKSPACE_PROTOCOL } from '../../src/shared/workspace-protocol.js'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -43,7 +43,15 @@ async function prepareConnection(page: Page, alias: string, remoteUrl: string): 
   const panel = page.getByRole('region', { name: 'Connections', exact: true })
   await expect(panel.getByText('Loading connections…')).toHaveCount(0)
   if (!await panel.getByText(connectionName, { exact: true }).count()) {
-    await panel.getByRole('button', { name: connectionMessages.add, exact: true }).click()
+    const add = panel.getByRole('button', { name: connectionMessages.add, exact: true })
+    await add.click()
+    await expect(panel.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeEnabled()
+    // The owned browser-modal layer must take exactly one Escape above the
+    // independently deployed native Settings dialog, then restore its trigger.
+    await page.keyboard.press('Escape')
+    await expect(add).toBeFocused()
+    await expect(panel).toBeVisible()
+    await add.click()
     await expect(panel.getByRole('button', { name: 'Refresh SSH hosts', exact: true })).toBeEnabled()
     const manual = panel.getByRole('button', { name: 'Add manually', exact: true })
     if (await manual.isVisible()) await manual.click()
@@ -85,6 +93,9 @@ async function verifyFiles(surface: Surface, path: string, side: 'local' | 'remo
 }
 async function verifyRemoteUpload(page: Page, remote: FrameLocator): Promise<void> {
   const origin = new URL((await page.locator('iframe[title="Remote workspace"]').getAttribute('src'))!).origin
+  // setInputFiles can dispatch into a disabled native input. Wait for the
+  // actual native composer capability, not merely the hidden input's presence.
+  await expect(remote.getByRole('button', { name: 'Add files or run commands', exact: true })).toBeEnabled()
   const uploaded = page.context().waitForEvent('response', { predicate: response => new URL(response.url()).pathname === '/api/session/uploadFileBinary', timeout: 15_000 })
   await remote.locator('input[type="file"]').setInputFiles({ name: 'remote-upload.txt', mimeType: 'text/plain', buffer: Buffer.from('Isolated remote upload fixture.\n') })
   const response = await uploaded
@@ -185,6 +196,36 @@ async function restorePresentation(startup: string, previous: PresentationSettin
     }
   } finally { await request.dispose() }
 }
+/** Linux Web deliberately has no default New Session binding. Exercise an
+ * accepted native user binding instead of assuming Ctrl+N was intercepted. */
+async function bindNewSession(page: Page): Promise<() => Promise<void>> {
+  const open = async () => {
+    await page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' }).focus()
+    await page.keyboard.press('Control+Slash')
+    const dialog = page.getByRole('dialog', { name: 'Keyboard shortcuts', exact: true })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Edit shortcut for New Session', exact: true }).click()
+    return dialog
+  }
+  const dialog = await open()
+  await dialog.getByRole('button', { name: 'Press a shortcut', exact: true }).focus()
+  await page.keyboard.press('Control+Shift+Comma')
+  await expect(dialog.getByRole('button', { name: 'Edit shortcut for New Session', exact: true })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => {
+    const config = JSON.parse(localStorage.getItem('dsh.keybindings.v1') ?? '{}') as {
+      profiles?: Record<string, Record<string, { code: string }>>
+    }
+    return config.profiles?.['web:linux']?.['session.new']?.code
+  })).toBe('Comma')
+  await dialog.getByRole('button', { name: 'Close keyboard shortcuts', exact: true }).click()
+  return async () => {
+    const dialog = await open()
+    await dialog.getByRole('button', { name: 'Restore default', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Edit shortcut for New Session', exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: 'Close keyboard shortcuts', exact: true }).click()
+  }
+}
+
 async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise<void> {
   const remote = page.frameLocator('iframe[title="Remote workspace"]')
   const surface = source === 'local' ? page : remote
@@ -204,23 +245,30 @@ async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise
   await expect.poll(selection).toBeTruthy()
   const selectedBefore = await selection()
   const editor = surface.locator('[data-composer-input][contenteditable="true"]')
-  const draft = `Unsent ${source} rc.3 draft`
+  const draft = `Unsent ${source} rc.5 draft`
   await editor.fill(draft)
   const origins: string[] = []
   const observe = (request: Request) => {
     const url = new URL(request.url())
     if (url.pathname === '/api/session/create') origins.push(url.origin)
   }
+  const restoreBinding = source === 'remote' ? await bindNewSession(page) : undefined
   page.context().on('request', observe)
   try {
     const created = page.context().waitForEvent('response', {
       predicate: response => new URL(response.url()).pathname === '/api/session/create', timeout: 15_000,
     })
-    await page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' }).click()
+    const nativeNew = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
+    if (source === 'remote') {
+      // The retained native brand is deliberately local. Source-aware New
+      // Session remains available through Connections' guarded shortcut/list.
+      await nativeNew.focus()
+      await page.keyboard.press('Control+Shift+Comma')
+    } else await nativeNew.click()
     const response = await created
     expect(new URL(response.url()).origin).toBe(expectedOrigin)
     expect(response.ok()).toBe(true)
-    // rc.3 returns to the workspace's reusable blank, including its unsent draft.
+    // rc.5 returns to the workspace's reusable blank, including its unsent draft.
     await expect.poll(selection).toBe(selectedBefore)
     await expect(editor).toHaveText(draft)
     expect((await catalog(surface)).sessions.map(session => session.id).sort()).toEqual(before)
@@ -233,7 +281,10 @@ async function verifyNewSession(page: Page, source: 'local' | 'remote'): Promise
     } else await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
     expect(origins.length).toBeGreaterThan(0)
     expect(origins.every(origin => origin === expectedOrigin)).toBe(true)
-  } finally { page.context().off('request', observe); await editor.fill('') }
+  } finally {
+    page.context().off('request', observe)
+    try { await editor.fill('') } finally { await restoreBinding?.() }
+  }
 }
 async function verifyLoadingAcknowledgement(page: Page, open: () => Promise<void>): Promise<void> {
   let acknowledge!: () => void
@@ -329,32 +380,9 @@ test('dedicated remote profile boots its public embedded layout without a second
   await page.screenshot({ path: info.outputPath('embedded-direct-visit.png'), fullPage: true })
 })
 
-test('composed native sidebar keeps its styles when the shell preloads and unloads its own sidebar CSS', async ({ page }, info) => {
+test('independently deployed native sidebar owns its styles without a copied Connections factory', async ({ page }, info) => {
   test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
   page.setDefaultTimeout(15_000)
-  const nativeSource = await readFile(new URL(import.meta.resolve('@deepseek-ai/dsh-client-ui-sidebar/client')), 'utf8')
-  const originalStyleIds = [...new Set([...nativeSource.matchAll(/"(@deepseek-ai\/dsh-client-ui-sidebar\/[^"\n]+\.css)"/g)].map(match => match[1]))]
-  expect(originalStyleIds.length).toBeGreaterThan(0)
-  await page.addInitScript(ids => {
-    // Desktop can preload another compiled copy of the sidebar under these
-    // same CSS IDs. Its class names need not match our installed native copy.
-    const install = () => {
-      if (!document.head) return false
-      for (const id of ids) {
-        const tag = document.createElement('style')
-        tag.dataset.plugin = '@deepseek-ai/dsh-client-ui-sidebar'
-        tag.dataset.pluginCss = id
-        tag.dataset.connectionsRegression = 'preloaded-sidebar'
-        tag.textContent = '.preloaded-desktop-sidebar { display: flex; }'
-        document.head.appendChild(tag)
-      }
-      return true
-    }
-    if (!install()) {
-      const observer = new MutationObserver(() => { if (install()) observer.disconnect() })
-      observer.observe(document, { childList: true, subtree: true })
-    }
-  }, originalStyleIds)
   await page.goto(await launch(join(fixturePath!, 'host.log')), { waitUntil: 'domcontentloaded' }).catch(() => { throw new Error('The isolated local Host could not load.') })
   await dismissWelcome(page)
   await expect(page.getByRole('region', { name: 'Workspaces', exact: true })).toHaveCount(1)
@@ -374,11 +402,8 @@ test('composed native sidebar keeps its styles when the shell preloads and unloa
     expect(moreBounds!.y).toBeGreaterThanOrEqual(pluginBounds!.y + pluginBounds!.height)
   }
   await assertAppearance()
-  await expect(page.locator('style[data-connections-regression="preloaded-sidebar"]')).toHaveCount(originalStyleIds.length)
-  await page.evaluate(() => {
-    for (const tag of document.querySelectorAll('style[data-plugin="@deepseek-ai/dsh-client-ui-sidebar"]')) tag.remove()
-  })
-  await assertAppearance()
+  expect(await page.locator('style[data-plugin="@deepseek-ai/dsh-client-ui-sidebar"]').count()).toBeGreaterThan(0)
+  await expect(page.locator('style[data-plugin-css^="@xunz03/dsh-connections/native-sidebar/"]')).toHaveCount(0)
   await more.click()
   await expect(page.getByRole('menuitem', { name: 'Browse other plugins', exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
@@ -438,12 +463,15 @@ test('hot enable and disable preserve the native root, sidebar and unsent sessio
     })
     const panels = page.getByRole('navigation', { name: 'Global panels', exact: true })
     const newSession = page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' })
-    const composedCss = page.locator('style[data-plugin-css^="@xunz03/dsh-connections/native-sidebar/"]')
+    const copiedCss = page.locator('style[data-plugin-css^="@xunz03/dsh-connections/native-sidebar/"]')
+    const nativeStyles = await page.locator('style[data-plugin="@deepseek-ai/dsh-client-ui-sidebar"]').elementHandles()
+    expect(nativeStyles.length).toBeGreaterThan(0)
     const assertShell = async () => {
-      // Restoring the native sidebar can remount its account contribution and
-      // reopen Get started in this deliberately unauthenticated fixture.
+      // Native shell/provider ownership remains independent of the contribution.
       await dismissWelcome(page)
       await expect(panels).toHaveCount(1)
+      await expect(copiedCss).toHaveCount(0)
+      for (const style of nativeStyles) expect(await style.evaluate(tag => tag.isConnected)).toBe(true)
       await expect(newSession).toHaveCount(1)
       await expect(newSession).toHaveCSS('display', 'flex')
       await expect(newSession).toHaveCSS('height', '38px')
@@ -459,14 +487,14 @@ test('hot enable and disable preserve the native root, sidebar and unsent sessio
       await expect(more).toBeFocused()
     }
     try {
-      // Retire the existing composition first. Both subsequent enables occur
-      // in this same live document with the ordinary native sidebar installed.
+      // Both entry states share this same independently deployed native shell.
       await setEnabled(false)
-      await expect(composedCss).toHaveCount(0)
+      await expect(copiedCss).toHaveCount(0)
       await assertShell()
       for (let cycle = 0; cycle < 2; cycle++) {
         await setEnabled(true)
-        await expect.poll(() => composedCss.count()).toBeGreaterThan(0)
+        await expect(page.getByRole('region', { name: 'Workspaces', exact: true })).toHaveCount(1)
+        await expect(copiedCss).toHaveCount(0)
         await assertShell()
         await page.getByRole('button', { name: 'Account menu', exact: true }).click()
         await page.getByRole('menuitem', { name: 'Settings', exact: true }).click()
@@ -485,7 +513,7 @@ test('hot enable and disable preserve the native root, sidebar and unsent sessio
         await assertShell()
         if (cycle === 0) {
           await setEnabled(false)
-          await expect(composedCss).toHaveCount(0)
+          await expect(copiedCss).toHaveCount(0)
           await assertShell()
         }
       }
@@ -504,6 +532,18 @@ test('one native sidebar switches local and SSH projects while remote content st
   test.skip(!fixturePath, 'Set DSH_UNIFIED_FIXTURE to an isolated two-Host native fixture')
   page.setDefaultTimeout(15_000)
   test.setTimeout(180_000)
+  const storageTrace: unknown[] = []
+  await page.exposeFunction('__connectionsQaStorage', (entry: unknown) => { if (storageTrace.length < 200) storageTrace.push(entry) })
+  await page.addInitScript(() => {
+    const record = (operation: string, key: string, value?: string) => {
+      if (key !== '@xunz/dsh-connections/selection') return
+      const callback = (window as unknown as { __connectionsQaStorage?: (entry: unknown) => Promise<void> }).__connectionsQaStorage
+      void callback?.({ operation, origin: location.origin, value, stack: new Error().stack?.replace(/([?&]token=)[^&\s"')]+/gi, '$1[redacted]') }).catch(() => {})
+    }
+    const set = Storage.prototype.setItem, remove = Storage.prototype.removeItem
+    Storage.prototype.setItem = function(key, value) { record('set', key, value); return set.call(this, key, value) }
+    Storage.prototype.removeItem = function(key) { record('remove', key); return remove.call(this, key) }
+  })
   const metadata = JSON.parse(await readFile(join(fixturePath!, 'processes.json'), 'utf8')) as { alias: string; remote: { pid: number }; projects: { local: string; remote: string } }
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message.replace(/([?&]token=)[^&\s"']+/gi, '$1[redacted]')))
@@ -558,9 +598,12 @@ test('one native sidebar switches local and SSH projects while remote content st
   await expect(workspaces.locator('.dcw-session button[aria-current="page"]')).toHaveAttribute('aria-label', selectedRemote!)
   await expect(remote.getByText('native remote sidebar nested file', { exact: false })).toBeVisible()
 
+  const localCreate = page.context().waitForEvent('response', { predicate: response => new URL(response.url()).pathname === '/api/session/create' })
+  await page.getByRole('button', { name: 'New session', exact: true }).filter({ hasText: 'New Session' }).click()
+  expect(new URL((await localCreate).url()).origin).toBe(new URL(page.url()).origin)
+  await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
   await localProject.click()
   await expect(workspaces.getByRole('alert')).toHaveCount(0)
-  await expect(page.locator('iframe[title="Remote workspace"]')).toHaveCount(0)
   await verifyFiles(page, metadata.projects.local, 'local')
   await verifyNewSession(page, 'local')
   await page.getByRole('button', { name: 'Choose workspace', exact: true }).click()
@@ -585,7 +628,13 @@ test('one native sidebar switches local and SSH projects while remote content st
     return saved ? (JSON.parse(saved) as { sessionId?: string }).sessionId : undefined
   })).toBe(sessionId)
   await page.reload({ waitUntil: 'domcontentloaded' })
-  await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 })
+  try { await expect(remote.locator('.dc-embedded-layout')).toBeVisible({ timeout: 30_000 }) }
+  catch (error) {
+    const tracePath = info.outputPath('selection-storage-trace.json')
+    await writeFile(tracePath, JSON.stringify(storageTrace, null, 2))
+    await info.attach('selection-storage-trace.json', { path: tracePath, contentType: 'application/json' })
+    throw error
+  }
   await dismissWelcome(page)
   await dismissWelcome(remote)
   await expect.poll(() => selectedRemoteSession(remote), { timeout: 15_000 }).toBe(sessionId)

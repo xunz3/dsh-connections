@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { createElement, type ComponentType } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import { EmbeddedLayoutController, EmbeddedThemePresentation, applyEmbeddedLayout, embeddedColumns } from '../src/client/embedded-layout.js'
@@ -151,4 +153,47 @@ test('embedded registration exposes native content and overlay slots while requi
   assert.equal(document.body.style.getPropertyValue('background-color'), '')
   context.get = () => layout as never
   assert.throws(() => applyEmbeddedLayout(context as never), /native ui-layout disabled/)
+})
+
+test('unbridged sidebar toggle is explicitly unavailable instead of silently succeeding', () => {
+  const layout = new EmbeddedLayoutController(() => true)
+  assert.throws(() => layout.toggleSidebar(), { code: 'NAVIGATION_UNAVAILABLE', message: 'connections: workspace navigation is controlled by the local application' })
+  layout.dispose()
+  assert.doesNotThrow(() => layout.toggleSidebar(), 'a disposed provider cannot invoke or revive a navigation bridge')
+})
+
+test('the declared leading slot renders in the top-leading seat for content and settings without a dead sidebar command', t => {
+  const document = { documentElement: element(), body: element() }
+  let Frame!: ComponentType<Record<string, unknown>>
+  const effects: Array<() => void> = []
+  const context = {
+    get: () => undefined,
+    reflect: { provide: () => () => {} },
+    effect: (effect: () => () => void) => { effects.push(effect()) },
+    on: () => {},
+    shortcuts: { register: () => assert.fail('unbridged remote sidebar keyboard/menu commands must remain unregistered') },
+    theme: { getTheme: () => theme('light') },
+    slots: {
+      entries: () => [], provideRoot() {},
+      register: (_value: unknown, component: ComponentType<Record<string, unknown>>) => { Frame = component },
+    },
+  }
+  const layout = applyEmbeddedLayout(context as never, { document: document as unknown as Document })
+  t.after(() => { for (const dispose of effects.reverse()) dispose() })
+  const warnings: unknown[][] = []
+  t.mock.method(console, 'error', (...args: unknown[]) => warnings.push(args))
+  for (const settings of [false, true]) {
+    layout.showSettings(settings)
+    const rendered: string[] = []
+    const markup = renderToStaticMarkup(createElement(Frame, {
+      useEmbeddedLayout: (select: (state: ReturnType<typeof layout.state.getSnapshot>) => unknown) => select(layout.state.getSnapshot()),
+      renderSlot: (name: string) => { rendered.push(name); return createElement('span', { 'data-slot': name }, name) },
+      measure: layout.measure, resize: layout.resize, resizeLabel: 'Resize',
+    }))
+    assert.equal(rendered.filter(name => name === 'shell.leading').length, 1)
+    assert.match(markup, /class="dc-embedded-leading" data-shell-leading="true"><span data-slot="shell.leading"/)
+    assert.equal(rendered.includes('shell.overlay'), true)
+    if (!settings) for (const name of ['main', 'rightbar', 'shell.bottom']) assert.equal(rendered.includes(name), true)
+  }
+  assert.equal(warnings.every(args => String(args[0]).includes('useLayoutEffect')), true, 'only the expected SSR layout-effect warning may be suppressed')
 })

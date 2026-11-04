@@ -30,6 +30,7 @@ export interface WorkspaceBrowserSnapshot {
   readonly archiving?: string
   readonly pending: ReadonlySet<string>
   readonly error?: unknown
+  readonly copyStatus?: 'copied' | 'copyFailed'
   readonly rows: CatalogSourcePage[]
   readonly hiddenCount: number
   readonly totalCount: number
@@ -60,12 +61,55 @@ function sameSources(a: readonly WorkspaceSource[], b: readonly WorkspaceSource[
   return a === b || a.length === b.length && a.every((source, index) => {
     const other = b[index]
     return source.id === other.id && source.name === other.name && source.phase === other.phase
-      && source.catalog === other.catalog && source.catalogError === other.catalogError
+      && source.catalog === other.catalog && source.info?.transportId === other.info?.transportId && source.catalogError === other.catalogError
   })
 }
 
 function sameSelection(a?: WorkspaceSelection, b?: WorkspaceSelection): boolean {
   return a?.sourceId === b?.sourceId && a?.sessionId === b?.sessionId && a?.workspaceId === b?.workspaceId
+}
+
+export interface WorkspaceFocusRow { key: string; parentKey?: string }
+export type WorkspaceFocusCommand = 'ArrowUp' | 'ArrowDown' | 'Home' | 'End'
+
+/** The page already excludes collapsed and unmounted children. Keep navigation in
+ * exactly its rendered order, with source-qualified identity instead of titles. */
+export function workspaceFocusRows(rows: readonly CatalogSourcePage[]): WorkspaceFocusRow[] {
+  return rows.flatMap(({ workspaces, looseSessions }) => [
+    ...workspaces.flatMap(row => [{ key: row.key }, ...row.sessions.map(session => ({ key: session.key, parentKey: row.key }))]),
+    ...looseSessions.map(row => ({ key: row.key })),
+  ])
+}
+
+/** Preserve the keyboard seat across refreshes. A collapsed child returns to its
+ * parent; a removed row uses its nearest remaining neighbour, never a hidden row. */
+export function resolveWorkspaceFocus(rows: readonly WorkspaceFocusRow[], focused?: string,
+  previous: readonly WorkspaceFocusRow[] = [], selected?: WorkspaceSelection): string | undefined {
+  const visible = new Set(rows.map(row => row.key))
+  if (focused && visible.has(focused)) return focused
+  const previousIndex = previous.findIndex(row => row.key === focused)
+  const parent = previous[previousIndex]?.parentKey
+  if (parent && visible.has(parent)) return parent
+  if (previousIndex >= 0) {
+    for (let distance = 1; distance < previous.length; distance++) {
+      const neighbour = [previous[previousIndex + distance], previous[previousIndex - distance]].find(row => row && visible.has(row.key))
+      if (neighbour) return neighbour.key
+    }
+  }
+  const selectedKey = selected?.sessionId ? workspaceRowKey(selected.sourceId, 'session', selected.sessionId)
+    : selected?.workspaceId ? workspaceRowKey(selected.sourceId, 'workspace', selected.workspaceId) : undefined
+  return selectedKey && visible.has(selectedKey) ? selectedKey : rows[0]?.key
+}
+
+/** Do not wrap at list edges: repeated keys must not unexpectedly jump hosts. */
+export function moveWorkspaceFocus(rows: readonly WorkspaceFocusRow[], focused: string | undefined,
+  command: WorkspaceFocusCommand): string | undefined {
+  if (!rows.length) return undefined
+  const current = rows.findIndex(row => row.key === focused)
+  const index = command === 'Home' ? 0 : command === 'End' ? rows.length - 1
+    : current < 0 ? command === 'ArrowUp' ? rows.length - 1 : 0
+      : Math.max(0, Math.min(rows.length - 1, current + (command === 'ArrowDown' ? 1 : -1)))
+  return rows[index]?.key
 }
 
 /** Headless interaction state. No catalog copies, native IDs or transport ownership
@@ -91,6 +135,8 @@ export class WorkspaceBrowserViewModel {
   private editGeneration = 0
   private forgetGeneration = 0
   private error?: unknown
+  private copyStatus?: WorkspaceBrowserSnapshot['copyStatus']
+  private copyGeneration = 0
   private rowLimit = 100
   private selected?: WorkspaceSelection
   private selectedParent?: string
@@ -126,16 +172,21 @@ export class WorkspaceBrowserViewModel {
 
   update(model: WorkspaceBrowserModel): void {
     const changed = !sameSources(this.model.sources, model.sources) || !sameSelection(this.selected, model.selected)
+    // Native IDs can overlap across replacement Hosts. Retire their interaction
+    // ownership before installing new callbacks, not only when rows disappear.
+    const retired = new Set(this.model.sources.filter(source => source.id !== 'local'
+      && source.info?.transportId !== model.sources.find(next => next.id === source.id)?.info?.transportId).map(source => source.id))
+    const stale = (target?: Target) => !!target && retired.has(target.sourceId)
     this.model = model
     if (!changed) return
     this.reconcileSelection()
-    if (this.editing && !this.exists(rowTarget(this.editing))) { this.editing = undefined; this.editGeneration++ }
-    if (this.forgetting && !this.exists(rowTarget(this.forgetting))) { this.forgetting = undefined; this.forgetGeneration++ }
-    if (this.archiving && !this.canMutate(rowTarget(this.archiving))) this.archiving = undefined
+    if (this.editing && (stale(rowTarget(this.editing)) || !this.exists(rowTarget(this.editing)))) { this.editing = undefined; this.editGeneration++ }
+    if (this.forgetting && (stale(rowTarget(this.forgetting)) || !this.exists(rowTarget(this.forgetting)))) { this.forgetting = undefined; this.forgetGeneration++ }
+    if (this.archiving && (stale(rowTarget(this.archiving)) || !this.canMutate(rowTarget(this.archiving)))) this.archiving = undefined
     this.collapsed = new Set([...this.collapsed].filter(key => this.exists(rowTarget(key))))
     this.searchCollapsed = new Set([...this.searchCollapsed].filter(key => this.exists(rowTarget(key))))
     for (const [key, operation] of this.operations) {
-      if (operation.target && !this.exists(operation.target)) this.operations.delete(key)
+      if (operation.target && (stale(operation.target) || !this.exists(operation.target))) this.operations.delete(key)
     }
     this.publish()
   }
@@ -198,6 +249,31 @@ export class WorkspaceBrowserViewModel {
     this.publish()
   }
 
+  dismissCopyStatus(): void {
+    if (this.disposed || !this.copyStatus) return
+    this.copyStatus = undefined
+    this.publish()
+  }
+
+  /** Client-only: native IDs are copied verbatim, even from an offline catalog.
+   * No Host mutation, clipboard fallback or remote session mirror is involved. */
+  copySessionId(sourceId: string, id: string, clipboard: Pick<Clipboard, 'writeText'> | undefined = globalThis.navigator?.clipboard): Promise<void> {
+    const target: RowTarget = { sourceId, kind: 'session', id }
+    if (!this.exists(target)) return Promise.resolve()
+    // Copying must not disable the menu's stable focus-return anchor or prevent
+    // navigation while a clipboard permission prompt is pending.
+    const key = JSON.stringify([sourceId, 'copy', id])
+    const existing = this.operations.get(key)
+    if (existing) return existing.promise
+    const generation = ++this.copyGeneration
+    let copied = false
+    return this.run(key, target, async () => {
+      try {
+        if (clipboard) { await clipboard.writeText(id); copied = true }
+      } catch { /* Clipboard permissions and browser diagnostics stay local. */ }
+    }, () => { if (generation === this.copyGeneration) this.copyStatus = copied ? 'copied' : 'copyFailed' })
+  }
+
   openSession(sourceId: string, id: string): Promise<void> {
     const source = this.source(sourceId)
     if (source?.catalog?.archivedSessionIds.includes(id)) return Promise.resolve()
@@ -233,8 +309,10 @@ export class WorkspaceBrowserViewModel {
   }
   archiveSession(sourceId: string, id: string, archived: boolean, options?: { stopActivity?: true }): Promise<void> {
     const key = workspaceRowKey(sourceId, 'session', id)
-    const lifetime = this.lifetime
-    const current = () => !this.disposed && lifetime === this.lifetime && this.canMutate({ sourceId, kind: 'session', id })
+    const lifetime = this.lifetime, transportId = this.source(sourceId)?.info?.transportId
+    const current = () => !this.disposed && lifetime === this.lifetime
+      && (sourceId === 'local' || this.source(sourceId)?.info?.transportId === transportId)
+      && this.canMutate({ sourceId, kind: 'session', id })
     return this.runRow({ sourceId, kind: 'session', id }, true, async () => {
       try {
         if (options) await this.model.onArchiveSession(sourceId, id, archived, options)
@@ -281,6 +359,7 @@ export class WorkspaceBrowserViewModel {
     const operation: Operation = { target, lifetime: this.lifetime, sequence: ++this.sequence, promise: new Promise(resolve => { finish = resolve }) }
     this.operations.set(key, operation)
     this.error = undefined
+    this.copyStatus = undefined
     this.publish()
     const current = () => !this.disposed && operation.lifetime === this.lifetime && this.operations.get(key) === operation
     void (async () => {
@@ -327,7 +406,7 @@ export class WorkspaceBrowserViewModel {
     const page = pageWorkspaceRows(rows, { limit: this.rowLimit, collapsed, selected: this.selected })
     this.snapshot = {
       selected: this.selected, query: this.query, searchOpen: this.searchOpen, filter: this.filter,
-      collapsed, editing: this.editing, forgetting: this.forgetting, archiving: this.archiving, error: this.error,
+      collapsed, editing: this.editing, forgetting: this.forgetting, archiving: this.archiving, error: this.error, copyStatus: this.copyStatus,
       pending: new Set(this.operations.keys()), ...page,
       totalCount: rows.reduce((count, source) => count + source.looseSessions.length + source.workspaces.reduce((count, workspace) => count + 1 + workspace.sessions.length, 0), 0),
     }

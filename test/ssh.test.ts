@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import fsPromises, { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
+import { syncBuiltinESMExports } from 'node:module'
 import { createConnection, createServer } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -69,6 +70,91 @@ test('owns a private master, clears configured forwards and acknowledges one loo
     assert.equal(closed, 1)
     await assertDisposed(await f.calls())
   } finally { await tunnel.close(); await f.dispose() }
+})
+
+for (const segment of ['a'.repeat(90), '临'.repeat(30)]) test(`oversized ${segment.startsWith('a') ? 'ASCII' : 'UTF-8'} ControlPaths fall back to a private /tmp directory`, { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture()
+  const previousTmpdir = process.env.TMPDIR
+  const longRoot = join(dirname(f.options.configFile!), segment)
+  await mkdir(longRoot, { recursive: true })
+  let tunnel: Awaited<ReturnType<typeof connectTunnel>> | undefined
+  try {
+    process.env.TMPDIR = longRoot
+    tunnel = await connectTunnel({ target: 'dev', remotePort: 3080 }, f.options)
+    const master = (await f.calls()).find(call => call.args.includes('-M'))!
+    const controlPath = master.args[master.args.indexOf('-S') + 1]!
+    assert.match(controlPath, /^\/tmp\/dshc-[^/]+\/s$/)
+    assert.ok(Buffer.byteLength(controlPath) + 17 < 104, 'reserve OpenSSH temporary suffix and NUL in the portable socket bound')
+    assert.equal((await stat(dirname(controlPath))).mode & 0o777, 0o700)
+    assert.deepEqual(await readdir(longRoot), [], 'do not allocate an unusable private directory in the long TMPDIR')
+    await tunnel.close()
+    await assertDisposed(await f.calls())
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+    await tunnel?.close()
+    await f.dispose()
+  }
+})
+
+test('ControlPath byte budget includes the temporary OpenSSH suffix and terminating NUL', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture()
+  const base = await mkdtemp('/tmp/dsh-socket-budget-')
+  const previousTmpdir = process.env.TMPDIR
+  let tunnel: Awaited<ReturnType<typeof connectTunnel>> | undefined
+  try {
+    for (const excess of [0, 1]) {
+      // Root + /dshc-XXXXXX/s is 86 bytes at the safe boundary; OpenSSH's
+      // 17-byte temporary suffix leaves one byte for NUL in sun_path[104].
+      const root = join(base, 'a'.repeat(72 - Buffer.byteLength(base) - 1 + excess))
+      await mkdir(root, { mode: 0o700 })
+      process.env.TMPDIR = root
+      tunnel = await connectTunnel({ target: 'dev', remotePort: 3080 }, f.options)
+      const master = (await f.calls()).filter(call => call.args.includes('-M')).at(-1)!
+      const controlPath = master.args[master.args.indexOf('-S') + 1]!
+      assert.equal(controlPath.startsWith(root + '/'), excess === 0)
+      assert.ok(Buffer.byteLength(controlPath) + 17 < 104)
+      await tunnel.close()
+    }
+    await assertDisposed(await f.calls())
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+    await tunnel?.close()
+    await rm(base, { recursive: true, force: true })
+    await f.dispose()
+  }
+})
+
+test('an unavailable short ControlPath fallback reports a fixed actionable SSH diagnostic', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture()
+  const previousTmpdir = process.env.TMPDIR
+  try {
+    process.env.TMPDIR = '/private/' + 'secret-credential'.repeat(20)
+    const create = t.mock.method(fsPromises, 'mkdtemp', async (prefix: string) => {
+      assert.equal(prefix, '/tmp/dshc-')
+      throw Object.assign(new Error('Private filesystem detail and secret-credential'), { code: 'EACCES' })
+    })
+    syncBuiltinESMExports()
+    await assert.rejects(connectTunnel({ target: 'dev', remotePort: 3080 }, f.options), error => {
+      assert.ok(error instanceof SshTunnelError)
+      assert.equal(error.code, 'SSH_FORWARD')
+      assert.equal(error.diagnostic, 'CONTROL_PATH')
+      assert.match(error.message, /ControlPath.*\/tmp fallback.*TMPDIR.*permissions/)
+      assert.ok(!error.message.includes('secret-credential'))
+      assert.ok(!error.message.includes('Private filesystem'))
+      return true
+    })
+    assert.equal(create.mock.callCount(), 1)
+    assert.equal(create.mock.calls[0]!.arguments[0], '/tmp/dshc-')
+    assert.deepEqual(await f.calls(), [], 'a failed private socket allocation never starts SSH')
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+    if (previousTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmpdir
+    await f.dispose()
+  }
 })
 
 test('a lost port reservation is retried only after SSH rejects its bind', async () => {
@@ -207,6 +293,21 @@ for (const [message, code] of [
 
 test('missing OpenSSH is actionable', async () => {
   await assert.rejects(connectTunnel({ target: 'dev', remotePort: 3080 }, { sshPath: '/does-not-exist/dsh-ssh' }), { code: 'SSH_UNAVAILABLE' })
+})
+
+test('a supervisor that cannot start is classified separately from SSH authentication and missing OpenSSH', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture({ NODE_OPTIONS: '--dsh-invalid-supervisor-option-private-detail' })
+  try {
+    await assert.rejects(connectTunnel({ target: 'dev', remotePort: 3080 }, f.options), error => {
+      assert.ok(error instanceof SshTunnelError)
+      assert.equal(error.code, 'SSH_FAILED')
+      assert.equal(error.diagnostic, 'SUPERVISOR')
+      assert.match(error.message, /supervisor.*Node runtime.*Desktop installation/)
+      assert.ok(!error.message.includes('private-detail'))
+      return true
+    })
+    assert.deepEqual(await f.calls(), [], 'runtime startup failed before OpenSSH was launched')
+  } finally { await f.dispose() }
 })
 
 test('bounds diagnostic output and redacts launch credentials', async () => {

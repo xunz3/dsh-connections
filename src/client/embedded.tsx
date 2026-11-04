@@ -1,7 +1,7 @@
 import { createElement, useEffect, useSyncExternalStore } from 'react'
 import type { ComponentType } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from './snapshot-store.js'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { DirectoryFlowOwnerProps, UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { HostObservable, PropsRenderSlots, StoredEntry } from '@deepseek-ai/dsh-client-ui-slots'
@@ -17,6 +17,7 @@ import { applyEmbeddedSettings, createEmbeddedSettingsHosts, type EmbeddedSettin
 import { installSettingsHostHeader } from './settings-host-menu.js'
 import { createSettingsHostClient } from './settings-host-bridge.js'
 import { createSettingsHostRelayClient, type SettingsHostEndpoint } from './settings-host-relay.js'
+import { SurfaceLifecycle, surfaceRetryDelay, surfaceTerminal, type SurfacePollingOptions } from './view-surface.js'
 
 const en = {
   missing: 'Open this remote workspace from Connections on your computer.',
@@ -84,10 +85,13 @@ interface EmbeddedState {
 }
 
 function waitFor<T>(source: HostObservable<T>, ready: (value: T) => boolean, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise((resolve, reject) => {
-    let unsubscribe = () => {}
+    let unsubscribe: (() => void) | undefined, finished = false
     const finish = (error?: unknown) => {
-      unsubscribe()
+      if (finished) return
+      finished = true
+      unsubscribe?.()
       signal.removeEventListener('abort', aborted)
       clearTimeout(timer)
       if (error !== undefined) reject(error)
@@ -96,25 +100,21 @@ function waitFor<T>(source: HostObservable<T>, ready: (value: T) => boolean, sig
     const aborted = () => finish(signal.reason ?? new Error('Navigation cancelled'))
     const check = () => { if (ready(source.getSnapshot())) finish() }
     const timer = setTimeout(() => finish(new Error('Native workspace state unavailable')), 30_000)
-    unsubscribe = source.subscribe(check)
     signal.addEventListener('abort', aborted, { once: true })
-    if (signal.aborted) aborted()
-    else check()
-  })
-}
-
-function delay(signal: AbortSignal): Promise<void> {
-  return new Promise(resolve => {
-    const done = () => { clearTimeout(timer); signal.removeEventListener('abort', done); resolve() }
-    const timer = setTimeout(done, 1000)
-    signal.addEventListener('abort', done, { once: true })
-    if (signal.aborted) done()
+    try {
+      unsubscribe = source.subscribe(check)
+      // An observable is allowed to notify synchronously from subscribe().
+      if (finished) unsubscribe()
+      else if (signal.aborted) aborted()
+      else check()
+    } catch (error) { finish(error) }
   })
 }
 
 /** Coordinates selection only; all conversation, session and directory behavior stays native. */
 export class EmbeddedViewController {
-  private readonly lifetime = new AbortController()
+  private readonly lifetime: SurfaceLifecycle
+  private readonly reconciled = createSnapshotStore<AbortSignal | undefined>(undefined)
   private operation = new AbortController()
   private generation = 0
   private revision = 0
@@ -131,7 +131,8 @@ export class EmbeddedViewController {
     private readonly endpoint: EmbeddedEndpoint,
     readonly state = createSnapshotStore<EmbeddedState>({ message: 'waiting' }),
     private readonly settings?: EmbeddedSettingsAdapter,
-  ) {}
+    private readonly polling: SurfacePollingOptions = {},
+  ) { this.lifetime = new SurfaceLifecycle(polling.document) }
 
   start(): void {
     if (this.unsubscribe || this.lifetime.signal.aborted) return
@@ -148,7 +149,7 @@ export class EmbeddedViewController {
 
   dispose(): void {
     if (this.lifetime.signal.aborted) return
-    this.lifetime.abort()
+    this.lifetime.dispose()
     this.operation.abort()
     this.settings?.close()
     this.ctx.layout.beginNavigation()
@@ -201,11 +202,23 @@ export class EmbeddedViewController {
     return ++this.generation
   }
 
+  private terminal(error: unknown): boolean {
+    if (!surfaceTerminal(error)) return false
+    this.dispose()
+    this.state.set({ message: (error as { code: string }).code === 'NOT_FOUND' ? 'expired' : 'failed' })
+    return true
+  }
+
   private async poll(): Promise<void> {
+    let failures = 0
     while (!this.lifetime.signal.aborted) {
+      let active: AbortSignal | undefined
       try {
-        const state = await this.endpoint({ op: 'pollView', channel: this.channel, afterRevision: this.revision }, this.lifetime.signal)
-        if (this.lifetime.signal.aborted) return
+        await this.lifetime.wait()
+        active = this.lifetime.activeSignal
+        const afterRevision = this.reconciled.getSnapshot() === active ? this.revision : 0
+        const state = await this.lifetime.read(signal => this.endpoint({ op: 'pollView', channel: this.channel, afterRevision }, signal), active)
+        active.throwIfAborted()
         const initial = !this.received
         this.received = true
         const changed = state.revision > this.revision
@@ -224,25 +237,31 @@ export class EmbeddedViewController {
         } else if (this.state.getSnapshot().message === 'disconnected') {
           this.state.set({ ...this.state.getSnapshot(), message: undefined })
         }
+        // Reports resumed from a hidden document must wait for this authoritative
+        // read, so an old completion cannot race a newer navigation revision.
+        this.reconciled.set(active)
+        failures = 0
       } catch (error) {
         if (this.lifetime.signal.aborted) return
-        if (error && typeof error === 'object' && 'code' in error && error.code === 'NOT_FOUND') {
-          this.dispose()
-          this.state.set({ message: 'expired' })
-          return
-        }
+        if (active?.aborted) continue
+        if (this.terminal(error)) return
         this.state.set({ ...this.state.getSnapshot(), message: 'disconnected' })
-        await delay(this.lifetime.signal)
+        failures++
+        if (active) await this.lifetime.sleep(surfaceRetryDelay(1000, failures, this.polling.maxBackoffMs), active).catch(() => {})
       }
     }
   }
 
   private async ready(generation: number): Promise<boolean> {
-    await Promise.all([
-      waitFor(this.ctx.workspaces.list, value => value.phase === 'ready', this.operation.signal),
-      waitFor(this.ctx.sessions.list, value => value.phase === 'ready', this.operation.signal),
-    ])
-    return this.active(generation)
+    const waiting = new AbortController()
+    const signal = AbortSignal.any([this.operation.signal, waiting.signal])
+    try {
+      await Promise.all([
+        waitFor(this.ctx.workspaces.list, value => value.phase === 'ready', signal),
+        waitFor(this.ctx.sessions.list, value => value.phase === 'ready', signal),
+      ])
+      return this.active(generation)
+    } finally { waiting.abort() }
   }
 
   private async navigate(intent: WorkspaceViewIntent, generation: number): Promise<void> {
@@ -349,15 +368,29 @@ export class EmbeddedViewController {
 
   private async flushReports(): Promise<void> {
     this.reporting = true
+    let failures = 0
     try {
       while (this.queuedReport && !this.lifetime.signal.aborted) {
-        const report = this.queuedReport
-        this.queuedReport = undefined
-        if (report.revision !== this.revision) continue
-        try { await this.endpoint(report, this.lifetime.signal) }
-        catch {
-          if (!this.queuedReport && report.revision === this.revision) this.queuedReport = report
-          await delay(this.lifetime.signal)
+        let report: Report | undefined, active: AbortSignal | undefined
+        try {
+          await this.lifetime.wait()
+          active = this.lifetime.activeSignal
+          await waitFor(this.reconciled, value => value === active, active)
+          active.throwIfAborted()
+          report = this.queuedReport
+          this.queuedReport = undefined
+          if (!report || report.revision !== this.revision) continue
+          const current = report
+          await this.lifetime.read(signal => this.endpoint(current, signal), active)
+          active.throwIfAborted()
+          failures = 0
+        } catch (error) {
+          if (this.lifetime.signal.aborted) return
+          if (report && !this.queuedReport && report.revision === this.revision) this.queuedReport = report
+          if (active?.aborted) continue
+          if (this.terminal(error)) return
+          failures++
+          if (active) await this.lifetime.sleep(surfaceRetryDelay(1000, failures, this.polling.maxBackoffMs), active).catch(() => {})
         }
       }
     } finally { this.reporting = false }

@@ -6,6 +6,8 @@ import type { WorkspaceCatalog } from '../../src/shared/workspace-protocol.js'
 const query = new URLSearchParams(location.search)
 const calls: unknown[][] = []
 let disconnect: () => void
+let replaceAuthority: () => void
+let refresh: () => void
 let resolveReconnect: (() => void) | undefined
 function catalog(remote: boolean): WorkspaceCatalog {
   if (query.has('large') && remote) {
@@ -29,9 +31,11 @@ function App() {
   const [wide, setWide] = useState(!query.has('rail'))
   const [sources, setSources] = useState<WorkspaceSource[]>([
     { id: 'local', name: 'This computer', phase: 'connected', catalog: catalog(false) },
-    { id: 'remote', name: query.has('long') ? 'Development server with a long name' : 'devbox', phase: query.has('offline') ? 'disconnected' : 'connected', catalog: catalog(true) },
+    { id: 'remote', name: query.has('long') ? 'Development server with a long name' : 'devbox', phase: query.has('offline') ? 'disconnected' : 'connected', catalog: catalog(true), info: { transportId: crypto.randomUUID() } },
   ])
   disconnect = () => setSources(current => current.map(source => source.id === 'remote' ? { ...source, phase: 'disconnected' } : source))
+  replaceAuthority = () => setSources(current => current.map(source => source.id === 'remote' ? { ...source, info: { transportId: crypto.randomUUID() } } : source))
+  refresh = () => setSources(current => current.map(source => ({ ...source, catalog: source.catalog && { ...source.catalog } })))
   const record = (name: string, ...args: unknown[]) => { calls.push([name, ...args]) }
   return <>
     <style>{`main#root{display:flex;margin:0;padding:0;max-width:none;height:100dvh}aside{width:266px;flex:none;padding-top:20px;background:#f8f9fa}.fixture-content{padding:40px;min-width:0;flex:1}.fixture-content h1{font-size:20px;font-weight:500}.fixture-content p{color:#777d87}@media(prefers-color-scheme:dark){aside{background:#25262a}:root{--dsw-alias-interactive-bg-hover:#30343a;--dsw-alias-label-tertiary:#848a93}.fixture-content{color:#eceef1}}`}</style>
@@ -53,5 +57,5 @@ function App() {
     <div className="fixture-content"><h1>Workspace browser fixture</h1><p>{selected ? `${selected.sourceId}: ${selected.sessionId ?? selected.workspaceId}` : 'Choose a chat from either computer.'}</p></div>
   </>
 }
-Object.assign(globalThis, { workspaceCatalogFixture: { calls, disconnect: () => disconnect(), resolveReconnect: () => resolveReconnect?.() } })
+Object.assign(globalThis, { workspaceCatalogFixture: { calls, disconnect: () => disconnect(), replaceAuthority: () => replaceAuthority(), refresh: () => refresh(), resolveReconnect: () => resolveReconnect?.() } })
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>)

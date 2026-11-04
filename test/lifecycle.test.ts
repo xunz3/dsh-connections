@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
-import { createHash, randomBytes } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -68,8 +68,10 @@ async function fixture(extraEnv: NodeJS.ProcessEnv = {}, workspacePlugin?: Buffe
   await mkdir(bin)
   await mkdir(join(directory, 'units'))
   const fixtureCommand = fileURLToPath(new URL('./fixtures/fake-lifecycle-command.mjs', import.meta.url))
-  await chmod(fixtureCommand, 0o755)
-  for (const command of ['systemctl', 'systemd-run', 'loginctl', 'npm']) await symlink(fixtureCommand, join(bin, command))
+  const fixtureSource = await readFile(fixtureCommand)
+  // Own each executable fixture too: concurrent runs must not chmod the shared
+  // source or observe another test generation through a symlink.
+  for (const command of ['systemctl', 'systemd-run', 'loginctl', 'npm']) await writeFile(join(bin, command), fixtureSource, { mode: 0o755 })
   const env = { ...process.env, ...extraEnv, PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, DSH_LIFECYCLE_FIXTURE: directory }
   const options: RemoteHostOptions = {
     workspacePlugin: false,
@@ -129,6 +131,70 @@ async function workspaceArchive(): Promise<Buffer> {
     return await readFile(path)
   } finally { await rm(temporary, { recursive: true, force: true }) }
 }
+
+test('native workspace activation requires an active fiber, not only saved enablement', async () => {
+  // Exercise only the fixed management program's activation decision. Replacing
+  // its I/O functions in this private child never contacts a real Host/profile.
+  const source = REMOTE_SERVICE_SCRIPT + `
+    ready = async () => ({ remotePort: 1, token: 'isolated-fixture-token' });
+    currentRelease = async () => '0.2.1-rc.3';
+    authenticate = async () => 'isolated-fixture-cookie';
+    const rows = [];
+    for (const enabled of [true, false]) {
+      let calls = 0;
+      pluginManagerRequest = async (_port, _cookie, method) => {
+        if (method === 'listPlugins') return [{ moduleName: packageName, entryId: 'web:connections', patchId: 'connections', enabled: enabled || calls > 0, fiberPhase: 'failed' }];
+        if (method !== 'setPluginEnabled') throw new Error('Unexpected native mutation');
+        calls++;
+        return { application: 'applied' };
+      };
+      let outcome = 'success';
+      try { await activateWorkspacePlugin({ root: '/unused-private-fixture' }); }
+      catch (error) { outcome = error.code; }
+      rows.push({ enabled, outcome });
+    }
+    process.stdout.write(JSON.stringify(rows));
+  `
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source])
+  assert.deepEqual(JSON.parse(stdout), [
+    { enabled: true, outcome: 'plugin-activation' },
+    { enabled: false, outcome: 'plugin-activation' },
+  ])
+})
+
+test('native activation polls only transient fiber phases and never repeats its enable mutation', async () => {
+  const source = REMOTE_SERVICE_SCRIPT + `
+    ready = async () => ({ remotePort: 1, token: 'isolated-fixture-token' });
+    currentRelease = async () => '0.2.1-rc.3';
+    authenticate = async () => 'isolated-fixture-cookie';
+    const rows = [];
+    for (const phases of [['pending', 'active'], ['loading', 'active'], ['pending', 'loading', 'active'], ['failed'], ['unloading'], [null], [undefined], ['unknown'], ['timeout']]) {
+      let mutations = 0, reads = 0, tick = 0;
+      const now = Date.now;
+      if (phases[0] === 'timeout') Date.now = () => tick += 20000;
+      pluginManagerRequest = async (_port, _cookie, method) => {
+        if (method === 'listPlugins') {
+          const fiberPhase = !mutations ? null : phases[0] === 'timeout' ? 'loading' : phases[Math.min(reads++, phases.length - 1)];
+          return [{ moduleName: packageName, entryId: 'web:connections', patchId: 'connections', enabled: mutations > 0, fiberPhase }];
+        }
+        if (method !== 'setPluginEnabled' || mutations) throw new Error('Repeated or unexpected native mutation');
+        mutations++;
+        return { application: 'applied' };
+      };
+      let outcome = 'success';
+      try { await activateWorkspacePlugin({ root: '/unused-private-fixture' }); }
+      catch (error) { outcome = error.code; }
+      finally { Date.now = now; }
+      rows.push({ phase: phases[0] ?? null, outcome, mutations });
+    }
+    process.stdout.write(JSON.stringify(rows));
+  `
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source])
+  assert.deepEqual(JSON.parse(stdout), [
+    ...['pending', 'loading', 'pending'].map(phase => ({ phase, outcome: 'success', mutations: 1 })),
+    ...['failed', 'unloading', null, null, 'unknown', 'timeout'].map(phase => ({ phase, outcome: 'plugin-activation', mutations: 1 })),
+  ])
+})
 
 test('transfers the private workspace bundle through a request file and installs with the native CLI', { timeout: 40_000 }, async () => {
   const archive = await workspaceArchive()
@@ -422,6 +488,183 @@ test('atomic writes remove their private temporary file after write and rename f
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
+for (const kind of ['environment', 'request'] as const) test(`legacy bootstrap can commit a paused ${kind} rename after a new worker sweeps`, { timeout: 30_000 }, async () => {
+  const f = await fixture()
+  let legacy: ReturnType<typeof spawn> | undefined
+  let exited: Promise<number | null> | undefined
+  let stderr = ''
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const root = f.options.remoteRoot!
+    const destination = join(root, kind === 'environment' ? 'environment' : `request-${randomUUID()}.json`)
+    const value = kind === 'environment' ? 'HTTP_PROXY="http://paused-legacy-credential@proxy.invalid:1234"\n' : 'private-legacy-request'
+    // This is the old bootstrap's lock-external atomic helper, with an explicit
+    // barrier immediately before rename. No age/mtime heuristic proves safety.
+    const source = `
+      import * as fs from 'node:fs/promises';
+      import { randomUUID } from 'node:crypto';
+      const destination = ${JSON.stringify(destination)};
+      const temporary = destination + '.tmp-' + randomUUID();
+      const handle = await fs.open(temporary, 'wx', 0o600);
+      try {
+        try { await handle.writeFile(${JSON.stringify(value)}); } finally { await handle.close(); }
+        process.send({ temporary });
+        await new Promise(resolve => process.once('message', resolve));
+        await fs.rename(temporary, destination);
+      } finally { await fs.rm(temporary, { force: true }); }
+      process.disconnect();
+    `
+    // Transfer synthetic proxy values over stdin too, never in the helper argv.
+    legacy = spawn(process.execPath, ['--input-type=module', '-'], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] })
+    legacy.stderr!.on('data', data => { stderr += data.toString() })
+    exited = new Promise(resolve => legacy!.once('close', resolve))
+    const paused = new Promise<string>((resolve, reject) => {
+      legacy!.once('error', reject)
+      legacy!.once('exit', () => reject(new Error(`Legacy bootstrap exited before its rename barrier: ${stderr}`)))
+      legacy!.once('message', message => resolve((message as { temporary: string }).temporary))
+    })
+    legacy.stdin!.end(source)
+    const temporary = await paused
+    assert.equal(await readFile(temporary, 'utf8'), value)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first, 'the new worker runs under the real management lock while legacy bootstrap is paused')
+    assert.equal(await readFile(temporary, 'utf8'), value, 'the locked worker must preserve a legacy bootstrap temporary even if it looks abandoned')
+    legacy.send({ resume: true })
+    assert.equal(await exited, 0, `legacy atomic rename must remain valid: ${stderr}`)
+    assert.equal(await readFile(destination, 'utf8'), value)
+    await assert.rejects(lstat(temporary), { code: 'ENOENT' })
+    const commands = await readFile(join(f.directory, 'commands.jsonl'), 'utf8')
+    assert.ok(!commands.includes('paused-legacy-credential'))
+  } finally {
+    if (legacy?.connected) legacy.send({ resume: true }, () => {})
+    await exited
+    await f.dispose()
+  }
+})
+
+test('temporary sweeping rejects unexpected types and links without following or recursively deleting them', { skip: process.platform === 'win32' }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-sweep-test-'))
+  const outside = join(directory, 'outside')
+  await writeFile(outside, 'must remain untouched', { mode: 0o600 })
+  try {
+    for (const namespace of ['locked', 'legacy']) for (const kind of ['symlink', 'directory', 'public-file', 'hardlink', 'external-current-link']) {
+      const root = join(directory, `${namespace}-${kind}`)
+      await mkdir(root, { mode: 0o700 })
+      const base = kind === 'external-current-link' ? 'current' : namespace === 'locked' ? 'environment' : 'transaction.json'
+      const path = join(root, `${base}.tmp-${namespace === 'locked' ? 'locked-' : ''}${randomUUID()}`)
+      if (kind === 'directory') {
+        await mkdir(path, { mode: 0o700 })
+        await writeFile(join(path, 'keep'), 'nested data')
+      } else if (kind === 'public-file') {
+        await writeFile(path, 'private-lookalike', { mode: 0o600 })
+        await chmod(path, 0o644)
+      } else if (kind === 'hardlink') await link(outside, path)
+      else await symlink(outside, path)
+      const source = REMOTE_SERVICE_SCRIPT + `\ntry { await sweepTemporary(${JSON.stringify(root)}); throw new Error('Expected ownership rejection'); } catch (error) { if (error.code !== 'ownership') throw error; }\n`
+      await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source])
+      assert.ok(await lstat(path), `${kind} must remain, rather than being followed or recursively removed`)
+      assert.equal(await readFile(outside, 'utf8'), 'must remain untouched')
+      if (kind === 'directory') assert.equal(await readFile(join(path, 'keep'), 'utf8'), 'nested data')
+    }
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('locked workers sweep only owned exact root temporaries while concurrent bootstraps retain their requests', { timeout: 30_000 }, async () => {
+  const f = await fixture({ HTTP_PROXY: 'http://private-proxy-credential@proxy.invalid:1234', UNRELATED_API_KEY: 'must-not-copy' })
+  let locker: ReturnType<typeof spawn> | undefined
+  let lockClosed: Promise<void> | undefined
+  const pending: Promise<Awaited<ReturnType<typeof prepareHost>>>[] = []
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const root = f.options.remoteRoot!
+    const temporaryNames = [
+      ...['environment', 'transaction.json', `request-${randomUUID()}.json`, `result-${randomUUID()}.json`].map(name => `${name}.tmp-locked-${randomUUID()}`),
+      ...['transaction.json', `result-${randomUUID()}.json`].map(name => `${name}.tmp-${randomUUID()}`),
+    ]
+    for (const name of temporaryNames) await writeFile(join(root, name), 'crash leftover', { mode: 0o600 })
+    for (const name of [`current.tmp-${randomUUID()}`, `current.tmp-locked-${randomUUID()}`]) {
+      await symlink(`releases/${first.version}`, join(root, name))
+      temporaryNames.push(name)
+    }
+    const unknown = [
+      `notes.tmp-${randomUUID()}`, `notes.tmp-locked-${randomUUID()}`, 'transaction.json.tmp-not-a-uuid',
+      'environment.tmp-locked-not-a-uuid', `environment.tmp-${randomUUID()}`, `request-${randomUUID()}.json.tmp-${randomUUID()}`,
+    ]
+    for (const name of unknown) await writeFile(join(root, name), 'preserve unknown files', { mode: 0o600 })
+    const nested = join(root, 'home', `environment.tmp-locked-${randomUUID()}`)
+    await writeFile(nested, 'preserve native home', { mode: 0o600 })
+    const previousEnvironment = await readFile(join(root, 'environment'), 'utf8')
+    f.setEnvironment({ HTTP_PROXY: 'http://new-private-credential@proxy.invalid:2345' })
+    locker = spawn('flock', ['--exclusive', '--no-fork', join(root, 'management.lock'), process.execPath, '-e', 'process.stdout.write("locked\\n");process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], { stdio: ['pipe', 'pipe', 'pipe'] })
+    lockClosed = new Promise<void>(resolve => locker!.once('close', () => resolve()))
+    await new Promise<void>((resolve, reject) => {
+      locker!.once('error', reject)
+      locker!.once('exit', () => reject(new Error('Fixture lock owner exited before acquisition')))
+      locker!.stdout!.once('data', () => resolve())
+    })
+    for (let i = 0; i < 2; i++) {
+      const request = prepareHost({ target: 'dev' }, f.options)
+      request.catch(() => {})
+      pending.push(request)
+    }
+    let requests: string[] = []
+    for (let attempt = 0; attempt < 300; attempt++) {
+      requests = (await readdir(root)).filter(name => /^request-[0-9a-f-]{36}\.json$/.test(name))
+      if (requests.length === 2) break
+      await sleep(10)
+    }
+    assert.equal(requests.length, 2, 'both bootstraps transfer distinct complete requests before waiting for management.lock')
+    for (const name of requests) {
+      assert.equal((await stat(join(root, name))).mode & 0o777, 0o600)
+      const request = JSON.parse(Buffer.from(await readFile(join(root, name), 'utf8'), 'base64').toString('utf8'))
+      assert.equal(request.network.HTTP_PROXY, 'http://new-private-credential@proxy.invalid:2345')
+      assert.equal(request.network.UNRELATED_API_KEY, undefined)
+    }
+    for (const name of temporaryNames) assert.ok(await lstat(join(root, name)), 'bootstrap cannot sweep before acquiring the worker lock')
+    assert.equal(await readFile(join(root, 'environment'), 'utf8'), previousEnvironment, 'queued bootstraps cannot change the active worker environment')
+    locker.stdin!.end()
+    await lockClosed
+    assert.deepEqual(await Promise.all(pending), [first, first])
+    for (const name of temporaryNames) await assert.rejects(lstat(join(root, name)), { code: 'ENOENT' })
+    for (const name of unknown) assert.equal(await readFile(join(root, name), 'utf8'), 'preserve unknown files')
+    assert.equal(await readFile(nested, 'utf8'), 'preserve native home')
+    assert.equal((await readdir(root)).some(name => /^(?:request|result)-[0-9a-f-]{36}\.json$/.test(name)), false)
+    const commands = await readFile(join(f.directory, 'commands.jsonl'), 'utf8')
+    assert.ok(!commands.includes('private-credential'), 'proxy credentials never enter systemd-run argv')
+    assert.ok(!commands.includes('--property=EnvironmentFile='), 'workers do not import a stale environment before acquiring their lock')
+    const environment = await readFile(join(root, 'environment'), 'utf8')
+    assert.ok(environment.includes('new-private-credential'))
+    assert.ok(!environment.includes('private-proxy-credential'))
+  } finally {
+    locker?.stdin?.end()
+    await lockClosed
+    await Promise.allSettled(pending)
+    await f.dispose()
+  }
+})
+
+test('current network allowlist replaces legacy environment values and honors removed variables', { timeout: 30_000 }, async () => {
+  const f = await fixture({ HTTP_PROXY: 'http://legacy-private-credential@proxy.invalid:1234', npm_config_registry: 'https://legacy-registry.invalid', UNRELATED_API_KEY: 'never-copy-this-key' })
+  try {
+    const first = await prepareHost({ target: 'dev' }, f.options)
+    const path = join(f.options.remoteRoot!, 'environment')
+    await writeFile(path, await readFile(path, 'utf8') + 'UNRELATED_API_KEY="legacy-secret"\n', { mode: 0o600 })
+    f.setEnvironment({ HTTP_PROXY: undefined, npm_config_registry: undefined, HTTPS_PROXY: 'http://current-private-credential@proxy.invalid:2345' })
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), first)
+    const environment = await readFile(path, 'utf8')
+    assert.ok(environment.includes('HTTPS_PROXY="http://current-private-credential@proxy.invalid:2345"'))
+    assert.ok(!/^HTTP_PROXY=/m.test(environment))
+    assert.ok(!/^npm_config_registry=/m.test(environment))
+    assert.ok(!environment.includes('legacy-private-credential'))
+    assert.ok(!environment.includes('legacy-secret'))
+    assert.ok(!environment.includes('UNRELATED_API_KEY'))
+    assert.ok(!environment.includes('never-copy-this-key'))
+    assert.equal((await stat(path)).mode & 0o777, 0o600)
+    const diagnostics = await readFile(join(f.directory, 'commands.jsonl'), 'utf8') + await readFile(join(f.options.remoteRoot!, 'maintenance.log'), 'utf8')
+    assert.ok(!diagnostics.includes('private-credential'))
+    assert.ok(!diagnostics.includes('legacy-secret'))
+  } finally { await f.dispose() }
+})
+
 test('startup activation is verified and reconnect repairs disabled and missing entries', { timeout: 40_000 }, async () => {
   const archive = await workspaceArchive()
   const f = await fixture({}, archive)
@@ -449,6 +692,30 @@ test('startup activation is verified and reconnect repairs disabled and missing 
     assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), repaired)
     assert.equal(await readFile(join(f.directory, 'plugin-runtime'), 'utf8'), currentReceipt.digest)
     assert.equal(JSON.parse(await readFile(receipt, 'utf8')).activation, 'applied')
+  } finally { await f.dispose() }
+})
+
+test('failed native fibers cannot create or renew an activation receipt and preserve the running Host', { timeout: 30_000 }, async () => {
+  const f = await fixture({}, await workspaceArchive())
+  const phase = join(f.directory, 'plugin-fiber-phase')
+  const receipt = join(f.options.remoteRoot!, 'home/connections-workspace-plugin.json')
+  try {
+    await writeFile(phase, 'failed')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-activation' })
+    await assert.rejects(stat(receipt), { code: 'ENOENT' }, 'enabled plus an applied response does not attest to an active runtime')
+    const runningPid = (await f.state()).pid
+    await rm(phase)
+    const repaired = await prepareHost({ target: 'dev' }, f.options)
+    assert.equal(repaired.pid, runningPid)
+    const confirmed = await readFile(receipt, 'utf8')
+    await writeFile(phase, 'failed')
+    await assert.rejects(prepareHost({ target: 'dev' }, f.options), { code: 'plugin-activation' })
+    assert.equal(await readFile(receipt, 'utf8'), confirmed, 'a historical receipt cannot override an observed inactive fiber')
+    assert.equal((await f.state()).pid, runningPid)
+    await rm(phase)
+    assert.deepEqual(await prepareHost({ target: 'dev' }, f.options), repaired)
+    const commands = (await readFile(join(f.directory, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { command: string; args: string[] })
+    assert.ok(!commands.some(row => row.command === 'systemctl' && row.args.includes('stop')), 'activation repair cannot restart active work')
   } finally { await f.dispose() }
 })
 
@@ -606,7 +873,13 @@ test('native systemd accepts paths with spaces without ignored directives', { sk
   const f = await fixture({}, undefined, 'dsh systemd spaces ')
   try {
     await prepareHost({ target: 'dev' }, f.options)
-    const result = await promisify(execFile)('systemd-analyze', ['--user', '--man=no', 'verify', join(f.directory, 'units/dsh-connections-fixture.service')])
+    // Verification creates a transient private manager socket. Never share the
+    // real logged-in user's runtime directory (or another concurrent verifier).
+    const runtime = join(f.directory, 'systemd-runtime')
+    await mkdir(runtime, { mode: 0o700 })
+    const env: NodeJS.ProcessEnv = { ...process.env, XDG_RUNTIME_DIR: runtime }
+    delete env.DBUS_SESSION_BUS_ADDRESS
+    const result = await promisify(execFile)('systemd-analyze', ['--user', '--man=no', 'verify', join(f.directory, 'units/dsh-connections-fixture.service')], { env })
     assert.equal(result.stderr.trim(), '')
   } finally { await f.dispose() }
 })

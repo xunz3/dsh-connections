@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconRefreshOutlineRegular } from './ui/index.js'
 import type { ConnectionsApi, ConnectionView, SaveConnection } from '../shared/types.js'
 import { parseSave } from '../shared/validation.js'
 import type { Translate } from './messages.js'

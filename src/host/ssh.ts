@@ -34,7 +34,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function processError(process: OwnedProcess, result: ProcessResult, fallback: 'SSH_FORWARD' | 'SSH_CLOSED' | 'SSH_FAILED'): SshTunnelError {
-  return sshProcessError(process.stderr, result, fallback)
+  return result.error instanceof SshTunnelError ? result.error : sshProcessError(process.stderr, result, fallback)
 }
 
 function signalProcess(process: OwnedProcess, signal: NodeJS.Signals): void {
@@ -44,6 +44,27 @@ function signalProcess(process: OwnedProcess, signal: NodeJS.Signals): void {
     if (globalThis.process.platform !== 'win32') globalThis.process.kill(-process.child.pid, signal)
     else process.child.kill(signal)
   } catch { /* The process can exit between the check and the signal. */ }
+}
+
+// Use the portable 104-byte sun_path bound (including NUL), not JS character
+// count. OpenSSH first binds ControlPath + '.' + 16 random ASCII characters.
+const controlPathFits = (directory: string) => Buffer.byteLength(join(directory, 's'), 'utf8') + 17 < 104
+
+async function controlDirectory(): Promise<string> {
+  const temporaryRoot = tmpdir()
+  const fallback = !controlPathFits(join(temporaryRoot, 'dshc-XXXXXX'))
+  try {
+    const directory = await mkdtemp(join(fallback ? '/tmp' : temporaryRoot, 'dshc-'))
+    // Verify the allocated path too; never pass an oversized socket to SSH.
+    if (!controlPathFits(directory)) {
+      await rm(directory, { recursive: true, force: true })
+      throw new SshTunnelError('SSH_FORWARD', undefined, 'CONTROL_PATH')
+    }
+    return directory
+  } catch (error) {
+    if (fallback) throw new SshTunnelError('SSH_FORWARD', undefined, 'CONTROL_PATH')
+    throw error
+  }
 }
 
 /** Reserve an OS-selected loopback port. SSH's subsequent bind is authoritative. */
@@ -174,7 +195,7 @@ export async function connectTunnel(input: TunnelInput, options: SshTunnelOption
   }
 
   try {
-    directory = await mkdtemp(join(tmpdir(), 'dshc-'))
+    directory = await controlDirectory()
     await chmod(directory, 0o700)
     // An abort during mkdtemp must still remove the newly-created directory.
     if (closed) { await rm(directory, { recursive: true, force: true }); throw abortReason(controller.signal) }

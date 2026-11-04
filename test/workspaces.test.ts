@@ -1,7 +1,9 @@
 import { WORKSPACE_PROTOCOL } from '../src/shared/workspace-protocol.js'
+import { CONNECTION_CONTRACTS } from '../src/shared/contracts.js'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createRequire } from 'node:module'
+import { getEventListeners } from 'node:events'
 import vm from 'node:vm'
 import { buildSync } from 'esbuild'
 import { WorkspaceController, viewClientId } from '../src/client/workspace-controller.js'
@@ -28,7 +30,7 @@ const catalog = (): WorkspaceCatalogPage => ({
 function fixture() {
   let rows: ConnectionView[] = [{ id: first, name: 'First', target: 'first', phase: 'disconnected', remotePort: 3000 }]
   let connects = 0, reconnects = 0, opens = 0, channels = 0
-  const calls: { id: string; request: WorkspaceRequest }[] = []
+  const calls: { id: string; request: WorkspaceRequest; expectedTransportId?: string }[] = []
   const views = new Map<string, WorkspaceViewState>()
   const saved = new Map<string, string>()
   const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => { saved.set(key, value) }, removeItem: (key: string) => { saved.delete(key) } }
@@ -38,7 +40,7 @@ function fixture() {
         case 'catalog': return catalog()
         case 'openView': {
           const channel = String(++channels).padStart(43, 'a')
-          const view = { protocol: WORKSPACE_PROTOCOL, channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, view); return view
+          const view = { protocol: WORKSPACE_PROTOCOL, contracts: { ...CONNECTION_CONTRACTS }, channel, revision: 0, presentedRevision: 0, reportedRevision: 0 }; views.set(channel, view); return view
         }
         case 'navigate': {
           const current = views.get(request.channel)!
@@ -53,10 +55,12 @@ function fixture() {
     api: {
       async reconnect(id: string) { reconnects++; return f.api.connect(id) },
       async list() { return structuredClone(rows) },
-      async connect(id: string) { connects++; const row = rows.find(row => row.id === id)!; row.phase = 'connected'; row.localPort = id === first ? 43188 : 43189; return structuredClone(row) },
+      async connect(id: string) { connects++; const row = rows.find(row => row.id === id)!; row.phase = 'connected'; row.localPort = id === first ? 43188 : 43189; row.transportId = crypto.randomUUID(); return structuredClone(row) },
       async open(id: string) { opens++; return { url: address(rows.find(row => row.id === id)?.localPort) } },
-      async workspace<R extends WorkspaceRequest>(id: string, request: R): Promise<WorkspaceResultMap[R['op']]> {
-        calls.push({ id, request: structuredClone(request) }); return await f.respond(id, request) as WorkspaceResultMap[R['op']]
+      async workspace<R extends WorkspaceRequest>(id: string, request: R, expectedTransportId?: string): Promise<WorkspaceResultMap[R['op']]> {
+        calls.push({ id, request: structuredClone(request), ...(expectedTransportId === undefined ? {} : { expectedTransportId }) })
+        if (id !== 'local' && expectedTransportId !== undefined && rows.find(row => row.id === id)?.transportId !== expectedTransportId) throw Object.assign(new Error('This connection changed.'), { code: 'CONFLICT' })
+        return await f.respond(id, request) as WorkspaceResultMap[R['op']]
       },
     },
     storage, saved, calls, views,
@@ -318,18 +322,84 @@ test('mutation failures surface and successful writes refresh the native catalog
     if (request.op === 'catalog') return { ...catalog(), archivedSessionIds: archived ? ['chat'] : [] }
     return respond(id, request)
   }
-  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188 }
-  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'New' }), /Rename failed/)
-  await controller.mutate(first, { op: 'archiveSession', id: 'chat', archived: true })
+  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188, transportId: crypto.randomUUID() }
+  await controller.refresh()
+  const authority = controller.getCatalogs().sources[1].info?.transportId
+  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'New' }, authority), /Rename failed/)
+  await controller.mutate(first, { op: 'archiveSession', id: 'chat', archived: true }, authority)
   assert.deepEqual(controller.getCatalogs().sources[1].catalog?.archivedSessionIds, ['chat']); controller.dispose()
+})
+
+test('remote writes require the catalog authority and preserve it while a replacement catalog is pending', async t => {
+  const f = fixture(), controller = new WorkspaceController(f.api), pending = deferred<WorkspaceResult>(), respond = f.respond
+  t.after(() => { pending.resolve(catalog()); controller.dispose() })
+  const oldTransport = crypto.randomUUID(), newTransport = crypto.randomUUID()
+  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188, transportId: oldTransport }
+  await controller.refresh()
+  const old = controller.getCatalogs().sources[1]
+  assert.equal(old.info?.transportId, oldTransport)
+  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'No authority' }), /connection changed/)
+  assert.equal(f.calls.some(call => call.request.op === 'renameSession'), false)
+  f.rows[0].transportId = newTransport
+  f.respond = (id, request) => id === first && request.op === 'catalog' ? pending.promise : respond(id, request)
+  const refresh = controller.refresh()
+  await nextTick()
+  const stale = controller.getCatalogs().sources[1]
+  assert.equal(stale.catalog, old.catalog, 'cached offline/transition rows stay usable for local reading')
+  assert.equal(stale.info?.transportId, oldTransport, 'a fresh list cannot bless retained old rows with the new transport')
+  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'Stale authority' }, stale.info?.transportId), /connection changed/)
+  assert.equal(f.calls.some(call => call.request.op === 'renameSession'), false)
+  pending.resolve(catalog()); await refresh
+  assert.equal(controller.getCatalogs().sources[1].info?.transportId, newTransport)
+  assert.deepEqual(f.calls.filter(call => call.id === first && call.request.op === 'catalog').map(call => call.expectedTransportId), [oldTransport, newTransport])
+})
+
+test('a transport switch after the client list preflight reaches the Host only with its original mutation guard', async t => {
+  const f = fixture(), controller = new WorkspaceController(f.api), respond = f.respond
+  t.after(() => controller.dispose())
+  const original = crypto.randomUUID()
+  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188, transportId: original }
+  await controller.refresh()
+  let writes = 0
+  f.respond = (id, request) => { if (request.op === 'renameSession') writes++; return respond(id, request) }
+  const workspace = f.api.workspace
+  f.api.workspace = async (id, request, expectedTransportId) => {
+    if (request.op === 'renameSession') f.rows[0].transportId = crypto.randomUUID()
+    return workspace(id, request, expectedTransportId)
+  }
+  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'Wrong Host' }, original), error => !!error && typeof error === 'object' && 'code' in error && error.code === 'CONFLICT')
+  assert.equal(writes, 0, 'the local Host precondition rejects before any remote business write')
+  const writesSent = f.calls.filter(call => call.request.op === 'renameSession')
+  assert.equal(writesSent.length, 1, 'a rejected business write is never replayed')
+  assert.equal(writesSent[0].expectedTransportId, original)
+})
+
+test('the production workspace mutation callback keeps the authority of its rendered catalog', async () => {
+  const original = crypto.randomUUID()
+  const shell = await workspaceNavigationFixture(f => { f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188, transportId: original } })
+  try {
+    await shell.workspace.refresh(); await nextTick()
+    const Browser = shell.core.entriesOfSlot('sidebar.workspaces')[0].component as (props: unknown) => unknown
+    const rendered = Browser({ wide: true, expandSidebar() {}, renderSlot() {} })
+    const browser = uiNodes(rendered).find(node => typeof node.props.onRenameSession === 'function')
+    assert.ok(browser)
+    const rename = browser.props.onRenameSession as (source: string, id: string, title: string) => Promise<void>
+    await rename(first, 'chat', 'Original Host')
+    assert.equal(shell.f.calls.find(call => call.request.op === 'renameSession')?.expectedTransportId, original)
+    shell.f.rows[0].transportId = crypto.randomUUID()
+    await shell.workspace.refresh()
+    await assert.rejects(rename(first, 'chat', 'Retained old callback'), /connection changed/)
+    assert.equal(shell.f.calls.filter(call => call.request.op === 'renameSession').length, 1)
+  } finally { shell.dispose() }
 })
 
 test('a row from an old destination cannot navigate an equal native ID on a replacement host', async () => {
   const f = fixture(), controller = new WorkspaceController(f.api)
-  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188 }; await controller.refresh()
+  f.rows[0] = { ...f.rows[0], phase: 'connected', localPort: 43188, transportId: crypto.randomUUID() }; await controller.refresh()
+  const authority = controller.getCatalogs().sources[1].info?.transportId
   f.rows[0].target = 'replacement'
   await controller.navigate(first, { kind: 'session', id: 'chat' })
-  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'Wrong computer' }), /connection changed/)
+  await assert.rejects(controller.mutate(first, { op: 'renameSession', id: 'chat', title: 'Wrong computer' }, authority), /connection changed/)
   assert.equal(controller.getSnapshot()?.phase, 'error')
   assert.equal(f.calls.filter(call => call.request.op === 'navigate').length, 0)
   assert.equal(f.calls.filter(call => call.request.op === 'renameSession').length, 0)
@@ -664,12 +734,55 @@ function loadWorkspaces(globals: Record<string, unknown> = {}) {
   vm.runInNewContext(built.outputFiles[0].text, {
     module: exports, exports: exports.exports,
     require: (name: string) => name === '@deepseek-ai/dsh-client-ui-primitives' ? {} : require(name),
-    console, URL, URLSearchParams, crypto, setTimeout, clearTimeout, AbortController, AbortSignal,
+    console, URL, URLSearchParams, crypto, setTimeout, clearTimeout, queueMicrotask, AbortController, AbortSignal,
     get window() { return globalThis.window },
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
     ...globals,
   })
   return exports.exports
+}
+
+function uiGlobals(guestError = false) {
+  const nativeRequire = createRequire(import.meta.url)
+  const react = nativeRequire('react')
+  return { require: (name: string) => name === 'react' ? {
+    ...react, useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
+    useState: (initial: unknown) => [guestError ? true : typeof initial === 'function' ? initial() : initial, () => {}],
+    useRef: (current: unknown) => ({ current }), useEffect() {}, useLayoutEffect() {},
+  } : name === '@deepseek-ai/dsh-client-ui-primitives' ? {} : nativeRequire(name) }
+}
+
+function uiNodes(node: unknown): Array<{ type: unknown; props: Record<string, unknown> }> {
+  if (Array.isArray(node)) return node.flatMap(uiNodes)
+  if (!node || typeof node !== 'object' || !('props' in node)) return []
+  const element = node as { type: unknown; props: Record<string, unknown> }
+  return [element, ...uiNodes(element.props.children)]
+}
+
+for (const guestError of [false, true]) {
+  test(`remote workspace ${guestError ? 'guest failure' : 'Host failure'} Reconnect button refreshes a still-connected managed transport`, async t => {
+    const f = fixture(), controller = new WorkspaceController(f.api, { catalogs: false })
+    t.after(() => controller.dispose())
+    const open = f.api.open, reconnect = f.api.reconnect
+    if (!guestError) f.api.open = async () => { throw new Error('The managed Host restarted') }
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(f.rows[0].phase, 'connected', 'a running SSH tunnel does not imply the remote Harness launch is current')
+    assert.equal(controller.getSnapshot()?.phase, guestError ? 'ready' : 'error')
+    f.api.open = open
+    f.api.reconnect = async id => { await reconnect(id); f.rows[0].localPort = 43200; return structuredClone(f.rows[0]) }
+    const { RemoteWorkspace } = loadWorkspaces(uiGlobals(guestError))
+    const view = RemoteWorkspace({ controller, t: key => key })
+    const button = uiNodes(view).find(node => node.type === 'button' && node.props.children === 'retry')
+    assert.ok(button, 'exercise the actual error-surface callback, not only controller.reconnect directly')
+    const reconnectAction = button.props.onClick as () => void
+    reconnectAction()
+    await nextTick()
+    assert.equal(f.reconnects, 1)
+    assert.equal(controller.getSnapshot()?.phase, 'ready')
+    assert.equal(new URL(controller.getSnapshot()!.url!).port, '43200')
+    const navigation = f.calls.filter(call => call.request.op === 'navigate').at(-1)?.request
+    assert.deepEqual(navigation?.op === 'navigate' && navigation.target, { kind: 'session', id: 'chat' })
+  })
 }
 
 function localPresentationServices() {
@@ -682,16 +795,270 @@ function localPresentationServices() {
   }
 }
 
+async function workspaceNavigationFixture(prepare?: (f: ReturnType<typeof fixture>) => void, configure?: (core: import('@deepseek-ai/dsh-client-ui-slots').SlotCore) => void, options: { cold?: boolean; document?: EventTarget & { hidden: boolean } } = {}) {
+  const { SlotCore } = await import('@deepseek-ai/dsh-client-ui-slots')
+  const { createSnapshotStore } = await import('@deepseek-ai/dsh-client-store')
+  const { createNavigationTransaction, watchNativeNavigation } = await import('../src/client/native-shell-routing.js')
+  const f = fixture()
+  prepare?.(f)
+  const { installWorkspaces } = loadWorkspaces({ ...uiGlobals(), ...(options.document ? { document: options.document } : {}), window: { location: { protocol: 'http:', hostname: '127.0.0.1' }, localStorage: f.storage } })
+  const core = new SlotCore(), effects: (() => void)[] = [], localCalls: string[] = []
+  const removeRoot = core.register({ name: 'root', children: {
+    'main': { kind: 'keyed', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' },
+    'conversation.hero.workspace.directoryFlow': { kind: 'single', scope: 'root' },
+    'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+  } }, (() => null) as never)
+  configure?.(core)
+  const panels = createSnapshotStore({ activePanelId: null as string | null })
+  let navigation = new AbortController(), navigations = 0
+  const layout = {
+    panelInfo: panels,
+    beginNavigation() { navigations++; navigation.abort(); navigation = new AbortController(); return navigation.signal },
+    selectPanel(activePanelId: string | null) {
+      navigation.abort()
+      if (panels.getSnapshot().activePanelId !== activePanelId) panels.set({ activePanelId })
+    },
+  }
+  const beginNavigation = layout.beginNavigation, selectPanel = layout.selectPanel
+  const context = {
+    ...localPresentationServices(), logger: { warn() {} }, workspaces: { list: createSnapshotStore({ phase: 'ready', items: [] }) }, layout,
+    uiSession: { adapter: { current: createSnapshotStore<{ key: string | undefined }>({ key: options.cold ? undefined : 'same-native-blank' }) } },
+    uiWorkspace: {
+      startSession() { localCalls.push('start'); layout.beginNavigation(); layout.selectPanel(null) },
+      openSession() { localCalls.push('open'); layout.selectPanel(null) },
+    },
+    inject(_keys: string[], apply: (ctx: unknown) => void) { apply(context) },
+    effect(factory: () => () => void) { effects.push(factory()) },
+    slots: { register: core.register.bind(core), entries: core.entries.bind(core), entriesOfSlot: core.entriesOfSlot.bind(core), subscribe: core.subscribe.bind(core),
+      inject(_slot: string, install: () => () => void) { effects.push(install()) } },
+  }
+  const settings = new WorkspaceController(f.api, { catalogs: false })
+  const transaction = createNavigationTransaction()
+  const workspace = installWorkspaces(context as never, f.api as never, () => '', () => true, undefined, transaction.run)
+  const stop = watchNativeNavigation(layout, {
+    getSnapshot: () => workspace.hasNavigationIntent() || settings.getSnapshot() !== undefined,
+    subscribe(listener) { const offWorkspace = workspace.subscribe(listener), offSettings = settings.subscribe(listener); return () => { offWorkspace(); offSettings() } },
+    close() { workspace.close(); settings.close() },
+  }, transaction, context.uiSession.adapter.current)
+  return {
+    f, core, settings, workspace, panels, context, layout, localCalls, beginNavigation, selectPanel,
+    get navigations() { return navigations },
+    dispose() { stop(); settings.dispose(); for (const cleanup of effects.reverse()) cleanup(); removeRoot() },
+  }
+}
+
+test('actual workspace panel transitions preserve an armed Settings view and rearm native local navigation', async () => {
+  const shell = await workspaceNavigationFixture()
+  const { f, settings, workspace, panels, context, layout, localCalls, beginNavigation, selectPanel } = shell
+  try {
+    assert.equal(shell.navigations, 0, 'without a remote view or saved restore, the guard stays unarmed')
+    await settings.open(first, { kind: 'settings' })
+    assert.equal(settings.getSnapshot()?.phase, 'ready')
+    await workspace.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(workspace.getSnapshot()?.phase, 'ready', 'a Connections panel transition is not native local navigation')
+    assert.equal(settings.getSnapshot()?.phase, 'ready', 'opening or restoring the workspace preserves the independent Settings view')
+    assert.equal(panels.getSnapshot().activePanelId, 'connections.workspace')
+    assert.equal(f.views.size, 2)
+    workspace.close()
+    assert.equal(settings.getSnapshot()?.phase, 'ready', 'closing only the workspace also uses an internal panel transaction')
+    assert.equal(panels.getSnapshot().activePanelId, null)
+    assert.equal(f.views.size, 1)
+    const samePanel = panels.getSnapshot()
+    context.uiWorkspace.openSession()
+    assert.equal(settings.getSnapshot(), undefined, 'after an internal exit, native commit without a panel/key change is guarded again')
+    assert.equal(panels.getSnapshot(), samePanel)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await settings.open(first, { kind: 'settings' })
+      await workspace.open(first, { kind: 'session', id: 'chat' })
+      assert.equal(f.views.size, 2)
+      context.uiWorkspace.startSession()
+      assert.equal(workspace.getSnapshot(), undefined)
+      assert.equal(settings.getSnapshot(), undefined)
+      assert.equal(panels.getSnapshot().activePanelId, null)
+      assert.equal(f.views.size, 0)
+    }
+    assert.deepEqual(localCalls, ['open', 'start', 'start'])
+    assert.equal(layout.beginNavigation, beginNavigation, 'layout methods are never monkey-patched')
+    assert.equal(layout.selectPanel, selectPanel)
+  } finally { shell.dispose() }
+})
+
+test('native local New Session cancels an actual saved-workspace restore before its slow catalog finishes', async () => {
+  const waiting = deferred<WorkspaceResult>()
+  const shell = await workspaceNavigationFixture(f => {
+    f.saved.set(savedKey, JSON.stringify({ sourceId: first, sessionId: 'chat' }))
+    const respond = f.respond
+    f.respond = (id, request) => id === 'local' && request.op === 'catalog' ? waiting.promise : respond(id, request)
+  })
+  const { workspace, f, panels, context, localCalls } = shell
+  try {
+    await nextTick()
+    assert.equal(workspace.getSnapshot(), undefined, 'restore owns navigation before it has a remote view state')
+    assert.equal(workspace.hasNavigationIntent(), true)
+    context.uiSession.adapter.current.set({ key: 'passively-restored-local-blank' })
+    assert.equal(f.saved.has(savedKey), true, 'passive native selection restoration is not an explicit navigation')
+    context.uiWorkspace.startSession()
+    assert.equal(workspace.hasNavigationIntent(), false, 'native navigation immediately invalidates the pending restore epoch')
+    assert.deepEqual(localCalls, ['start'])
+    waiting.resolve(catalog())
+    await workspace.refresh(); await nextTick()
+    assert.equal(workspace.getSnapshot(), undefined, 'the late catalog cannot take the UI back from explicit native local navigation')
+    assert.equal(panels.getSnapshot().activePanelId, null)
+    assert.equal(context.uiSession.adapter.current.getSnapshot().key, 'passively-restored-local-blank', 'Connections never takes ownership of the native local Session')
+    assert.equal(f.opens, 0)
+    assert.equal(f.channels, 0)
+    assert.equal(f.saved.has(savedKey), false)
+    const navigations = shell.navigations
+    context.uiWorkspace.startSession()
+    assert.equal(shell.navigations, navigations + 1, 'with no remote or pending restore, the guard does not perpetually begin local navigation')
+  } finally { waiting.resolve(catalog()); shell.dispose() }
+})
+
+for (const type of ['pointerdown', 'keydown']) {
+  test(`cold-start ${type} cancels only pending automatic restore and leaves native input untouched`, async () => {
+    const document = Object.assign(new EventTarget(), { hidden: false }), waiting = deferred<WorkspaceResult>()
+    const shell = await workspaceNavigationFixture(f => {
+      f.saved.set(savedKey, JSON.stringify({ sourceId: first, sessionId: 'chat' }))
+      const respond = f.respond
+      f.respond = (id, request) => id === 'local' && request.op === 'catalog' ? waiting.promise : respond(id, request)
+    }, undefined, { cold: true, document })
+    try {
+      await nextTick()
+      assert.equal(shell.workspace.hasNavigationIntent(), true)
+      document.dispatchEvent(new Event(type, { cancelable: true }))
+      assert.equal(shell.workspace.hasNavigationIntent(), true, 'synthetic activity cannot cancel saved restoration')
+      const event = new Event(type, { cancelable: true })
+      Object.defineProperty(event, 'isTrusted', { value: true })
+      assert.equal(document.dispatchEvent(event), true)
+      assert.equal(event.defaultPrevented, false, 'the native event is not swallowed or rerouted')
+      assert.equal(shell.workspace.hasNavigationIntent(), false)
+      assert.equal(shell.f.saved.has(savedKey), false)
+      waiting.resolve(catalog()); await shell.workspace.refresh(); await nextTick()
+      assert.equal(shell.f.opens, 0, 'late startup/catalog completion cannot take the UI back')
+      assert.equal(getEventListeners(document, type).length, 0, 'restoration completion revokes the temporary listener')
+      await shell.workspace.open(first, { kind: 'session', id: 'chat' })
+      document.dispatchEvent(event)
+      assert.equal(shell.workspace.getSnapshot()?.phase, 'ready', 'the old startup observer cannot close a newer explicit view')
+    } finally {
+      waiting.resolve(catalog()); shell.dispose()
+      assert.equal(getEventListeners(document, 'pointerdown').length, 0)
+      assert.equal(getEventListeners(document, 'keydown').length, 0)
+    }
+  })
+}
+
+for (const priority of [-1, -100]) {
+  test(`preexisting hero picker priority ${priority} with child slots is preserved without rolling back workspace routing`, async () => {
+    const foreign = () => null
+    const shell = await workspaceNavigationFixture(undefined, core => {
+      core.register({ name: 'conversation.hero.workspace.directoryFlow', priority,
+        children: { 'fixture.hero.foreign': { kind: 'single', scope: 'root' } },
+      } as never, foreign)
+    })
+    try {
+      assert.equal(shell.core.entriesOfSlot('conversation.hero.workspace.directoryFlow')[0].component, foreign)
+      assert.equal(shell.core.specDynamic('connections.local.heroDirectoryFlow'), undefined)
+      assert.equal(shell.core.declarationEpoch('fixture.hero.foreign'), 1)
+      await shell.workspace.open(first, { kind: 'session', id: 'chat' })
+      assert.equal(shell.workspace.getSnapshot()?.phase, 'ready', 'a hero conflict must not reject the independent workspace fiber')
+    } finally { shell.dispose() }
+  })
+}
+
+test('hero picker shadows only a safe native leaf and retires for later priority or non-leaf providers', async () => {
+  const hero = 'conversation.hero.workspace.directoryFlow', alias = 'connections.local.heroDirectoryFlow'
+  const native = () => null, foreign = () => null
+  let removeNative!: () => void
+  const shell = await workspaceNavigationFixture(undefined, core => {
+    removeNative = core.register({ name: hero }, native)
+  })
+  try {
+    assert.equal(shell.core.entriesOfSlot(hero)[0].options.priority, -1)
+    assert.equal(shell.core.entries(alias)[0].component, native)
+    const wrapper = shell.core.entriesOfSlot(hero)[0].component
+    assert.throws(() => shell.core.register({ name: hero, priority: -1 }, foreign), /priority|duplicate|conflict/i,
+      'the platform rejects later equal-priority registrations; Connections does not promise arbitration')
+    assert.equal(shell.core.entriesOfSlot(hero)[0].component, wrapper)
+    const removeForeign = shell.core.register({ name: hero, priority: -2,
+      children: { 'fixture.hero.foreign': { kind: 'single', scope: 'root' } },
+    } as never, foreign)
+    await nextTick()
+    assert.equal(shell.core.entriesOfSlot(hero)[0].component, foreign)
+    assert.equal(shell.core.specDynamic(alias), undefined)
+    assert.equal(shell.core.declarationEpoch('fixture.hero.foreign'), 1)
+    removeForeign(); await nextTick()
+    assert.equal(shell.core.entries(alias)[0].component, native)
+    removeNative(); await nextTick()
+    assert.equal(shell.core.entries(hero).length, 0, 'without a native picker no shadow wrapper can blank the slot')
+    const nonLeaf = () => null
+    shell.core.register({ name: hero, children: { 'fixture.hero.native': { kind: 'single', scope: 'root' } } } as never, nonLeaf)
+    await nextTick()
+    assert.equal(shell.core.entriesOfSlot(hero)[0].component, nonLeaf)
+    assert.equal(shell.core.specDynamic(alias), undefined)
+    await shell.workspace.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(shell.workspace.getSnapshot()?.phase, 'ready')
+  } finally { shell.dispose() }
+})
+
+for (const failure of ['wrapper', 'alias']) {
+  test(`hero ${failure} registration failure is isolated and leaves no retired subscriber`, async () => {
+    const hero = 'conversation.hero.workspace.directoryFlow', alias = 'connections.local.heroDirectoryFlow'
+    const native = () => null
+    let removeNative!: () => void, attempts = 0
+    const shell = await workspaceNavigationFixture(undefined, core => {
+      removeNative = core.register({ name: hero }, native)
+      const register = core.register.bind(core)
+      core.register = ((options: { name: string; priority?: number }, component: unknown) => {
+        if (options.name === (failure === 'alias' ? alias : hero) && (failure === 'alias' || options.priority === -1)) {
+          attempts++
+          throw new Error('Fixture hero composition failed')
+        }
+        return register(options as never, component as never)
+      }) as typeof core.register
+    })
+    try {
+      await nextTick()
+      assert.equal(attempts, 1)
+      assert.equal(shell.core.entriesOfSlot(hero)[0].component, native)
+      assert.equal(shell.core.specDynamic(alias), undefined)
+      removeNative()
+      const replacement = () => null
+      shell.core.register({ name: hero }, replacement)
+      await nextTick()
+      assert.equal(shell.core.entriesOfSlot(hero)[0].component, replacement)
+      assert.equal(shell.core.specDynamic(alias), undefined)
+      assert.equal(attempts, 1, 'a failed declaration never retries into a collapsed alias')
+      await shell.workspace.open(first, { kind: 'session', id: 'chat' })
+      assert.equal(shell.workspace.getSnapshot()?.phase, 'ready')
+    } finally { shell.dispose() }
+  })
+}
+
 test('production workspace installation opens native desktop views through the validated loopback URL', async () => {
   const { installWorkspaces } = loadWorkspaces({
     dshDesktop: { protocolVersion: 1, browser: { acquire() {}, release() {}, onOpenRequested() {} } },
     window: { location: { protocol: 'dsh-app:', hostname: 'app' } },
   })
+  const { SlotCore } = await import('@deepseek-ai/dsh-client-ui-slots')
+  const { createSnapshotStore } = await import('@deepseek-ai/dsh-client-store')
+  const core = new SlotCore()
+  const removeRoot = core.register({ name: 'root', children: {
+    'main': { kind: 'keyed', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' },
+    'conversation.hero.workspace.directoryFlow': { kind: 'single', scope: 'root' },
+    'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+  } }, (() => null) as never)
   const effects: (() => void)[] = []
+  const panels = createSnapshotStore({ activePanelId: null as string | null })
   const context = {
-    inject() {},
+    inject(_keys: string[], apply: (ctx: unknown) => void) { apply(context) },
     effect: (factory: () => (() => void)) => { effects.push(factory()) },
     ...localPresentationServices(),
+    logger: { warn() {} }, workspaces: {}, uiWorkspace: {},
+    uiSession: { adapter: { current: createSnapshotStore({ key: 'native-blank' }) } },
+    layout: { panelInfo: panels, beginNavigation: () => new AbortController().signal,
+      selectPanel(activePanelId: string | null) { panels.set({ activePanelId }) } },
+    slots: { register: core.register.bind(core), entries: core.entries.bind(core), entriesOfSlot: core.entriesOfSlot.bind(core), subscribe: core.subscribe.bind(core),
+      inject(_slot: string, install: () => () => void) { effects.push(install()) } },
   }
   let resolveCommand: import('../src/client/native-shortcuts.js').NativeCommandResolver | undefined
   const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '', () => true, resolve => {
@@ -710,7 +1077,7 @@ test('production workspace installation opens native desktop views through the v
     assert.ok(resolveCommand, 'source routing must be installed without mounting a React sidebar')
     const resolution = resolveCommand({ id: 'session.archive' } as never, { region: 'page', modal: null, target: null })
     assert.equal(resolution?.status, 'handled', 'retained local action must not receive this command')
-  } finally { for (const dispose of effects.reverse()) dispose() }
+  } finally { for (const dispose of effects.reverse()) dispose(); removeRoot() }
 })
 
 test('native slot delegation preserves the original leaf and follows its registration lifetime', async () => {
@@ -728,6 +1095,10 @@ test('native slot delegation preserves the original leaf and follows its registr
   } }, (() => null) as never)
   const removeHero = core.register({ name: hero, inject }, original)
   core.register({ name: sidebar, inject }, original)
+  const nativeList = () => null
+  core.register({ name: 'sidebar.workspaces' }, nativeList)
+  const earlyForeign = () => null
+  const removeEarlyForeign = core.register({ name: 'sidebar.workspaces', priority: -1 }, earlyForeign)
   const effects: (() => void)[] = []
   const injections: (() => void)[] = []
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'window')
@@ -757,7 +1128,7 @@ test('native slot delegation preserves the original leaf and follows its registr
     effect: (factory: () => (() => void)) => { effects.push(factory()) },
     ...localPresentationServices(),
     slots: {
-      register: core.register.bind(core), entries: core.entries.bind(core), subscribe: core.subscribe.bind(core),
+      register: core.register.bind(core), entries: core.entries.bind(core), entriesOfSlot: core.entriesOfSlot.bind(core), subscribe: core.subscribe.bind(core),
       inject: (_slot: string, install: () => () => void) => { injections.push(install()) },
     },
   }
@@ -765,12 +1136,18 @@ test('native slot delegation preserves the original leaf and follows its registr
     const f = fixture()
     const controller = installWorkspaces(context as never, f.api as never, () => '')
     assert.equal(controller.getCatalogs().selected.sessionId, 'reused-local-draft', 'already restored native sessions are sampled without a change event')
+    assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, earlyForeign, 'a preexisting -1 provider is never replaced')
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.notEqual(controller.getSnapshot()?.phase, 'ready', 'a preexisting list conflict rejects or cancels remote opening')
+    assert.equal(f.views.size, 0, 'an unavailable shadow list cannot retain an allocated remote view')
+    removeEarlyForeign(); await nextTick()
     await controller.navigate('local', { kind: 'session', id: 'chat' })
     await controller.navigate('local', { kind: 'workspace', id: 'project' })
     assert.equal(controller.getCatalogs().selected.sessionId, 'reused-local-draft', 'reusing a native blank session keeps its sidebar selection')
     assert.deepEqual(localCalls, [['session', 'chat'], ['workspace', 'project']])
     assert.equal(core.entries('main').length, 1, 'remote content uses the native main panel')
-    assert.equal(core.entries('sidebar.workspaces').length, 1, 'one combined browser occupies the sidebar')
+    assert.equal(core.entries('sidebar.workspaces').length, 2, 'the combined browser shadows, but never removes, the native list')
+    assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].options.priority, -1)
     const heroAlias = 'connections.local.heroDirectoryFlow'
     const delegated = core.entries(heroAlias)[0]
     assert.equal(delegated.component, original)
@@ -797,24 +1174,28 @@ test('native slot delegation preserves the original leaf and follows its registr
     assert.equal(controller.getSnapshot()?.phase, 'ready', 'geometry notifications must not cancel entering the remote panel')
     assert.equal(panels.getSnapshot().activePanelId, 'connections.workspace')
     const foreign = () => null
-    const removeForeign = core.register({ name: 'sidebar.workspaces', priority: -1 }, foreign)
+    const removeForeign = core.register({ name: 'sidebar.workspaces', priority: -2 }, foreign)
     await nextTick()
-    assert.equal(core.entries('sidebar.workspaces').length, 1)
+    assert.equal(core.entries('sidebar.workspaces').length, 2)
     assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, foreign, 'an existing third-party provider must not be shadowed')
     assert.equal(controller.getSnapshot(), undefined, 'ownership loss returns the active view to the local shell')
     await controller.open(first, { kind: 'session', id: 'chat' })
     assert.equal(controller.getSnapshot()?.error, 'compositionUnavailable')
     removeForeign()
     await nextTick()
-    assert.equal(core.entries('sidebar.workspaces').length, 1)
+    assert.equal(core.entries('sidebar.workspaces').length, 2)
     assert.equal(core.entries('connections.local.sidebarDirectoryFlow')[0].component, original, 'native leaf delegation is restored with our slot')
     await controller.open(first, { kind: 'session', id: 'chat' })
     assert.equal(controller.getSnapshot()?.phase, 'ready')
     await controller.navigate('local', { kind: 'newSession' })
     assert.deepEqual(localCalls.at(-1), ['newSession', undefined])
     assert.equal(controller.getSnapshot(), undefined)
+    await controller.open(first, { kind: 'session', id: 'chat' })
+    assert.equal(controller.getSnapshot()?.phase, 'ready')
     for (const dispose of injections.reverse()) dispose()
     injections.length = 0
+    assert.equal(controller.getSnapshot(), undefined, 'unmounting the shadow list also releases its remote view')
+    assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, nativeList, 'native navigation is immediately available after list disposal')
     assert.equal(core.specDynamic(heroAlias), undefined)
     assert.equal(core.entriesOfSlot(hero)[0].component, replacement)
   } finally {
@@ -826,6 +1207,53 @@ test('native slot delegation preserves the original leaf and follows its registr
   }
 })
 
+
+test('missing list dependencies and shadow factory failure cannot authorize a remote view or remove the native list', async () => {
+  const { SlotCore } = await import('@deepseek-ai/dsh-client-ui-slots')
+  const { createSnapshotStore } = await import('@deepseek-ai/dsh-client-store')
+  const { installWorkspaces } = loadWorkspaces({ window: { location: { protocol: 'http:', hostname: '127.0.0.1' } } })
+  for (const failure of ['dependencies', 'list', 'alias']) {
+    const core = new SlotCore(), effects: (() => void)[] = []
+    const removeRoot = core.register({ name: 'root', children: {
+      'main': { kind: 'keyed', scope: 'root' }, 'sidebar.workspaces': { kind: 'single', scope: 'root' },
+      'conversation.hero.workspace.directoryFlow': { kind: 'single', scope: 'root' },
+      'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
+    } }, (() => null) as never)
+    const native = () => null
+    core.register({ name: 'sidebar.workspaces' }, native)
+    const removePicker = core.register({ name: 'sidebar.workspaces.directoryFlow' }, (() => null) as never)
+    const panels = createSnapshotStore({ activePanelId: null as string | null })
+    const context = {
+      ...localPresentationServices(), logger: { warn() {} }, uiWorkspace: {}, workspaces: {},
+      uiSession: { adapter: { current: createSnapshotStore({ key: 'native-blank' }) } },
+      inject(_keys: string[], apply: (ctx: unknown) => void) { if (failure !== 'dependencies') apply(context) },
+      effect(factory: () => () => void) { effects.push(factory()) },
+      layout: { panelInfo: panels, beginNavigation: () => new AbortController().signal,
+        selectPanel(activePanelId: string | null) { panels.set({ activePanelId }) } },
+      slots: {
+        entries: core.entries.bind(core), entriesOfSlot: core.entriesOfSlot.bind(core), subscribe: core.subscribe.bind(core),
+        register(options: { name: string }, component: unknown) {
+          if (options.name === (failure === 'alias' ? 'connections.local.sidebarDirectoryFlow' : 'sidebar.workspaces')) throw new Error('Fixture failed list factory')
+          return core.register(options as never, component as never)
+        },
+        inject(_slot: string, install: () => () => void) { effects.push(install()) },
+      },
+    }
+    try {
+      const f = fixture(), controller = installWorkspaces(context as never, f.api as never, () => '')
+      await controller.open(first, { kind: 'session', id: 'chat' })
+      assert.equal(controller.getSnapshot()?.error, 'compositionUnavailable')
+      assert.equal(f.views.size, 0)
+      assert.equal(core.entries('sidebar.workspaces').length, 1)
+      assert.equal(core.entriesOfSlot('sidebar.workspaces')[0].component, native)
+      assert.equal(core.specDynamic('connections.local.sidebarDirectoryFlow'), undefined)
+      removePicker()
+      core.register({ name: 'sidebar.workspaces.directoryFlow' }, (() => null) as never)
+      await nextTick()
+      assert.equal(core.specDynamic('connections.local.sidebarDirectoryFlow'), undefined, 'retired aliases leave no subscriber writing to an undeclared child slot')
+    } finally { for (const cleanup of effects.reverse()) cleanup(); removeRoot() }
+  }
+})
 
 test('a catalog error keeps the connected phase and retry refreshes without rebuilding transport', async () => {
   const f = fixture(), controller = new WorkspaceController(f.api)
@@ -919,6 +1347,42 @@ test('view owners survive reload, fork copied tab storage, and separate settings
   assert.equal(viewClientId(f.storage, 'workspace', events), id)
   assert.notEqual(viewClientId(f.storage, 'settings', events), id)
   assert.ok(!JSON.stringify([...f.saved]).includes(token))
+})
+
+test('tab transfer listeners belong to the view owner and cannot mutate storage after unload', () => {
+  const f = fixture(), lifecycle = new EventTarget(), owner = new AbortController()
+  const key = '@xunz/dsh-connections/view-client/workspace'
+  const id = viewClientId(f.storage, 'workspace', lifecycle as Pick<Window, 'addEventListener'>, owner.signal)
+  assert.equal(getEventListeners(lifecycle, 'pagehide').length, 1)
+  assert.equal(getEventListeners(lifecycle, 'pageshow').length, 1)
+  lifecycle.dispatchEvent(new Event('pagehide'))
+  assert.deepEqual(JSON.parse(f.saved.get(key)!), { id, released: true })
+  lifecycle.dispatchEvent(new Event('pageshow'))
+  assert.deepEqual(JSON.parse(f.saved.get(key)!), { id, released: false })
+  owner.abort()
+  assert.equal(getEventListeners(lifecycle, 'pagehide').length, 0)
+  assert.equal(getEventListeners(lifecycle, 'pageshow').length, 0)
+  lifecycle.dispatchEvent(new Event('pagehide'))
+  assert.deepEqual(JSON.parse(f.saved.get(key)!), { id, released: false }, 'unloading a plugin must not leave an old lease owner marked transferable')
+})
+
+test('production workspace installation revokes tab callbacks with its Cordis owner', () => {
+  const f = fixture()
+  const window = Object.assign(new EventTarget(), { sessionStorage: f.storage, localStorage: f.storage, location: { protocol: 'http:', hostname: '127.0.0.1' } })
+  const { installWorkspaces } = loadWorkspaces({ window })
+  const effects: (() => void)[] = []
+  const context = {
+    ...localPresentationServices(),
+    inject() {},
+    effect(factory: () => () => void) { effects.push(factory()) },
+  }
+  const controller = installWorkspaces(context as never, f.api as never, () => '')
+  try {
+    assert.equal(getEventListeners(window, 'pagehide').length, 1)
+    assert.equal(getEventListeners(window, 'pageshow').length, 1)
+  } finally { for (const cleanup of effects.reverse()) cleanup(); controller.dispose() }
+  assert.equal(getEventListeners(window, 'pagehide').length, 0)
+  assert.equal(getEventListeners(window, 'pageshow').length, 0)
 })
 
 test('overlapping navigation serializes lease allocation so an old request cannot replace a newer view', async () => {

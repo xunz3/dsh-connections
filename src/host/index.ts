@@ -6,6 +6,8 @@ import { createStore } from './store.js'
 import { mountRpc } from './rpc.js'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { installWorkspaceEndpoint } from './workspace-endpoint.js'
+import { ConnectionsOperations } from './operations.js'
+import { mountConnectionTools } from './tools.js'
 
 export const name = 'connections'
 export const inject = ['credentials', 'typert']
@@ -21,7 +23,9 @@ export function apply(ctx: Context): void {
     void manager.restore().catch(() => {})
     return () => { lifetime.abort(); return manager.dispose() }
   })
-  mountRpc(ctx, manager, input => input.id === 'local'
+  const operations = new ConnectionsOperations(ctx, manager, input => input.id === 'local'
     ? workspaces.handle(input.request, lifetime.signal)
-    : manager.workspace(input.id, input.request))
+    : manager.workspace(input.id, input.request, input.expectedTransportId))
+  mountRpc(ctx, operations)
+  mountConnectionTools(ctx, operations)
 }

@@ -1,8 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { Modal, useModalLayer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { createSnapshotStore } from './snapshot-store.js'
+import { Modal, useModalLayer } from './ui/index.js'
 import type { ConnectionsApi } from '../shared/types.js'
 import type { WorkspaceApi } from '../shared/workspace-rpc.js'
 import { WorkspaceController, viewClientId, type WorkspaceState } from './workspace-controller.js'
@@ -15,9 +15,11 @@ import { desktopBrowser, DesktopGuest } from './desktop-guest.js'
 import { bindSettingsHostRelay } from './settings-host-relay.js'
 import { localSurface } from './local-surface.js'
 import { scheduleVisiblePoll } from './connection-polling.js'
+import { createSurfaceReadinessDeadline } from './view-surface.js'
 
 export interface HostSettingsHandle {
   getSnapshot(): WorkspaceState | undefined
+  subscribe(listener: () => void): () => void
   close(): void
 }
 
@@ -39,10 +41,13 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
   const bridge = desktopBrowser()
   let storage: Storage | undefined
   try { storage = window.sessionStorage } catch { /* Optional per-tab view lease. */ }
+  let headerReady = false
+  const viewOwner = new AbortController()
+  ctx.effect(() => () => viewOwner.abort())
   const controller = new WorkspaceController(api, {
-    clientId: viewClientId(storage, 'settings'), catalogs: false,
+    clientId: viewClientId(storage, 'settings', window, viewOwner.signal), catalogs: false,
     prepareUrl: url => {
-      if (!canRoute()) throw new Error('sidebar-composition-unavailable')
+      if (!canRoute() || !headerReady || !header.isReady()) throw new Error('sidebar-composition-unavailable')
       return workspaceUrl(url, window.location, bridge !== undefined)
     },
     surface: localSurface(ctx),
@@ -65,11 +70,15 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
     if (id === hosts.getSnapshot().selectedId) return
     const native = settingsShell(ctx)
     if (id === 'local') { controller.close(); native?.actions.openSection('general'); return }
-    if (!native) throw new Error(copy().unavailable)
+    if (!native || !canRoute() || !headerReady || !header.isReady()) throw new Error(copy().unavailable)
     native.actions.close()
     await controller.open(id, { kind: 'settings' })
   }
-  installSettingsHostHeader(ctx, { ...hosts, select: choose, refresh })
+  const header = installSettingsHostHeader(ctx, { ...hosts, select: choose, refresh }, ready => {
+    const lost = headerReady && !ready
+    headerReady = ready
+    if (lost) controller.close()
+  })
 
   const RemoteSettings = () => {
     const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
@@ -100,11 +109,10 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
       if (!url || !channel || !state?.revision || !bridge && !frame.current) return
       setReady(undefined); setFailed(undefined); setExpired(undefined); setSwitchError(undefined)
       let active = true
-      let timer = setTimeout(() => setExpired(url), 30_000)
+      const deadline = createSurfaceReadinessDeadline(() => { if (active) setExpired(url) })
       const onReady = (value: boolean) => {
         if (!active) return
-        clearTimeout(timer); setExpired(undefined); setReady(value ? url : undefined)
-        if (!value) timer = setTimeout(() => setExpired(url), 30_000)
+        deadline.setReady(value); setExpired(undefined); setReady(value ? url : undefined)
       }
       const onSelect = (id: string) => { void choose(id).catch(() => setSwitchError(copy().unavailable)) }
       const dispose = bridge ? bindSettingsHostRelay({
@@ -123,7 +131,7 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
         frame: frame.current!, channel, origin: new URL(url).origin,
         getSnapshot: hosts.getSnapshot, subscribe: hosts.subscribe, onSelect, onReady,
       })
-      return () => { active = false; clearTimeout(timer); dispose() }
+      return () => { active = false; deadline.dispose(); dispose() }
     }, [url, channel, state?.revision])
     if (!state) return null
     return createPortal(<div ref={layer} role={remoteVisible ? 'dialog' : undefined} aria-modal={remoteVisible || undefined} aria-label={`${t.remote}: ${state.name}`} tabIndex={-1}
@@ -140,16 +148,18 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
         <header><span className="dcs-host-header">{t.settings}<SettingsHostMenu snapshot={choices} locale={language} onSelect={choose} onOpen={refresh} /></span>
           <button type="button" aria-label={t.close} onClick={close}>×</button></header>
         <p role={error ? 'alert' : 'status'}>{error ?? t.opening}</p>
-        <footer>{error && (state.phase === 'error' && ['failed', 'timeout', 'disconnected'].includes(state.error ?? 'failed') || failed === url && url !== undefined) && <button onClick={() => {
-          if (state.phase === 'error') void controller.retry(state.id)
-          else { controller.close(); void controller.open(state.id, { kind: 'settings' }) }
-        }}>{t.retry}</button>}
+        <footer>{error && (state.phase === 'error' && ['failed', 'timeout', 'disconnected'].includes(state.error ?? 'failed') || failed === url && url !== undefined) && <button onClick={() => { void controller.reconnect(state.id) }}>{t.retry}</button>}
           <button onClick={() => { void choose('local') }}>{t.back}</button></footer>
       </Modal>}
     </div>, document.body)
   }
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'connections.settings' }, RemoteSettings))
   ctx.effect(() => {
+    // Settings does not start the workspace catalog loop, but its presentation
+    // watchdog still owns timers and RPC. It must share the document lifetime.
+    const visibility = () => controller.setVisible(document.visibilityState !== 'hidden')
+    visibility()
+    document.addEventListener('visibilitychange', visibility)
     const unsubscribe = controller.subscribe(() => {
       const current = hosts.getSnapshot(), selectedId = controller.getSnapshot()?.id ?? 'local'
       if (current.selectedId !== selectedId) hosts.set({ ...current, selectedId })
@@ -161,9 +171,9 @@ export function installHostSettings(ctx: Context, api: ConnectionsApi & Workspac
       }
     })
     void refresh().catch(() => {})
-    return () => { disposed = true; stopPoll(); unsubscribe(); controller.dispose() }
+    return () => { disposed = true; document.removeEventListener('visibilitychange', visibility); stopPoll(); unsubscribe(); controller.dispose() }
   })
-  return { getSnapshot: controller.getSnapshot, close: () => controller.close() }
+  return { getSnapshot: controller.getSnapshot, subscribe: controller.subscribe, close: () => controller.close() }
 }
 
 const styles = `

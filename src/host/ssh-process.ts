@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { join } from 'node:path'
-import type { ProcessResult } from './ssh-common.js'
+import { SshTunnelError, type ProcessResult } from './ssh-common.js'
 
 // The group leader remains alive until the entire SSH group is disposed, so
 // its PGID cannot be recycled between TERM and KILL. The parent owns its stdin
@@ -25,6 +25,7 @@ process.stdin.on('error', stop);
 process.stdin.resume();
 process.on('disconnect', stop);
 const report = result => { if (process.connected) { try { process.send(result, () => {}); } catch {} } };
+report({ ready: true });
 try {
   const ssh = spawn(executable, JSON.parse(argumentsJson), { shell: false, stdio: ['ignore', 'ignore', 'inherit'] });
   ssh.once('error', error => { report({ code: null, error: { code: error.code } }); stop(); });
@@ -32,23 +33,31 @@ try {
 } catch (error) { report({ code: null, error: { code: error.code } }); stop(); }
 `
 
+const supervisorError = () => new SshTunnelError('SSH_FAILED', undefined, 'SUPERVISOR')
+
 /** Own a POSIX OpenSSH master through a parent-liveness pipe and private group. */
 export function spawnSshMaster(executable: string, args: string[], directory: string, graceMs: number, env: NodeJS.ProcessEnv): { child: ChildProcess; result: Promise<ProcessResult> } {
-  const child = spawn(process.execPath, ['--input-type=commonjs', '-e', masterOwner, executable, JSON.stringify(args), directory, String(graceMs)], {
-    shell: false, detached: true, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
-    env: process.versions.electron ? { ...env, ELECTRON_RUN_AS_NODE: '1' } : env,
-  })
+  let child: ChildProcess
+  try {
+    child = spawn(process.execPath, ['--input-type=commonjs', '-e', masterOwner, executable, JSON.stringify(args), directory, String(graceMs)], {
+      shell: false, detached: true, windowsHide: true, stdio: ['pipe', 'ignore', 'pipe', 'ipc'],
+      env: process.versions.electron ? { ...env, ELECTRON_RUN_AS_NODE: '1' } : env,
+    })
+  } catch { throw supervisorError() }
   // The supervisor never consumes data; stdin is only an ownership lease.
   child.stdin?.on('error', () => {})
+  let ready = false
   let reported: ProcessResult | undefined
-  let spawnError: Error | undefined
+  let spawnError = false
   child.on('message', message => {
-    const result = message as { code?: unknown; error?: { code?: string } }
+    if (!message || typeof message !== 'object') return
+    const result = message as { ready?: unknown; code?: unknown; error?: { code?: string } }
+    if (result.ready === true) { ready = true; return }
     if ((typeof result.code !== 'number' && result.code !== null) || reported) return
     reported = { code: result.code, ...(result.error ? { error: Object.assign(new Error('SSH spawn failed.'), { code: result.error.code }) } : {}) }
   })
-  child.on('error', error => { spawnError = error })
-  const result = new Promise<ProcessResult>(resolve => child.once('close', code => resolve(reported ?? { code, ...(spawnError ? { error: spawnError } : {}) })))
+  child.on('error', () => { spawnError = true })
+  const result = new Promise<ProcessResult>(resolve => child.once('close', code => resolve(reported ?? { code, ...(!ready || spawnError ? { error: supervisorError() } : {}) })))
   return { child, result }
 }
 

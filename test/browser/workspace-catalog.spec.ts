@@ -157,14 +157,24 @@ test('narrow sidebar fits long Chinese titles in light and dark modes', async ({
   }
 })
 
-test('native action menu portals outside the scroll pane and returns keyboard focus', async ({ page }) => {
+test('owned action menu escapes scroll clipping through the browser top layer and returns keyboard focus', async ({ page }) => {
   await page.goto('/catalog')
   const trigger = page.getByLabel('Actions: Remote discussion', { exact: true })
   await trigger.focus()
   await trigger.press('Enter')
   const menu = page.getByRole('menu')
   await expect(menu).toBeVisible()
-  expect(await menu.evaluate(node => !node.closest('.dcw-scroll'))).toBe(true)
+  expect(await menu.evaluate(node => node.matches(':popover-open') && node.closest('.dcw-scroll') !== null)).toBe(true)
+  // Keep DOM/event ownership with the row, but verify the actual rendered and
+  // hit-tested menu escapes even complete ancestor clipping. A portal-location
+  // assertion would test the old implementation rather than this behavior.
+  await page.locator('.dcw-scroll').evaluate(node => { (node as HTMLElement).style.clipPath = 'inset(0 100% 0 0)' })
+  const first = page.getByRole('menuitem', { name: 'Rename', exact: true })
+  expect(await first.evaluate(node => {
+    const rect = node.getBoundingClientRect()
+    return node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+  })).toBe(true)
+  await page.locator('.dcw-scroll').evaluate(node => { (node as HTMLElement).style.removeProperty('clip-path') })
   await trigger.press('ArrowDown')
   await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeFocused()
   await page.keyboard.press('Escape')

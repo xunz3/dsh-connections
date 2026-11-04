@@ -1,187 +1,115 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import test from 'node:test'
-import { runInNewContext } from 'node:vm'
-import ts from 'typescript'
-import { createLoginHost, type LoginAction, type LoginHost, type PendingLoginWindow } from '../src/client/login-host.js'
+import type { AccountSnapshot } from '@deepseek-ai/dsh-client-ui-settings-account/client'
+import { AccountLoginPresenter } from '../src/client/settings-native/account-login.js'
+import { createSnapshotStore } from '../src/client/snapshot-store.js'
+import { createLoginHost, type LoginAction } from '../src/client/login-host.js'
 
-const require = createRequire(import.meta.url)
-const nativeId = '@deepseek-ai/dsh-client-ui-settings-account'
-// The same suite can verify another supported, separately installed native release.
-const source = readFileSync(process.env.DSH_QA_ACCOUNT_SOURCE ?? require.resolve(`${nativeId}/client`), 'utf8')
-const { composeNativeAccount } = await import(new URL('../scripts/native-account.mjs', import.meta.url).href) as {
-  composeNativeAccount(source: string, owner: string): string
-}
-const adapted = composeNativeAccount(source, '@xunz03/dsh-connections')
-const tree = ts.createSourceFile('native-account.js', adapted, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
-const declarations = new Map<string, string>()
-function visit(node: ts.Node) {
-  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
-    && ['BrowserLogin', 'copyLink'].includes(node.name.text)) declarations.set(node.name.text, node.initializer.getText(tree))
-  if (ts.isFunctionDeclaration(node) && node.name?.text === 'authorizeUrlWithTheme') declarations.set(node.name.text, node.getText(tree))
-  ts.forEachChild(node, visit)
-}
-visit(tree)
-assert.equal(declarations.size, 3, 'Execute the published native presenter and clipboard action, not a duplicate flow')
-
-interface AccountView { attempt?: { id: string; phase: string; authorizeUrl?: string } }
-interface BrowserLogin {
-  start(request: () => Promise<AccountView>, latest: () => AccountView | undefined): Promise<void>
-  update(view: AccountView): void
-  dispose(): void
-}
-function browser(host?: LoginHost, open = (): PendingLoginWindow | null => { throw new Error('Unexpected guest popup') }) {
-  const Browser = runInNewContext(`(${declarations.get('BrowserLogin')})`, {
-    connectionsLoginHost: host, window: { open },
-  }) as new (destination: (url: string) => string) => BrowserLogin
-  return new Browser(url => `${url}?theme=dark`)
-}
+type View = NonNullable<AccountSnapshot['view']>
+const view = (id: string, phase = 'waiting-browser', authorizeUrl?: string, status = 'signed-out') => ({ status, attempt: { id, phase, ...(authorizeUrl ? { authorizeUrl } : {}) } }) as unknown as View
+const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes }); return { promise, resolve } }
 const tick = () => new Promise<void>(resolve => setImmediate(resolve))
-const deferred = <T>() => {
-  let resolve!: (value: T) => void, reject!: (reason: unknown) => void
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
-  return { promise, resolve, reject }
+function fixture(copy?: Promise<void>) {
+  const source = createSnapshotStore<AccountSnapshot>({ view: undefined, details: undefined, avatar: undefined, failed: false })
+  const actions: LoginAction[] = [], cancellations: string[] = [], requests: ReturnType<typeof deferred<View>>[] = []
+  const host = createLoginHost(async action => { actions.push(action); if (action.kind === 'copyLogin') await copy }, assert.fail)
+  const presenter = new AccountLoginPresenter({ account: source, host, destination: url => { const result = new URL(url); result.searchParams.set('theme', 'dark'); return result.href },
+    start: () => { const request = deferred<View>(); requests.push(request); return request.promise }, cancel: async id => { cancellations.push(id) } })
+  const publish = (value: View) => source.set({ ...source.getSnapshot(), view: value })
+  return { source, actions, cancellations, requests, host, presenter, publish, dispose() { presenter.dispose(); host.dispose() } }
 }
-
-test('native login owns delayed attempt navigation and cancellation through the desktop capability', async () => {
-  const actions: LoginAction[] = [], signals: AbortSignal[] = []
-  const host = createLoginHost(async (action, signal) => { actions.push(action); signals.push(signal) }, assert.fail)
-  const login = browser(host)
-  const response = deferred<AccountView>()
-  const starting = login.start(() => response.promise, () => undefined)
-  await tick()
-  assert.equal(actions.length, 0, 'Preparing a native login must not open about:blank in Desktop')
-  response.resolve({ attempt: { id: 'one', phase: 'initializing' } })
-  await starting
-  login.update({ attempt: { id: 'other-view', phase: 'waiting-browser', authorizeUrl: 'https://login.example.test/unowned' } })
-  login.update({ attempt: { id: 'one', phase: 'waiting-browser', authorizeUrl: 'https://login.example.test/authorize' } })
-  login.update({ attempt: { id: 'one', phase: 'waiting-browser', authorizeUrl: 'https://login.example.test/authorize' } })
-  await tick()
-  assert.deepEqual(actions, [{ kind: 'openLogin', url: 'https://login.example.test/authorize?theme=dark' }])
-  login.dispose()
-  assert.equal(signals[0].aborted, true)
-
-  await login.start(async () => ({ attempt: { id: 'two', phase: 'initializing' } }), () => undefined)
-  login.update({ attempt: { id: 'two', phase: 'cancelled' } })
-  login.update({ attempt: { id: 'two', phase: 'waiting-browser', authorizeUrl: 'https://login.example.test/late' } })
-  await tick()
-  assert.equal(actions.length, 1, 'A late authorization URL cannot revive the cancelled native attempt')
-  host.dispose()
+test('public Account stream identity owns one browser navigation and cancellation without native factory code', async () => {
+  const f = fixture()
+  try {
+    const starting = f.presenter.start(); f.requests[0].resolve(view('one', 'initializing')); await starting
+    f.publish(view('other', 'waiting-browser', 'https://login.example.test/foreign'))
+    f.publish(view('one', 'waiting-browser', 'https://login.example.test/authorize'))
+    f.publish(view('one', 'waiting-browser', 'https://login.example.test/authorize'))
+    await tick()
+    assert.deepEqual(f.actions, [{ kind: 'openLogin', url: 'https://login.example.test/authorize?theme=dark' }])
+    await f.presenter.copy()
+    assert.deepEqual(f.actions[1], { kind: 'copyLogin', url: 'https://login.example.test/authorize?theme=dark' })
+    await f.presenter.close(); assert.deepEqual(f.cancellations, ['one'])
+  } finally { f.dispose() }
 })
-
-test('desktop login reports asynchronous opening failure and cancels work when its view closes', async () => {
-  const failures: Error[] = []
-  const response = deferred<void>()
-  let sent = 0
-  const host = createLoginHost(async () => { sent++; return response.promise }, error => failures.push(error))
-  const abandoned = host.prepare()
-  abandoned.location.replace('https://login.example.test/abandoned')
-  abandoned.close()
-  await tick()
-  assert.equal(sent, 0, 'Close before dispatch revokes the pending external action')
-  const opening = host.prepare()
-  opening.location.replace('https://login.example.test/authorize')
-  await tick()
-  response.reject(new Error('Transport failure with private URL details'))
-  await tick()
-  assert.equal(failures.length, 1)
-  assert.equal(failures[0].message, 'Unable to open the sign-in page in your browser')
-
-  let signal: AbortSignal | undefined
-  const pending = deferred<void>()
-  const closing = createLoginHost(async (_action, value) => { signal = value; await pending.promise }, assert.fail)
-  const popup = closing.prepare()
-  popup.location.replace('https://login.example.test/pending')
-  await tick()
-  closing.dispose()
-  assert.equal(signal?.aborted, true)
-  assert.equal(popup.closed, true)
-  pending.reject(new Error('Cancelled transport'))
-  await tick()
-  assert.throws(() => closing.prepare(), { name: 'AbortError' })
-  host.dispose()
+test('closing before start settles cancels only the exact late attempt and never opens its browser', async () => {
+  const f = fixture()
+  try {
+    const starting = f.presenter.start(); await f.presenter.close()
+    f.requests[0].resolve(view('late', 'waiting-browser', 'https://login.example.test/late')); await starting; await tick()
+    assert.deepEqual(f.cancellations, ['late']); assert.deepEqual(f.actions, []); assert.equal(f.presenter.state.getSnapshot().open, false)
+  } finally { f.dispose() }
 })
-
-test('native Copy feedback waits for desktop acknowledgement, preserves errors, and keeps normal Web APIs', async () => {
-  const response = deferred<void>()
-  const results: string[] = [], actions: LoginAction[] = []
-  const host = createLoginHost(async action => { actions.push(action); await response.promise }, assert.fail)
-  function copy(host?: LoginHost, webCopy?: (value: string) => Promise<void>) {
-    return runInNewContext(`(() => { ${declarations.get('authorizeUrlWithTheme')}; return ${declarations.get('copyLink')}; })()`, {
-      URL, connectionsLoginHost: host, navigator: { clipboard: { writeText: webCopy } }, colorScheme: 'dark',
-      setCopyResult: (result: { messageKey: string }) => results.push(result.messageKey),
-    }) as (url: string) => Promise<void>
-  }
-  const copied = copy(host)('https://login.example.test/authorize?state=opaque')
-  assert.deepEqual(results, [])
-  assert.deepEqual(actions, [{ kind: 'copyLogin', url: 'https://login.example.test/authorize?state=opaque&theme=dark' }])
-  response.resolve()
-  await copied
-  assert.deepEqual(results, ['copiedLink'])
-  await copy(createLoginHost(async () => { throw new Error('Clipboard unavailable') }, assert.fail))('https://login.example.test/authorize')
-  assert.equal(results.at(-1), 'copyFailed')
-
-  const acknowledgement = deferred<void>()
-  let copySignal: AbortSignal | undefined
-  const closing = createLoginHost(async (_action, signal) => { copySignal = signal; await acknowledgement.promise }, assert.fail)
-  const abandoned = copy(closing)('https://login.example.test/closing')
-  closing.dispose()
-  assert.equal(copySignal?.aborted, true)
-  acknowledgement.resolve()
-  await abandoned
-  assert.equal(results.at(-1), 'copyFailed', 'A late acknowledgement cannot report success after the view closes')
-
-  let webUrl: string | undefined
-  await copy(undefined, async value => { webUrl = value })('https://login.example.test/web')
-  assert.equal(webUrl, 'https://login.example.test/web?theme=dark')
-  const webPopup: PendingLoginWindow = { opener: null, closed: false, close() {}, location: { replace(value) { webUrl = value } } }
-  const web = browser(undefined, () => webPopup)
-  await web.start(async () => ({ attempt: { id: 'web', phase: 'waiting-browser', authorizeUrl: 'https://login.example.test/web-native' } }), () => undefined)
-  assert.equal(webUrl, 'https://login.example.test/web-native?theme=dark')
-  web.dispose()
-  host.dispose()
+test('close and reopen defer late cleanup until the new attempt identity is known', async () => {
+  const f = fixture()
+  try {
+    const first = f.presenter.start(); await f.presenter.close(); const second = f.presenter.start()
+    f.requests[0].resolve(view('old', 'waiting-browser', 'https://login.example.test/old')); await first
+    assert.deepEqual(f.cancellations, [], 'do not cancel an identity that the new start may legitimately reuse yet')
+    f.requests[1].resolve(view('new', 'waiting-browser', 'https://login.example.test/new')); await second; await tick()
+    assert.deepEqual(f.cancellations, ['old']); assert.equal(f.presenter.state.getSnapshot().attempt?.id, 'new')
+    assert.deepEqual(f.actions, [{ kind: 'openLogin', url: 'https://login.example.test/new?theme=dark' }])
+  } finally { f.dispose() }
 })
-
-test('login capability rejects non-web or credential-bearing URLs without dispatch', async () => {
-  const host = createLoginHost(async () => assert.fail('Invalid URL reached Desktop'), assert.fail)
-  for (const url of ['file:///tmp/private', 'javascript:alert(1)', 'https://user:password@example.test/', 'not-a-url']) {
-    assert.throws(() => host.prepare().location.replace(url), /Invalid sign-in URL/)
-    await assert.rejects(host.copy(url), /Invalid sign-in URL/)
-  }
-  host.dispose()
+test('a reused attempt returned to a reopened dialog is not cancelled as stale', async () => {
+  const f = fixture()
+  try {
+    const first = f.presenter.start(); await f.presenter.close(); const second = f.presenter.start()
+    f.requests[0].resolve(view('same', 'initializing')); await first
+    f.requests[1].resolve(view('same', 'waiting-browser', 'https://login.example.test/same')); await second
+    assert.deepEqual(f.cancellations, [])
+  } finally { f.dispose() }
 })
-
-test('native account composition rejects changed seams and gives copied styles independent ownership', () => {
-  assert.throws(() => composeNativeAccount('export const apply = () => {}', 'owner'), /bundle format/)
-  for (const unsupported of ['0.2.1-rc.4', '0.2.2-alpha.2']) {
-    const unreviewed = ['0.2.1-rc.2', '0.2.1-rc.3', '0.2.1-rc.5']
-      .reduce((text, version) => text.replaceAll(version, unsupported), source)
-    assert.throws(() => composeNativeAccount(unreviewed, 'owner'), /release contract/)
-  }
-  assert.throws(() => composeNativeAccount(source.replace('window.open("about:blank", "_blank")', 'window.open("", "_blank")'), 'owner'), /capability contract/)
-  assert.throws(() => composeNativeAccount(source.replace('navigator.clipboard.writeText', 'clipboard.writeText'), 'owner'), /capability contract/)
-  assert.throws(() => composeNativeAccount(source.replaceAll('tag.dataset.plugin =', 'tag.dataset.unsupportedOwner ='), 'owner'), /stylesheet ownership format/)
-  const originalCss: string[] = [], adaptedCss: string[] = [], owners: string[] = [], ids: string[] = []
-  function readStyles(text: string, css: string[], owned = false) {
-    const file = ts.createSourceFile('account.js', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
-    function visit(node: ts.Node) {
-      if (ts.isVariableDeclaration(node) && node.initializer && ts.isStringLiteral(node.initializer)) {
-        if (/^css(?:\$\d+)?$/.test(node.name.getText(file))) css.push(node.initializer.text)
-        if (owned && /^tagId(?:\$\d+)?$/.test(node.name.getText(file))) ids.push(node.initializer.text)
-      }
-      if (owned && ts.isBinaryExpression(node) && node.left.getText(file) === 'tag.dataset.plugin'
-        && ts.isStringLiteral(node.right)) owners.push(node.right.text)
-      ts.forEachChild(node, visit)
-    }
-    visit(file)
-  }
-  readStyles(source, originalCss)
-  readStyles(adapted, adaptedCss, true)
-  assert.ok(originalCss.length > 0)
-  assert.deepEqual(adaptedCss, originalCss, 'Native design and generated class names stay unchanged')
-  assert.equal(owners.length, originalCss.length)
-  assert.ok(owners.every(owner => owner === '@xunz03/dsh-connections'))
-  assert.equal(new Set(ids).size, originalCss.length)
-  assert.ok(ids.every(id => id.startsWith('@xunz03/dsh-connections/native-account/')))
+test('a stale copy settlement cannot mark a replacement attempt copied', async () => {
+  const copy = deferred<void>(), f = fixture(copy.promise)
+  try {
+    const first = f.presenter.start(); f.requests[0].resolve(view('old', 'waiting-browser', 'https://login.example.test/old')); await first
+    const copying = f.presenter.copy(); await tick(); await f.presenter.close()
+    const second = f.presenter.start(); f.requests[1].resolve(view('new', 'waiting-browser', 'https://login.example.test/new')); await second
+    copy.resolve(); await copying
+    assert.equal(f.presenter.state.getSnapshot().copied, false)
+    assert.equal(f.presenter.state.getSnapshot().attempt?.id, 'new')
+  } finally { copy.resolve(); f.dispose() }
+})
+test('an old signed-in baseline or unrelated stream cannot close a new owned attempt', async () => {
+  const f = fixture()
+  try {
+    f.publish(view('old', 'succeeded', undefined, 'credential-stored'))
+    const starting = f.presenter.start(); f.requests[0].resolve(view('new', 'waiting-browser', 'https://login.example.test/new')); await starting
+    assert.equal(f.presenter.state.getSnapshot().open, true)
+    f.publish(view('foreign', 'succeeded', undefined, 'credential-stored'))
+    assert.equal(f.presenter.state.getSnapshot().open, true)
+    f.publish(view('new', 'succeeded', undefined, 'credential-stored'))
+    assert.equal(f.presenter.state.getSnapshot().open, false)
+  } finally { f.dispose() }
+})
+test('synchronous presentation failure retains a copyable attempt and does not escape the native stream', async () => {
+  const f = fixture(); let copied = ''
+  const presenter = new AccountLoginPresenter({ account: f.source, start: async () => view('owned', 'initializing'), cancel: async () => {}, destination: url => url,
+    host: { dispose() {}, async copy(url) { copied = url }, prepare: () => ({ opener: null, closed: false, close() {}, location: { replace() { throw new Error('private browser detail') } } }) } })
+  try {
+    await presenter.start()
+    assert.doesNotThrow(() => f.publish(view('owned', 'waiting-browser', 'https://login.example.test/copyable')))
+    assert.equal(presenter.state.getSnapshot().failed, true)
+    assert.equal(presenter.state.getSnapshot().attempt?.authorizeUrl, 'https://login.example.test/copyable')
+    await presenter.copy(); assert.equal(copied, 'https://login.example.test/copyable')
+  } finally { presenter.dispose(); f.dispose() }
+})
+test('copy failure is visible without carrying the native clipboard error into public state', async () => {
+  const f = fixture()
+  const presenter = new AccountLoginPresenter({ account: f.source, start: async () => view('owned', 'waiting-browser', 'https://login.example.test/copyable'), cancel: async () => {}, destination: url => url,
+    host: { dispose() {}, async copy() { throw new Error('private clipboard credential detail') }, prepare: () => ({ opener: null, closed: false, close() {}, location: { replace() {} } }) } })
+  try {
+    await presenter.start(); await presenter.copy()
+    assert.equal(presenter.state.getSnapshot().copyFailed, true)
+    assert.equal(presenter.state.getSnapshot().failed, false, 'a clipboard failure is not an authentication failure')
+    assert.ok(!JSON.stringify(presenter.state.getSnapshot()).includes('private clipboard'))
+  } finally { presenter.dispose(); f.dispose() }
+})
+test('dispose cancels a late owned response and synchronous browser preparation is contained', async () => {
+  const f = fixture()
+  const starting = f.presenter.start(); f.presenter.dispose(); f.requests[0].resolve(view('late', 'waiting-browser', 'https://login.example.test/late')); await starting
+  assert.deepEqual(f.actions, []); assert.deepEqual(f.cancellations, ['late']); f.host.dispose()
+  const other = fixture(); other.host.dispose(); await other.presenter.start()
+  assert.equal(other.presenter.state.getSnapshot().failed, true); assert.equal(other.requests.length, 0); other.dispose()
 })

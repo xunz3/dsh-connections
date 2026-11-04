@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, type CSSProperties, type PointerEvent } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from './snapshot-store.js'
 import type { ILayout, MainPanelId, PanelInfo } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
 import type { HostObservable, InjectFace, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -29,7 +29,7 @@ export class EmbeddedLayoutController implements ILayout {
   private navigation = new AbortController()
   private disposed = false
 
-  constructor(private readonly hasPanel: (id: MainPanelId) => boolean, private readonly revealNavigation: () => void = () => {}, viewport = 0) {
+  constructor(private readonly hasPanel: (id: MainPanelId) => boolean, private readonly revealNavigation?: () => void, viewport = 0) {
     this.state = createSnapshotStore<EmbeddedLayoutState>({
       panelInfo: { activePanelId: null },
       viewport: embeddedColumns(viewport).viewport,
@@ -69,7 +69,11 @@ export class EmbeddedLayoutController implements ILayout {
     return this.navigation.signal
   }
 
-  toggleSidebar(): void { if (!this.disposed) this.revealNavigation() }
+  toggleSidebar(): void {
+    if (this.disposed) return
+    if (!this.revealNavigation) throw Object.assign(new Error('connections: workspace navigation is controlled by the local application'), { code: 'NAVIGATION_UNAVAILABLE' })
+    this.revealNavigation()
+  }
   openRightbar(track: boolean, fullscreen: boolean): void { this.present(true, track, fullscreen) }
   closeRightbar(): void { this.present(false, false, false) }
 
@@ -217,6 +221,7 @@ function EmbeddedFrame({ useEmbeddedLayout, renderSlot, measure, resize, resizeL
       <div className="dc-embedded-right" data-rightbar-col>{renderSlot('rightbar', { width: columns.rightbar, viewportWidth: columns.viewport, canShow: columns.canShow })}</div>
       <div className="dc-embedded-bottom" data-shell-bottom>{renderSlot('shell.bottom', {})}</div>
     </>}
+    <div className="dc-embedded-leading" data-shell-leading>{renderSlot('shell.leading', {})}</div>
     <div className="dc-embedded-overlays" data-shell-overlay>{renderSlot('shell.overlay', {})}</div>
     {resizeVisible && <div className="dc-embedded-resize" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={resizeLabel}
       aria-valuemin={300} aria-valuemax={Math.floor(Math.min(columns.viewport * 0.7, columns.viewport - 400))} aria-valuenow={Math.round(columns.rightbar)}
@@ -241,7 +246,8 @@ function EmbeddedFrame({ useEmbeddedLayout, renderSlot, measure, resize, resizeL
 }
 
 export interface EmbeddedLayoutOptions {
-  /** Reveal the owning application's workspace navigation through its narrow bridge. */
+  /** Without an authenticated owner callback navigation is explicitly unsupported;
+   * this adapter deliberately registers no local sidebar keyboard/menu command. */
   onToggleSidebar?: () => void
   resizeLabel?: string
   document?: Document
@@ -287,6 +293,7 @@ const embeddedStyles = `
 .dc-embedded-main{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 .dc-embedded-right{position:relative;min-width:0;min-height:0;overflow:visible}
 .dc-embedded-bottom{grid-column:1/-1;min-width:0;min-height:0;overflow:auto}
+.dc-embedded-leading{position:absolute;inset-block-start:0;inset-inline-start:0;z-index:40;pointer-events:none}.dc-embedded-leading>*{pointer-events:auto}
 .dc-embedded-overlays{position:absolute;inset:0;z-index:50;pointer-events:none}.dc-embedded-overlays>*{pointer-events:auto}
 .dc-embedded-settings-launcher{position:absolute;inset:0;display:grid;place-items:center}
 .dc-embedded-settings-launcher button{padding:8px 16px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:inherit;font:inherit;cursor:pointer}
